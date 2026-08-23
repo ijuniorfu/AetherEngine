@@ -12,6 +12,47 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.36.0] - 2026-08-23
+
+### Fixed
+
+- **The live stall ladder replaced the consumer's item without ever asking the producer (AE#405).**
+  Stage 2 of the `#65` ladder gated on consumer fetches and on the position budget, and both are
+  silent in the two cases it has to tell apart. On a field trace from a one-slot Xtream host it
+  reloaded an unchanged local playlist while the source was still re-resolving: AVPlayer rejoined a
+  frozen playlist at edge-minus-holdback, five seconds behind the frozen position, replayed the tail
+  it had already shown and parked again, and the retune the host needed waited out two more grace
+  windows (~12 s). The count of segments the producer has finalized is the one fact that separates
+  "the consumer died under a healthy producer", where a fresh item is exactly right, from "the
+  producer is starved", where it replays the tail; it was available and unconsulted. Stage 2 now
+  skips straight to `liveSourceReset` when nothing has been finalized since the stall. A session
+  with no local producer at all (a remote HLS route AVPlayer fetches itself) reports nil rather than
+  zero and keeps its old behaviour, since the absence of a producer to ask is not an answer from one.
+- **A 407 from a pinned redirect target was an untyped refusal (AE#405).** It fell through the
+  expiry, rate-limit and hard-error classifiers alike: no pin drop from the status, charged against
+  the full mid-stream reconnect cap, and the pin dropped only later by the unproductive-streak rule,
+  so the attempt right after the refusal went back to the address that had just refused. On a
+  redirect chain 407 cannot mean "authenticate to your proxy", because the request went out direct
+  (which is why CFNetwork logs it as an unexpected proxy response) and a configured proxy is answered
+  by URLSession's own auth challenge long before a status reaches the reader. It means the lease is
+  gone or an interception answered in its place, and one re-resolve through the source is the move
+  that works. 402 and 451 join it as the same shape. Rate-limit statuses stay out: there the origin
+  is metering us and the pin is fine.
+- **A source that renumbered its clock from zero was absorbed as a programme boundary (AE#405).**
+  When a live origin restarts its stream from its ring buffer with raw dts back at zero, FFmpeg's
+  33-bit wrap correction turns that into a dts of exactly 2^33, so it arrives as a large FORWARD
+  jump. `isSourceReplay` opened with `guard jumpTicks < 0` and never looked at it: the restart was
+  absorbed behind an `EXT-X-DISCONTINUITY` and the session re-served eleven seconds it had already
+  played (segments byte-identical in size to the ones five earlier). The anchor is the subtle part.
+  A rewind lands near the first dts this session saw, because the server restarted the programme; an
+  axis reset lands near zero no matter where the session joined the ring, and in the trace those are
+  1121 s apart. The classifier now recognizes both shapes and ends the pump for a host retune on
+  either. The axis reset requires no recent reconnect (the origin renumbers on the connection it
+  already holds; measured `gen=1->1`, `reconnects=0`) and is live-only, since a sequential origin's
+  archive chunks legitimately open their own axis at zero.
+
+All three reported by tschuegy from a Syravo device trace on tvOS 26.6.
+
 ## [6.35.0] - 2026-08-23
 
 ### Added

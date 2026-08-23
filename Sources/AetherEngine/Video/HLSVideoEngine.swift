@@ -2254,6 +2254,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return provider?.mediaFetchCount ?? 0
     }
 
+    /// #405: segments the producer has finalized this session, the counterpart to
+    /// `mediaFetchCountSnapshot`. One counts the consumer asking, this one counts the producer
+    /// delivering, and the stall ladder needs both to tell a dead consumer from a starved origin.
+    /// nil when there is no local producer at all (a remote HLS session AVPlayer fetches directly),
+    /// which is a different situation from a producer that stopped: callers must not read the
+    /// absence as zero progress. Monotonic: the live window slides by moving `firstVisible` and
+    /// evicting cache, never by dropping entries from the segment list.
+    var liveSegmentCountSnapshot: Int? {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        return provider.map { $0.liveContinuationPoint().nextIndex }
+    }
+
     /// #178: called by the engine when a NEW user seek is dispatched. A recovery re-anchor still
     /// holding the coalescer's authoritative slot belongs to the superseded seek; left in place it
     /// would drop the new seek's segment-driven restart and land the producer on the stale

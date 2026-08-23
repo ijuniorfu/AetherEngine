@@ -1672,6 +1672,24 @@ public final class AetherEngine: ObservableObject {
         isLive && clockNow <= clockAtReload + progressEpsilon && isWaitingToPlay
     }
 
+    /// #405: whether stage 2 has anything to fix. Replacing the consumer's item helps a consumer
+    /// that died under a HEALTHY producer; against a producer starved by its origin it refills the
+    /// same frozen tail, parks again, and the retune the host actually needs waits out two more
+    /// grace windows (field trace: 12 s and eleven replayed seconds on a one-slot Xtream host).
+    /// Consumer fetches cannot tell the two apart, they are zero in both. The finalized-segment
+    /// count can: it is the producer answering.
+    ///
+    /// `nil` on either side means there is no local producer to ask (a remote HLS session AVPlayer
+    /// fetches itself), and absence is not starvation: stage 2 keeps its old behaviour there.
+    nonisolated static func liveProducerIsStarved(
+        isLive: Bool,
+        segmentsAtStall: Int?,
+        segmentsNow: Int?
+    ) -> Bool {
+        guard isLive, let atStall = segmentsAtStall, let now = segmentsNow else { return false }
+        return now <= atStall
+    }
+
     /// #93 round 3: item death (failedToPlayToEndTime after -12889 strikes) escalation.
     /// Deferred-confirm task (a transient that resumes within the window self-clears) plus the
     /// bounded reload budget. Cancelled on load reset; superseded by newer deaths.

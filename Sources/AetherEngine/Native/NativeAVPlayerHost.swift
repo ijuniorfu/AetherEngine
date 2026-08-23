@@ -83,6 +83,10 @@ final class NativeAVPlayerHost {
     /// AetherEngine#168: the same-read nominal frame rate, so the engine's remote-HLS criteria also carry
     /// Match Frame Rate (the reporter's 4K item is 50 fps). nil when no video track / rate resolves.
     @Published private(set) var detectedVideoFrameRate: Double?
+    /// Codec name read back from the item's video sample type on the probe-free bypass, in the libavcodec
+    /// spelling the engine publishes elsewhere. Set beside `detectedVideoFormat`, which the engine's sink
+    /// reads it with; nil while no video track resolves.
+    @Published private(set) var detectedVideoCodecName: String?
 
     /// AetherEngine#168 follow-up: fires once when the armed carriage watchdog concludes the master
     /// advertises a video rendition but AVPlayer never built a video track past the grace window
@@ -1211,6 +1215,7 @@ final class NativeAVPlayerHost {
         // #168: a reused host must not report the prior session's dynamic range before the new item resolves.
         detectedVideoFormat = nil
         detectedVideoFrameRate = nil
+        detectedVideoCodecName = nil
         // #168 follow-up: the carriage verdict belongs to the outgoing item.
         carriageWatchdogTask?.cancel()
         carriageWatchdogTask = nil
@@ -1556,8 +1561,9 @@ final class NativeAVPlayerHost {
             let ext = CMFormatDescriptionGetExtensions(cm) as? [String: Any] ?? [:]
             let transfer = ext[kCMFormatDescriptionExtension_TransferFunction as String] as? String
             let fmt = RemoteHLSFormatDetection.videoFormat(transferFunction: transfer, videoSubType: subType)
-            // Rate before format: the engine's format sink reads detectedVideoFrameRate when it fires.
+            // Rate and codec before format: the engine's format sink reads both when it fires.
             if let rate, rate > 0 { detectedVideoFrameRate = rate }
+            detectedVideoCodecName = RemoteHLSFormatDetection.codecName(videoSubType: subType)
             if detectedVideoFormat != fmt {
                 detectedVideoFormat = fmt
                 EngineLog.emit(

@@ -328,6 +328,9 @@ extension AetherEngine {
                 self.sourceVideoFormat = fmt
                 self.videoFormat = fmt
                 if let rate = self.nativeHost?.detectedVideoFrameRate { self.sourceVideoFrameRate = rate }
+                // Same reason as the rate: this bypass runs no libav probe, so without the read-back the
+                // codec row on a remote-HLS session stays empty for a source that is plainly playing.
+                if let codec = self.nativeHost?.detectedVideoCodecName { self.sourceVideoCodecName = codec }
                 self.applyRemoteHLSDisplayCriteria(format: fmt, options: options)
             }
             .store(in: &nativeCancellables)

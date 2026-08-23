@@ -12,6 +12,27 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.37.0] - 2026-08-23
+
+### Fixed
+
+- **The live no-cut stall watchdog was inline in the read loop it watches (AE#406).** It ticked
+  between `av_read_frame` calls, and `av_read_frame` does not return before a whole packet is
+  assembled; the format context carries no `interrupt_callback`, so that call has no upper bound at
+  all. An origin too slow to complete one packet inside the watchdog window therefore did not make
+  the watchdog late, it made it unable to run, which is structurally the defect #309 fixed on the
+  reader side (where the precondition that had to go was "a consumer must be blocked on it").
+  Measured against a loopback origin that delivers 100 bytes once a second for 45 s on the
+  connection it already holds: 6.36.0 classified the stall at 46 s and emitted the line 0 ms after a
+  46642 ms read returned, so the 11 s of overrun on its 35 s window were exactly the time the read
+  was blocked. The window state now lives in `NoCutStallWatchdog`, which the read thread reports
+  into and a 1 s timer evaluates, and the verdict aborts the parked read through the same
+  `markClosed()` the reopen path already uses on a wedged read. Same origin, same run: the stall is
+  classified at 35 s while the read is still parked, and the host retune arrives 11.4 s earlier. The
+  classifier, the thresholds and the log vocabulary are unchanged, and a deliberately parked pump
+  (the live headroom park) is not judged, so a consumer that stopped polling is never reported as a
+  source that stopped delivering. Live sessions only. Reported by @tschuegy.
+
 ## [6.36.0] - 2026-08-23
 
 ### Fixed

@@ -12,6 +12,30 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.35.0] - 2026-08-23
+
+### Added
+
+- **The session publishes which codec and container it opened.** A host could ask what is decoding
+  (`activeVideoDecoder`) but not what was opened: the codec name existed at load and in `SourceProbe`,
+  and the live session published neither, so a stats panel had to fall back on the host's own catalogue
+  metadata. That metadata describes the file a library holds, which under a remux or a transcode is not
+  what arrived, and a host whose item payload happens to be slim has nothing to show at all.
+  `sourceVideoCodecName` carries the libavcodec spelling ("hevc", "h264", "av1"); the probe path takes it
+  from `avcodec_get_name` and the probe-free remote-HLS bypass maps the item's video sample type back to
+  the same word, so one field means one thing on every route. `sourceContainerFormat` carries what
+  libavformat opened ("matroska,webm", "mpegts"), nil on the bypass where there is no libav context to
+  ask. Verified against h264/mp4, h264/mkv, hevc/mp4 and h264/mpegts.
+- **`aetherctl play` prints a `SOURCE` line** with those fields plus dimensions, frame rate, bitrate and
+  dynamic range, read from the session rather than from a separate probe, because the session is what a
+  host panel binds to and the two can disagree.
+
+### Changed
+
+- **`sourceVideoWidth` / `sourceVideoHeight` are `@Published`.** They were readable but silent, so a
+  SwiftUI panel bound to them never refreshed, including across the audio-switch reload that can change
+  them.
+
 ## [6.34.1] - 2026-08-22
 
 ### Added

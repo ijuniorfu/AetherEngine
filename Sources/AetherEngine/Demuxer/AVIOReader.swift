@@ -218,8 +218,27 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return " from \(host), a target the source resolved freshly"
     }
 
-    private static func isResolvedExpiryStatus(_ status: Int) -> Bool {
-        return status == 401 || status == 403 || status == 404 || status == 410
+    /// Statuses that say the RESOLVED address is the problem, so the productive move is one
+    /// re-resolve through the source URL for a fresh redirect rather than another attempt against
+    /// the same pinned target.
+    ///
+    /// #405: 407 belongs here and used to fall through all three classifiers (no pin drop from the
+    /// status, mid-stream cap of 12, the pin dropped only later by the unproductive-streak rule).
+    /// On a redirect chain a 407 from the pinned media host cannot mean "authenticate to your
+    /// proxy": the request went out direct, which is exactly why CFNetwork logs it as *Received
+    /// unexpected proxy response*, and a genuinely configured proxy is answered by URLSession's own
+    /// auth challenge long before a status reaches us. What it means is that the pinned lease is
+    /// gone or an interception answered in its place, and re-resolving is the only move that can
+    /// work (field trace: two wasted attempts, then the reader re-resolved and connected).
+    ///
+    /// 402 and 451 are the same shape from panels that answer an expired subscription or a
+    /// geo-refusal per edge node: the source still mints working targets, this one stopped being
+    /// one. Rate-limit statuses stay OUT (429/503/509 mean the origin is metering us and the pin is
+    /// fine, #71/#307); so does every 5xx, which `isResolvedHardServerError` handles with its own
+    /// reason string.
+    static func isResolvedExpiryStatus(_ status: Int) -> Bool {
+        return status == 401 || status == 402 || status == 403 || status == 404
+            || status == 407 || status == 410 || status == 451
     }
 
     /// Rate-limit-shaped statuses: the origin is metering us, not failing. 429/503 carry

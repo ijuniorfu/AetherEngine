@@ -502,6 +502,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Wall-clock of last finalized live segment; drives no-cut stall watchdog.
     private var lastLiveSegmentFinalizeAt: Date?
+    /// AE#406: the no-cut window, and the timer that judges it. Live pumps only. Pump-thread-owned
+    /// properties; the watchdog object itself is the only thing the timer touches.
+    private var noCutWatchdog: NoCutStallWatchdog?
+    private var noCutWatchdogTimer: DispatchSourceTimer?
+    private let noCutWatchdogQueue = DispatchQueue(label: "aether.nocut.watchdog", qos: .userInitiated)
+    /// Tick of the lifted watchdog: fine against both windows (10 s wedge, 35 s starvation) and
+    /// cheap, one lock and a subtraction unless it has something to say. A private queue rather
+    /// than the global pool, for the same reason `SlowServeSignal` uses one: a starving source is
+    /// exactly when the pool is busiest, and a late watchdog is the defect being fixed.
+    private static let noCutWatchdogTickSeconds: TimeInterval = 1
     /// Cutter-wedge timeout: pump reads at full rate but finalizes no segment (hostile SSAI ad pod).
     private static let liveSegmentStallTimeoutSeconds: TimeInterval = 10
     /// Source-starvation timeout: feed trickles (slow/flaky CDN). Ingest retries ~31 s then terminates;
@@ -509,7 +519,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private static let liveSourceStarvationTimeoutSeconds: TimeInterval = 35
     /// Read rate (pkt/s) threshold classifying a no-cut stall as cutter-wedge vs. source-starvation.
     /// Healthy 1080p25: ~60 pkt/s. Rate-based to avoid misreading a trickle that accumulated a high count (Alex Berlin: 137 pkts/13 s = 10.5 pkt/s).
-    private static let liveWedgeProgressRateThreshold: Double = 40
+    static let liveWedgeProgressRateThreshold: Double = 40
     /// #177: minimum video PTS advance (seconds) within a no-cut window for the stall to be
     /// reclassified as slow-but-healthy delivery (hold + re-arm) instead of a cutter wedge (retune).
     private static let liveSlowDeliveryPtsAdvanceSeconds: Double = 2
@@ -1133,6 +1143,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return liveCurrentSegmentIndex
     }
 
+    /// One stamp for both readers of "a live segment was finalized just now": the field the pump
+    /// reads on its way past, and the watchdog window a timer evaluates (AE#406).
+    private func stampLiveSegmentFinalize() {
+        let now = Date()
+        lastLiveSegmentFinalizeAt = now
+        noCutWatchdog?.noteFinalize(at: now)
+    }
+
     private var sourceVideoTbSeconds: Double {
         guard sourceVideoTimeBase.num > 0, sourceVideoTimeBase.den > 0 else { return 0 }
         return Double(sourceVideoTimeBase.num) / Double(sourceVideoTimeBase.den)
@@ -1366,6 +1384,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // #240: a parked pump is not using the link.
         sideReaderLinkGate?.videoFetchEnded()
         defer { sideReaderLinkGate?.videoFetchBegan() }
+        // AE#406: nor is it reading. Inline, the watchdog could not run here at all; on a timer it
+        // must not count a park as starvation, or a consumer that stopped polling would be reported
+        // as a source that stopped delivering. The window re-anchors when the park releases.
+        noCutWatchdog?.setReading(false, at: Date())
+        defer { noCutWatchdog?.setReading(true, at: Date()) }
         var parked = 0
         while !checkShouldStop() {
             if cache.count < Self.liveResidentSegmentCap {
@@ -1955,7 +1978,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let discontinuous = liveSegmentDiscontinuousByIndex[index] ?? false
         liveSegmentStartByIndex.removeValue(forKey: index)
         liveSegmentDiscontinuousByIndex.removeValue(forKey: index)
-        lastLiveSegmentFinalizeAt = Date()
+        stampLiveSegmentFinalize()
         EngineLog.emit(
             "[HLSSegmentProducer] live seg-\(index) finalized: start=\(String(format: "%.3f", startSeconds))s "
             + "dur=\(String(format: "%.3f", duration))s"
@@ -2206,6 +2229,68 @@ final class HLSSegmentProducer: @unchecked Sendable {
         trackedPacketFree(&mergeSideLookahead)
     }
 
+    // MARK: - No-cut watchdog (AE#406)
+
+    /// Arm the watchdog and the timer that reads it. Live only: a sequential source finalizes on
+    /// its own plan and has no live edge to fall behind.
+    private func startNoCutWatchdog() {
+        let watchdog = NoCutStallWatchdog(videoTimeBaseSeconds: sourceVideoTbSeconds)
+        if let already = lastLiveSegmentFinalizeAt { watchdog.noteFinalize(at: already) }
+        noCutWatchdog = watchdog
+        let timer = DispatchSource.makeTimerSource(queue: noCutWatchdogQueue)
+        timer.schedule(deadline: .now() + Self.noCutWatchdogTickSeconds,
+                       repeating: Self.noCutWatchdogTickSeconds,
+                       leeway: .milliseconds(250))
+        timer.setEventHandler { [weak self] in self?.tickNoCutWatchdog(watchdog) }
+        noCutWatchdogTimer = timer
+        timer.resume()
+    }
+
+    private func stopNoCutWatchdog() {
+        noCutWatchdogTimer?.cancel()
+        noCutWatchdogTimer = nil
+    }
+
+    /// One tick, off the read thread. The hold logs and re-arms; the exit logs, latches, and aborts
+    /// the read the pump is parked in, because a cancel flag alone cannot reach a thread inside
+    /// `av_read_frame` (which is what `HLSVideoEngine`'s own teardown already pairs `stop()` with).
+    /// The abort costs nothing this exit was going to keep: `.segmentStall` delegates to a host
+    /// retune, which tears the demuxer down.
+    private func tickNoCutWatchdog(_ watchdog: NoCutStallWatchdog) {
+        guard let decision = watchdog.evaluate(now: Date()) else { return }
+        switch decision {
+        case .holdForSlowDelivery(let w):
+            EngineLog.emit(
+                "[HLSSegmentProducer] slow live delivery hold "
+                + "\(w.consecutiveHolds)/\(Self.liveSlowDeliveryMaxHolds): video PTS "
+                + "+\(String(format: "%.1f", w.videoPtsAdvanceSeconds))s in \(Int(w.stalledFor))s "
+                + "(rate=\(String(format: "%.1f", w.readRate))pkt/s); not a wedge, "
+                + "re-arming watchdog instead of retuning",
+                category: .session
+            )
+        case .exitForRetune(let w):
+            EngineLog.emit(
+                "[HLSSegmentProducer] no-cut stall: no segment finalized for "
+                + "\(Int(w.stalledFor))s (packetsRead=\(w.packetsRead), "
+                + "sinceFinalize=\(w.progress), "
+                + "rate=\(String(format: "%.1f", w.readRate))pkt/s, "
+                + "\(w.isWedge ? "cutter wedge" : "source starvation")); "
+                + "window video=\(w.videoPackets) key=\(w.videoKeyframes) "
+                + "audio=\(w.audioPackets) foreign=\(w.foreignPackets)"
+                + (w.lastForeignStreamIndex >= 0
+                    ? " lastForeignIdx=\(w.lastForeignStreamIndex)" : "")
+                + (w.videoPtsAdvanceSeconds >= 0
+                    ? " videoPtsAdvance=\(String(format: "%.1f", w.videoPtsAdvanceSeconds))s" : "")
+                + (w.consecutiveHolds > 0
+                    ? " holdsExhausted=\(w.consecutiveHolds)" : "")
+                + "; aborting the source read and exiting for host retune",
+                category: .session
+            )
+            demuxer.markClosed()
+            sideAudioDemuxer?.markClosed()
+        }
+    }
+
     // MARK: - Pump
 
     private func runPumpLoop() {
@@ -2231,18 +2316,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         var packetsRead = 0
         var lastError: Int32 = 0
         var exitReason: PumpExitReason = .eof
-        var packetsReadAtLastFinalize = 0
-        var lastFinalizeSeen: Date? = lastLiveSegmentFinalizeAt
-        var videoPktsSinceFinalize = 0
-        var audioPktsSinceFinalize = 0
-        var videoKeyframesSinceFinalize = 0
-        var foreignPktsSinceFinalize = 0
-        var lastForeignStreamIndexSinceFinalize: Int32 = -1
-        var firstVideoPtsSinceFinalize: Int64 = Int64.min
-        var lastVideoPtsSinceFinalize: Int64 = Int64.min
-        // #177 slow-delivery holds: a hold re-arms the watchdog window without a finalize.
-        var noCutHoldRearmedAt: Date? = nil
-        var consecutiveNoCutHolds = 0
+        // AE#406: the no-cut window used to live in this loop's locals, which is what tied the
+        // decision to the read the loop is parked in. It lives in the watchdog now, and a timer
+        // reads it; this loop only reports what it read and observes the verdict.
+        if isLive { startNoCutWatchdog() }
+        defer { stopNoCutWatchdog() }
         var vodLedgerLastRoutedSeg = Int.min  // #65 ledger: last VOD segment index logged at the routing site
 
         do {
@@ -2255,77 +2333,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     break readLoop
                 }
 
-                if lastLiveSegmentFinalizeAt != lastFinalizeSeen {
-                    lastFinalizeSeen = lastLiveSegmentFinalizeAt
-                    packetsReadAtLastFinalize = packetsRead
-                    videoPktsSinceFinalize = 0
-                    audioPktsSinceFinalize = 0
-                    videoKeyframesSinceFinalize = 0
-                    foreignPktsSinceFinalize = 0
-                    lastForeignStreamIndexSinceFinalize = -1
-                    firstVideoPtsSinceFinalize = Int64.min
-                    lastVideoPtsSinceFinalize = Int64.min
-                    noCutHoldRearmedAt = nil
-                    consecutiveNoCutHolds = 0
-                }
-                if isLive, let lastFinalize = lastLiveSegmentFinalizeAt {
-                    // #177: a hold re-arms the window; the watchdog measures from the later anchor.
-                    let stalledFor = Date().timeIntervalSince(noCutHoldRearmedAt ?? lastFinalize)
-                    let progress = packetsRead - packetsReadAtLastFinalize
-                    let readRate = stalledFor > 0 ? Double(progress) / stalledFor : 0
-                    let ptsAdvance = (lastVideoPtsSinceFinalize != Int64.min
-                        && firstVideoPtsSinceFinalize != Int64.min && sourceVideoTbSeconds > 0)
-                        ? Double(lastVideoPtsSinceFinalize - firstVideoPtsSinceFinalize) * sourceVideoTbSeconds
-                        : -1
-                    switch Self.noCutStallAction(
-                        stalledFor: stalledFor,
-                        readRate: readRate,
-                        videoPtsAdvanceSeconds: ptsAdvance,
-                        consecutiveHolds: consecutiveNoCutHolds
-                    ) {
-                    case .keepReading:
-                        break
-                    case .holdForSlowDelivery:
-                        consecutiveNoCutHolds += 1
-                        EngineLog.emit(
-                            "[HLSSegmentProducer] slow live delivery hold "
-                            + "\(consecutiveNoCutHolds)/\(Self.liveSlowDeliveryMaxHolds): video PTS "
-                            + "+\(String(format: "%.1f", ptsAdvance))s in \(Int(stalledFor))s "
-                            + "(rate=\(String(format: "%.1f", readRate))pkt/s); not a wedge, "
-                            + "re-arming watchdog instead of retuning",
-                            category: .session
-                        )
-                        noCutHoldRearmedAt = Date()
-                        packetsReadAtLastFinalize = packetsRead
-                        videoPktsSinceFinalize = 0
-                        audioPktsSinceFinalize = 0
-                        videoKeyframesSinceFinalize = 0
-                        foreignPktsSinceFinalize = 0
-                        lastForeignStreamIndexSinceFinalize = -1
-                        firstVideoPtsSinceFinalize = Int64.min
-                        lastVideoPtsSinceFinalize = Int64.min
-                    case .exitForRetune:
-                        let isWedge = readRate >= Self.liveWedgeProgressRateThreshold
-                        EngineLog.emit(
-                            "[HLSSegmentProducer] no-cut stall: no segment finalized for "
-                            + "\(Int(stalledFor))s (packetsRead=\(packetsRead), "
-                            + "sinceFinalize=\(progress), "
-                            + "rate=\(String(format: "%.1f", readRate))pkt/s, "
-                            + "\(isWedge ? "cutter wedge" : "source starvation")); "
-                            + "window video=\(videoPktsSinceFinalize) key=\(videoKeyframesSinceFinalize) "
-                            + "audio=\(audioPktsSinceFinalize) foreign=\(foreignPktsSinceFinalize)"
-                            + (lastForeignStreamIndexSinceFinalize >= 0
-                                ? " lastForeignIdx=\(lastForeignStreamIndexSinceFinalize)" : "")
-                            + (ptsAdvance >= 0
-                                ? " videoPtsAdvance=\(String(format: "%.1f", ptsAdvance))s" : "")
-                            + (consecutiveNoCutHolds > 0
-                                ? " holdsExhausted=\(consecutiveNoCutHolds)" : "")
-                            + "; exiting for host retune",
-                            category: .session
-                        )
-                        exitReason = .segmentStall
-                        break readLoop
-                    }
+                if noCutWatchdog?.hasLatchedExit == true {
+                    exitReason = .segmentStall
+                    break readLoop
                 }
 
                 let packet: UnsafeMutablePointer<AVPacket>
@@ -2349,6 +2359,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     packet = read.packet
                     origin = read.origin
                     packetsRead += 1
+                    noCutWatchdog?.notePacketRead()
                 }
                 var pktPtr: UnsafeMutablePointer<AVPacket>? = packet
                 defer { trackedPacketFree(&pktPtr) }
@@ -2413,7 +2424,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     pendingAdVideoConfig = adConfig
                     activeMuxerVideoExtradata = adConfig.extradata  // #133 follow-up: rebaseline for same-PID PS-change detection
                     convertP7Active = false  // ad creatives are H.264
-                    if lastLiveSegmentFinalizeAt != nil { lastLiveSegmentFinalizeAt = Date() }
+                    if lastLiveSegmentFinalizeAt != nil { stampLiveSegmentFinalize() }
                     // pendingDiscontinuityFlag / pendingForceCutFlag set by the rebase below.
                 }
 
@@ -2787,22 +2798,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 }
 
                 if isVideoPkt {
-                    videoPktsSinceFinalize += 1
-                    if (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 {
-                        videoKeyframesSinceFinalize += 1
-                    }
-                    if packet.pointee.pts != Int64.min {
-                        if firstVideoPtsSinceFinalize == Int64.min {
-                            firstVideoPtsSinceFinalize = packet.pointee.pts
-                        }
-                        lastVideoPtsSinceFinalize = packet.pointee.pts
-                    }
+                    noCutWatchdog?.noteVideoPacket(
+                        pts: packet.pointee.pts,
+                        isKeyframe: (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
+                    )
                     if firstSeenVideoSourceDts == Int64.min {
                         firstSeenVideoSourceDts = packet.pointee.dts
                     }
                     lastVideoSourceDts = packet.pointee.dts
                 } else if isAudioPkt {
-                    audioPktsSinceFinalize += 1
+                    noCutWatchdog?.noteAudioPacket()
                     if firstSeenAudioSourceDts == Int64.min {
                         firstSeenAudioSourceDts = packet.pointee.dts
                     }
@@ -2810,8 +2815,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 }
 
                 if !isVideoPkt && !isAudioPkt {
-                    foreignPktsSinceFinalize += 1
-                    lastForeignStreamIndexSinceFinalize = pktStreamIdx
+                    noCutWatchdog?.noteForeignPacket(streamIndex: pktStreamIdx)
                     continue
                 }
 
@@ -2894,7 +2898,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             ? packet.pointee.pts
                             : packet.pointee.dts
                         if isLive, lastLiveSegmentFinalizeAt == nil {
-                            lastLiveSegmentFinalizeAt = Date()
+                            stampLiveSegmentFinalize()
                         }
                         videoShiftPts = firstActualVideoDts - desiredFirstVideoTfdtPts
                         if audioWaitForVideo, let audio = audioConfig {
@@ -3364,6 +3368,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 "[HLSSegmentProducer] demuxer.readPacket threw: \(error)",
                 category: .session
             )
+        }
+
+        // AE#406: the watchdog decides off this thread, so its verdict lands while the loop is
+        // parked in a read that has no upper bound of its own. The abort that lets the loop observe
+        // the verdict surfaces here as a read error, and `.readError` sends a reopenable source into
+        // a URL reopen of the very origin that starved. The verdict is what the exit means.
+        if noCutWatchdog?.hasLatchedExit == true {
+            if case .stopRequested = exitReason {} else { exitReason = .segmentStall }
         }
 
         // muxerFailed from a backpressure break is a wedge (host re-anchors) or a stop (teardown), not a real failure.

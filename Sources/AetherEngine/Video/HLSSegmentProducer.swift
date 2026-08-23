@@ -398,6 +398,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private static let sourceReplayReconnectWindowSeconds: TimeInterval = 30
     private static let sourceReplayStartWindowSeconds: Double = 10
 
+    /// 2^33, the MPEG-TS 33-bit PTS/DTS clock. FFmpeg's wrap correction adds exactly this when the
+    /// raw timestamp jumps backward across the wrap, so a source that renumbers its clock from zero
+    /// reaches us as a dts of `2^33 + (small raw value)` rather than as a backward jump (#405).
+    static let mpegTSWrapTicks: Int64 = 8_589_934_592
+
     /// Fallback duration (source video TB) for the last fragment packet when matroska omits BlockDuration.
     /// mp4 muxer uses pkt->duration only for the last trun sample; duration=0 writes trun.last.sample_duration=0.
     private let videoFallbackDurationPts: Int64
@@ -867,25 +872,87 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     private var hdr10PlusDetected = false
 
-    /// Replay-from-start check: backward jump + lands near first-seen dts + recent unplanned reconnect = server replay.
+    /// The two shapes a source restart reaches the producer in. Both mean the same thing (the
+    /// origin restarted its stream and is re-sending content this session has already played) and
+    /// both end the pump for a host retune; they differ only in how the timestamps arrive.
+    enum SourceRestartShape: Equatable {
+        /// Raw dts jumped BACKWARD to near where this session first joined: the server replayed
+        /// from its beginning on a connection we had just rebuilt.
+        case rewind
+        /// The source renumbered its 33-bit clock from zero mid-connection. FFmpeg reads that as a
+        /// wrap and adds 2^33, so it arrives as a large FORWARD jump whose wrap-corrected raw value
+        /// sits at the start of the axis (#405).
+        case axisReset
+    }
+
+    /// Pure classifier for both shapes, testable without a demuxer.
+    ///
+    /// #405: the old check opened with `jumpTicks < 0` and so could only ever see the rewind. The
+    /// field trace was the other shape: `srcDts=8589934592` (2^33 exactly, i.e. a raw dts of 0),
+    /// `jumpTicks=+8487014192`, eleven seconds of already-played content re-sent behind an
+    /// EXT-X-DISCONTINUITY while the viewer watched them twice.
+    ///
+    /// The anchor differs per shape and that matters: the rewind lands near `firstSeenDts` because
+    /// the server restarted the PROGRAM, but an axis reset lands near ZERO regardless of where this
+    /// session joined the ring. In the field trace those are 1121 s apart (`oldShift=100915200`),
+    /// so testing an axis reset against `firstSeenDts` would have missed it.
+    ///
+    /// The axis reset is live-only. A sequential origin's archive chunks legitimately open their
+    /// own axis at zero (#368), and reading that as a replay would end a healthy pump.
+    static func sourceRestartShape(newDts: Int64,
+                                   jumpTicks: Int64,
+                                   firstSeenDts: Int64,
+                                   tbSeconds: Double,
+                                   isLive: Bool) -> SourceRestartShape? {
+        guard firstSeenDts != Int64.min, tbSeconds > 0 else { return nil }
+        let windowTicks = Int64(Self.sourceReplayStartWindowSeconds / tbSeconds)
+        if jumpTicks < 0 {
+            return newDts <= firstSeenDts + windowTicks ? .rewind : nil
+        }
+        guard isLive, newDts >= Self.mpegTSWrapTicks else { return nil }
+        return newDts % Self.mpegTSWrapTicks <= windowTicks ? .axisReset : nil
+    }
+
+    /// Replay-from-start check. The rewind additionally requires a recent unplanned reconnect: on
+    /// that shape the discriminator against an ordinary programme boundary is that we had just
+    /// rebuilt the connection. The axis reset carries its own discriminator and must NOT require
+    /// one, because the origin renumbers on the connection it already holds (field trace: `gen=1->1`,
+    /// `reconnects=0`); a programme boundary inside one transport stream keeps its PCR axis running,
+    /// and a genuine 33-bit wrap after ~26.5 h is a continuous correction, not a jump over the
+    /// discontinuity threshold.
     private func isSourceReplay(newDts: Int64,
                                 jumpTicks: Int64,
                                 firstSeenDts: Int64,
                                 tbSeconds: Double,
                                 stream: String) -> Bool {
-        guard jumpTicks < 0, firstSeenDts != Int64.min, tbSeconds > 0 else { return false }
-        guard let reconnectAt = demuxer.lastUnplannedSourceReconnectAt,
-              Date().timeIntervalSince(reconnectAt) < Self.sourceReplayReconnectWindowSeconds
+        guard let shape = Self.sourceRestartShape(newDts: newDts,
+                                                  jumpTicks: jumpTicks,
+                                                  firstSeenDts: firstSeenDts,
+                                                  tbSeconds: tbSeconds,
+                                                  isLive: isLive)
         else { return false }
-        let windowTicks = Int64(Self.sourceReplayStartWindowSeconds / tbSeconds)
-        guard newDts <= firstSeenDts + windowTicks else { return false }
-        EngineLog.emit(
-            "[HLSSegmentProducer] live source REPLAY detected on \(stream): "
-            + "srcDts=\(newDts) firstSeenDts=\(firstSeenDts) jumpTicks=\(jumpTicks) "
-            + "reconnect \(String(format: "%.1f", Date().timeIntervalSince(reconnectAt)))s ago; "
-            + "server restarted the stream from its beginning, exiting pump for host retune",
-            category: .session
-        )
+        switch shape {
+        case .rewind:
+            guard let reconnectAt = demuxer.lastUnplannedSourceReconnectAt,
+                  Date().timeIntervalSince(reconnectAt) < Self.sourceReplayReconnectWindowSeconds
+            else { return false }
+            EngineLog.emit(
+                "[HLSSegmentProducer] live source REPLAY detected on \(stream): "
+                + "srcDts=\(newDts) firstSeenDts=\(firstSeenDts) jumpTicks=\(jumpTicks) "
+                + "reconnect \(String(format: "%.1f", Date().timeIntervalSince(reconnectAt)))s ago; "
+                + "server restarted the stream from its beginning, exiting pump for host retune",
+                category: .session
+            )
+        case .axisReset:
+            EngineLog.emit(
+                "[HLSSegmentProducer] live source AXIS RESET detected on \(stream): "
+                + "srcDts=\(newDts) (wrap-corrected raw=\(newDts % Self.mpegTSWrapTicks)) "
+                + "firstSeenDts=\(firstSeenDts) jumpTicks=+\(jumpTicks); "
+                + "source renumbered its 33-bit clock from zero and is re-sending content already "
+                + "played, exiting pump for host retune",
+                category: .session
+            )
+        }
         return true
     }
 

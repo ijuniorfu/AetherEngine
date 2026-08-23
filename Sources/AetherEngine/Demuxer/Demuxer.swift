@@ -768,6 +768,15 @@ public final class Demuxer: @unchecked Sendable {
         return audioFallback
     }
 
+    /// Name libavformat gave the container it opened ("matroska,webm", "mpegts", "mov,mp4,m4a,3gp,3g2,mj2"),
+    /// nil before open. This is what the demuxer is actually reading, which on a remux or transcode session
+    /// is the delivered container and not the one the library holds; the two differ exactly when a host's
+    /// server-side metadata would mislead.
+    var containerFormatName: String? {
+        guard let ctx = formatContext, let name = ctx.pointee.iformat?.pointee.name else { return nil }
+        return String(cString: name)
+    }
+
     func splitDisplaySetSubtitleStreamIndices() -> Set<Int32> {
         guard let ctx = formatContext,
               let formatName = ctx.pointee.iformat?.pointee.name,

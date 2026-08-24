@@ -289,6 +289,16 @@ final class H264PictureOrderReader {
         avcodec_free_context(&owned)
     }
 
+    /// Drops the parser's carried state after a discontinuity, the way libavformat's own seek does
+    /// (`ff_read_frame_flush` closes the stream parser). A picture order count is computed against
+    /// the previous picture's, so a parser that survived a jump can answer for the wrong sequence.
+    func reset() {
+        guard let parser else { return }
+        av_parser_close(parser)
+        self.parser = av_parser_init(Int32(AV_CODEC_ID_H264.rawValue))
+        self.parser?.pointee.flags |= Int32(PARSER_FLAG_COMPLETE_FRAMES)
+    }
+
     /// nil when the parser could not resolve this access unit.
     func pictureOrderCount(for packet: UnsafeMutablePointer<AVPacket>) -> Int64? {
         guard let parser, let context, let data = packet.pointee.data, packet.pointee.size > 0 else {
@@ -437,6 +447,7 @@ final class H264CompositionOffsetRepairSession {
             heldBytes = 0
         case .repairing:
             rewriter?.noteSeek()
+            reader?.reset()
         case .off:
             break
         }

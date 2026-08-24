@@ -12,6 +12,37 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.39.0] - 2026-08-24
+
+### Fixed
+
+- **A seek waited 12 s on a target nothing was serving, because the reading it waited on did not
+  mean what it claimed (AE#408).** `bufferedSecondsAtTarget` summed every loaded range intersecting
+  `[target - 1 s, target + 30 s]`, so a band loaded well downstream of the target counted, at full
+  weight, as media at the target. That is the only reading consistent with the report: `island=7.30s
+  at target` next to `rendered == bufferedEnd` and a seek that never landed, when 7.3 s of media
+  actually covering the target would have landed it. The first deadline extension is granted on
+  presence alone (there is no earlier sample to compare against), so a phantom island bought 4 s on
+  top of the 8 s budget, on every instance, deterministically. Coverage of the target is now a gate
+  on the reading; the window keeps its width, because measuring how deep the served region runs is
+  what separates a producer still filling from one that served a little and stopped. In the reported
+  shape the island reads 0, below `nativeSeekProgressIslandFloorSeconds`, so no extension is granted
+  and the deadline goes straight to the re-anchor.
+- **A backward seek into cache-resident content left the producer aimed somewhere else (AE#408).**
+  The proactive re-anchor on a backward target jump is skipped when the target segment is still
+  resident, a gate that exists for the Continuous-Audio handover refetch, where an unconditional
+  restart re-arms the FLAC bridge and glitches the audio. Residency of the target segment alone does
+  not carry that: a scrub band left by an earlier pump is resident too, and it ends. Nothing else
+  aimed the pump at the new target, so the band running out was what finally did, which pays the
+  whole re-anchor at the one moment the buffer is empty. Reproduced headless (`aetherctl play`,
+  backward seek to seg38 into a three-segment band while the pump was anchored at seg99): the ask
+  for seg41 arrived 4 s later with 5 s of buffer left; on a longer band the pump instead sat parked
+  for 24 s until the #65 backpressure wedge breaker moved it. The gate now holds only while the
+  resident run reaches the active march front (no gap to fall into, the handover case) or is at
+  least a prefetch window deep (the gap is asked for with a full cushion, and re-anchoring early
+  would re-produce content already on disk). On the same repro the pump now restarts at seg38 while
+  the band is still serving. Reported by @rrgomes.
+
 ## [6.38.0] - 2026-08-24
 
 ### Fixed

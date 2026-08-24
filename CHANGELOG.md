@@ -10,7 +10,32 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.41.0] - 2026-08-25
+
 ### Fixed
+
+- **A source that stopped delivering disappeared from `playbackPhase` for as long as any seek was
+  alive, including the engine's own recovery scrubs (AE#410).** The fold ranked `isSeeking` above the
+  reader network axis, and over a dead origin no seek can land, so the level stands for the whole
+  outage: the reporting host measured 29 s and 41 s of a killed LAN origin, two exhausted reconnect
+  ladders and a failed reopen among them, all reported as `.seeking`. The seek holding it is not
+  necessarily the host's either, since the producer's restart coalescer issues its own `nativeScrub`
+  seeks while recovering, so the engine hid the outage it was recovering from with no host seek
+  involved at all. Precedence is now `error > ended > idle > loading > stalled > seeking >
+  rebuffering > playing/paused`: a seek stays fully observable through `isSeeking` and `seekEvents`
+  (which carries the outcome a level signal cannot), while the reader axis is observable nowhere
+  else. Over a delivering source nothing changes, and a seek that lands from cache over a
+  reconnecting reader still clears itself in milliseconds. `.stalled(reconnecting: false)` now has a
+  meaning: the ladder is spent and recovery has passed to the producer's reopen, where the reader
+  used to claim delivery on its way out and the whole reopen window read as a healthy source. Only
+  bytes that crossed the network move the axis back to healthy, the same definition of progress the
+  reconnect ladders have used since AE#380, so a serve out of the resident window, the retained
+  head/tail spans or a resident detour block no longer erases a stall with read-ahead the origin
+  paid for before it died; and a metered detour fetch (429 / 503 / 509 on the arm built for
+  throttling origins) reports the stall it was already charging its ladder for. Reported by
+  @rrgomes.
 
 - **An MP4 whose writer dropped the composition-offset table juddered from the first picture, and
   no seek was needed to provoke it (AE#409).** With `ctts` absent from a bitstream that still

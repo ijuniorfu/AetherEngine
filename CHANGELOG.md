@@ -12,6 +12,29 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.38.0] - 2026-08-24
+
+### Fixed
+
+- **A decoded frame with no timestamp of its own was refused rather than repaired (AE#407).** The
+  software path had a drop for an untimed frame at two layers (the deinterlacer discards its own
+  untimestamped output, `SampleBufferRenderer.enqueue` refuses a sample the render synchronizer
+  cannot pace and whose NaN would reorder its neighbours) and no repair between them, so the only
+  thing standing between an untimed picture and a dropped one was the demuxer's `+genpts`, one flag
+  on one open. The direct path now reads `best_effort_timestamp` when the decoder set no PTS, which
+  is libavcodec's own `guess_correct_pts(pts, pkt_dts)` and the reconstruction every other
+  FFmpeg-based player consumes. It is placed directly after `avcodec_receive_frame`, so captions,
+  the filter graph and the emit path all see one repaired timestamp rather than each reading the raw
+  field separately, and a frame carrying neither value still falls through to the gate, because
+  inventing a position is worse than losing a picture. Two shapes reach the decoder untimed on their
+  own: Matroska `V_MS/VFW/FOURCC` tracks, where `matroskadec.c` writes the block time to DTS and
+  leaves `pkt->pts` unset (which is how VC-1 and the legacy Microsoft codecs are stored), and live
+  MPEG-TS, which delivers untimed pictures outright. Measured on a VC-1 Matroska fixture with
+  `+genpts` suppressed: before, every frame was refused at the enqueue gate, no picture appeared and
+  the demux loop ran a 58 s file dry in 2.5 s because nothing paced it; after, 25 enqueues per second
+  on a 25 fps source and a clock that advances. With `+genpts` on, the repair never fires and nothing
+  changes. Reported by @classicjazz.
+
 ## [6.37.0] - 2026-08-23
 
 ### Fixed

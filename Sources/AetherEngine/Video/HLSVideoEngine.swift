@@ -497,6 +497,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var audioBridge: AudioBridge?
     var segmentPlan: [Segment] = []
 
+    /// AE#408: true only while `segmentPlan` is the keyframe-aligned plan, whose boundaries are
+    /// container index entries and therefore CLAIM to be random-access points. The producer re-aims
+    /// below a boundary that breaks that claim; it must not do so for the uniform grid (which never
+    /// claimed it) or a source-declared plan (which aims below its IRAP by design, AE#268).
+    var planBoundariesClaimRandomAccess = false
+
     /// Guards subsystem refs + `sessionEpoch`. Never held across waits or network I/O so
     /// `stop()` on the main thread is never blocked behind a restart's 5 s waitForFinish.
     let restartLock = NSLock()
@@ -1001,6 +1007,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     videoTimeBase: videoTimeBase,
                     sourceDurationSeconds: durationSeconds
                 )
+                planBoundariesClaimRandomAccess = true
                 let firstKeyframePts = keyframes.sorted().first ?? 0
                 self.firstKeyframePts = firstKeyframePts
                 let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
@@ -2092,6 +2099,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             videoFallbackDurationPts: videoFallbackDurationPts,
             audioFallbackDurationPts: audioFallbackDurationPts,
             restartTargetVideoPts: videoTarget,
+            boundaryClaimsRandomAccess: planBoundariesClaimRandomAccess,
             closedCaptionStreamIndex: closedCaptionStreamIndexForSession,
             subtitleTapStreamIndices: Set(nativeSubtitleSourceStreamIndicesForSession.compactMap { $0 }),
             subtitlePacketStreamIndices: allEmbeddedSubtitleStreamIndices,   // #112 rework

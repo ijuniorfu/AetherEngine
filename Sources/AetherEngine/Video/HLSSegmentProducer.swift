@@ -816,12 +816,21 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// A gate that opened LATE is pinned to the advertised start, because the alternative is a hole
     /// at that time and AVPlayer waits on holes forever; the resulting shift is what moves the whole
     /// item axis. A gate that opened EARLY (a re-aim went back for a sync sample covering the
-    /// boundary) keeps its own timestamp: that publishes an overlap with the previous segment, which
-    /// AVPlayer absorbs, and it leaves the item axis equal to the source axis so the seek that caused
-    /// the restart lands where it was aimed.
-    static func pinnedFirstTfdtPts(actualFirstDts: Int64, desiredTfdtPts: Int64) -> Int64 {
+    /// boundary) keeps its own position instead: that publishes an overlap with the previous segment,
+    /// which AVPlayer absorbs, and it leaves the item axis where the plan puts it, so the seek that
+    /// caused the restart lands where it was aimed.
+    ///
+    /// Both operands must be on the ITEM axis. `actualFirstDts` is a source timestamp, and the two
+    /// differ by the plan anchor on every source whose content does not start at PTS 0 (a Blu-ray
+    /// beginning at 11.6 s, the restart-witness fixture at 0.083 s). Comparing them raw published
+    /// every restarted epoch a whole anchor early, which is what the fixture-backed restart-continuity
+    /// tests caught.
+    static func pinnedFirstTfdtPts(
+        actualFirstDts: Int64, desiredTfdtPts: Int64, planAnchorPts: Int64
+    ) -> Int64 {
         guard actualFirstDts != Int64.min else { return desiredTfdtPts }
-        return actualFirstDts < desiredTfdtPts ? actualFirstDts : desiredTfdtPts
+        let actualItemPts = actualFirstDts &- planAnchorPts
+        return actualItemPts < desiredTfdtPts ? actualItemPts : desiredTfdtPts
     }
 
     /// AE#408: aim the gate below a boundary that cannot be opened on, so the segment covers its own
@@ -3120,7 +3129,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         // is what the pin exists for when the gate opens late).
                         let pinnedTfdtPts = Self.pinnedFirstTfdtPts(
                             actualFirstDts: firstActualVideoDts,
-                            desiredTfdtPts: desiredFirstVideoTfdtPts)
+                            desiredTfdtPts: desiredFirstVideoTfdtPts,
+                            planAnchorPts: planAnchorVideoPts)
                         videoShiftPts = firstActualVideoDts - pinnedTfdtPts
                         if audioWaitForVideo, let audio = audioConfig {
                             // Rescale into SOURCE audio TB (not encoder TB): FLAC bridge exposes this mismatch;

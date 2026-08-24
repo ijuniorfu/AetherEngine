@@ -153,13 +153,14 @@ struct Issue408BoundaryRandomAccessTests {
 
     // MARK: - What the opened epoch is published at
 
-    @Test("a gate that opened early keeps its own timestamps, so the item axis stays the source axis")
-    func earlyOpenKeepsItsTimestamps() {
+    @Test("a gate that opened early keeps its own position, so the item axis stays where the plan put it")
+    func earlyOpenKeepsItsPosition() {
         // 243.118 for a segment advertised at 244.119: publishing it at the advertised start would
         // relabel the axis by a second and land the seek a second early. The overlap with the
         // previous segment is the cost, and AVPlayer absorbs it.
         #expect(HLSSegmentProducer.pinnedFirstTfdtPts(
-            actualFirstDts: Self.prevSyncSample, desiredTfdtPts: Self.boundary) == Self.prevSyncSample)
+            actualFirstDts: Self.prevSyncSample, desiredTfdtPts: Self.boundary,
+            planAnchorPts: 0) == Self.prevSyncSample)
     }
 
     @Test("a gate that opened late is still pinned to the advertised start")
@@ -168,14 +169,34 @@ struct Issue408BoundaryRandomAccessTests {
         // time would leave a hole where the playlist promises 244.119, and AVPlayer waits on holes
         // forever; the pin (and the shift it produces) is what keeps that playable.
         #expect(HLSSegmentProducer.pinnedFirstTfdtPts(
-            actualFirstDts: Self.nextSyncSample, desiredTfdtPts: Self.boundary) == Self.boundary)
+            actualFirstDts: Self.nextSyncSample, desiredTfdtPts: Self.boundary,
+            planAnchorPts: 0) == Self.boundary)
     }
 
     @Test("an exact landing publishes at the advertised start either way")
     func exactLandingIsUnchanged() {
         #expect(HLSSegmentProducer.pinnedFirstTfdtPts(
-            actualFirstDts: Self.boundary, desiredTfdtPts: Self.boundary) == Self.boundary)
+            actualFirstDts: Self.boundary, desiredTfdtPts: Self.boundary,
+            planAnchorPts: 0) == Self.boundary)
         #expect(HLSSegmentProducer.pinnedFirstTfdtPts(
-            actualFirstDts: Int64.min, desiredTfdtPts: Self.boundary) == Self.boundary)
+            actualFirstDts: Int64.min, desiredTfdtPts: Self.boundary,
+            planAnchorPts: 0) == Self.boundary)
+    }
+
+    @Test("both operands are on the item axis, so a source starting after PTS 0 is unmoved")
+    func planAnchorIsNotAnEarlyOpen() {
+        // The restart-witness fixture's content starts at 1024 ticks (0.083 s), so a restart that
+        // opens exactly on its boundary has a SOURCE timestamp below the boundary's ITEM time.
+        // Reading that as an early open published every restarted epoch an anchor early: measured as
+        // tfdt 48128 against the continuous run's 49152, and as a seam reported at 0.083 s.
+        let anchor: Int64 = 1024
+        let advertised: Int64 = 48_128        // item axis
+        #expect(HLSSegmentProducer.pinnedFirstTfdtPts(
+            actualFirstDts: advertised + anchor, desiredTfdtPts: advertised,
+            planAnchorPts: anchor) == advertised)
+        // A genuine early open on the same source still keeps its position, one anchor lower.
+        #expect(HLSSegmentProducer.pinnedFirstTfdtPts(
+            actualFirstDts: advertised, desiredTfdtPts: advertised,
+            planAnchorPts: anchor) == advertised - anchor)
     }
 }

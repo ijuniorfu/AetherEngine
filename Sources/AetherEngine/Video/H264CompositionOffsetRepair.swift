@@ -434,23 +434,32 @@ final class H264CompositionOffsetRepairSession {
     }
 
     func noteSeek() {
+        // The held packets belong to the position that was abandoned, in EVERY phase, not just while
+        // the sample is still open: a settled verdict leaves the sample it read in the queue, and
+        // `dequeue()` hands that queue out ahead of anything read after the seek. Dropping it only
+        // during `.sampling` republished the old position's packets at the landing, which on a healthy
+        // file (verdict `.off`, sample still held) put two duplicate pictures into the stream a
+        // producer had already emitted.
+        dropHeldPackets()
         switch phase {
         case .sampling:
-            // The held packets belong to the position that was abandoned; the sample restarts where
-            // the source now stands.
-            for entry in held {
-                var owned: UnsafeMutablePointer<AVPacket>? = entry.packet
-                trackedPacketFree(&owned)
-            }
-            held.removeAll(keepingCapacity: true)
+            // The sample restarts where the source now stands.
             samples.removeAll(keepingCapacity: true)
-            heldBytes = 0
         case .repairing:
             rewriter?.noteSeek()
             reader?.reset()
         case .off:
             break
         }
+    }
+
+    private func dropHeldPackets() {
+        for entry in held {
+            var owned: UnsafeMutablePointer<AVPacket>? = entry.packet
+            trackedPacketFree(&owned)
+        }
+        held.removeAll(keepingCapacity: true)
+        heldBytes = 0
     }
 
     /// Puts a packet at the head of the queue. Used by the demuxer when a sample ends on a packet

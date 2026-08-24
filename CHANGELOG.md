@@ -12,6 +12,41 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.40.0] - 2026-08-24
+
+### Fixed
+
+- **A restart opened past the boundary it was given, so every seek into that segment landed 3 to
+  14 s off with a first picture that started mid-recovery (AE#408).** The keyframe-aligned plan's
+  boundaries are container index entries, and for Matroska every entry is a Cue point that
+  libavformat enters as `AVINDEX_KEYFRAME` regardless of the block's own keyframe flag
+  (`matroska_add_index_entries`). Cues mark seek points, not sync points, so a plan built from that
+  index advertises boundaries the producer cannot open on: on the reporting asset the boundary at
+  244.119 s carried no sync sample and the next one sat 11.2 s later, which is exactly the shift the
+  producer then applied. ffprobe settles that the gap holds no random-access point of any kind, since
+  its `K` flag comes from the elementary-stream parser, which marks an H.264 recovery point and every
+  HEVC IRAP NAL. The gate now refuses to open past a boundary that claimed random access and goes
+  back for a sync sample covering it, in widening steps (4, 8, 16, 32 s, four attempts at most),
+  escalating as soon as the scan reaches ground already proven empty and detecting the case on the
+  packet sitting on the boundary rather than after reading the whole gap, which makes the repaired
+  path cheaper than the old one. A gate that opened EARLY now keeps its own position instead of being
+  pinned to the advertised start: that publishes an overlap with the previous segment, which AVPlayer
+  absorbs, and leaves the item axis where the plan put it, so the seek lands where it was aimed. The
+  pin stays for a gate that opened late, where the alternative is a hole nothing ever fills. Scoped to
+  the keyframe-aligned plan: the uniform grid never claimed random access at its boundaries and a
+  source-declared plan aims below its IRAP on purpose (AE#268), and the tolerance for opening slightly
+  past a boundary covers the stream's own reorder depth, since an index entry is a decode timestamp
+  while the gate judges presentation time (AE#169 round 3). Reproduced headless with the new
+  `Scripts/mkv-cue-fixture.py`, which injects cue points at non-sync positions the way the reporting
+  asset carries them: resuming at 45 s went from `shift=11000` and a clock reading 57.80 s two seconds
+  in, to one re-aim, `shift=0` and 46.80 s; a backward seek to 46 s landed at 47.08 before and 46.00
+  after. Reported by @rrgomes.
+
+### Added
+
+- `Scripts/mkv-cue-fixture.py`: rewrites a Matroska's Cues table to mark positions that are not
+  random-access points, which no muxer will write for you and which is the shape behind AE#408.
+
 ## [6.39.0] - 2026-08-24
 
 ### Fixed

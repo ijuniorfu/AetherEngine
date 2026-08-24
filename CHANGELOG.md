@@ -10,7 +10,29 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **An MP4 whose writer dropped the composition-offset table juddered from the first picture, and
+  no seek was needed to provoke it (AE#409).** With `ctts` absent from a bitstream that still
+  reorders pictures, every sample reports `PTS == DTS`, so the container hands decode order out as
+  presentation order and the native stream-copy carries it into fMP4 unchanged. Measured on a twin
+  pair (one encode, muxed twice, composition offsets removed from one) through AVFoundation's own
+  decoder: 45 of 66 pictures were presented at a time belonging to a different picture and the
+  content order stepped backwards 30 times, in a repeating +67 ms / -100 ms shuffle per B-group.
+  The information the container lost is still in the bitstream, so the demuxer now rebuilds it:
+  libavcodec's H.264 parser reads each access unit's picture order count without decoding a pixel
+  (it takes MP4's length-prefixed payload directly), and the packet's timestamps are rewritten to
+  what the muxer should have written, presentation by display rank and decode pulled back by the
+  reorder delay. The repaired stream is byte-for-byte the healthy twin's timeline: 432 packets
+  across three fixture pairs, both edit-list shapes and seven IDR boundaries, match exactly, and
+  the served output presents all 301 frames at the same times as the healthy twin's does.
+  Because the repair sits at the demuxer boundary, the fMP4 producer, the segment plan, the
+  software decoder and the still extractor all read one axis, and hardware decode is kept:
+  a container defect no longer costs the native path. Detection is fail-closed and cheap, a healthy
+  file leaves on its first composition offset, and anything unproven (variable frame timing, a
+  picture order that does not advance one rank per picture, a sample that cannot be anchored) is
+  delivered exactly as the container wrote it. Reported by @orut34iop, whose fixture pair is the
+  regression test.
 
 ## [6.40.0] - 2026-08-24
 

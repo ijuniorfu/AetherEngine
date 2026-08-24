@@ -900,6 +900,14 @@ final class NativeAVPlayerHost {
 
     /// Pure part of `bufferedSecondsAtTarget(_:tolerance:window:excludeAtOrAbove:)`: total loaded seconds
     /// intersecting the target window, with the optional exclusion bound applied.
+    ///
+    /// AE#408: the target itself must be covered before any of the window counts. The window reaches
+    /// `window` seconds PAST the target, so without that gate a band loaded 20 s downstream reads as
+    /// "the producer is serving the target" at full weight: the reporter's `island=7.30s at target`
+    /// sat next to `rendered == bufferedEnd` and a seek that never landed, which is only possible if
+    /// nothing was loaded at the target at all (media there would have landed the seek). The window
+    /// stays as wide as it was, because its job is measuring how DEEP the served region runs; it is
+    /// only the licence to read it that now requires the target to be inside it.
     nonisolated static func bufferedSecondsInWindow(
         ranges: [(start: Double, end: Double)],
         target: Double,
@@ -914,14 +922,19 @@ final class NativeAVPlayerHost {
             upperBound = Swift.min(upperBound, excludeAtOrAbove - tolerance)
         }
         guard upperBound > lowerBound else { return 0 }
+        // Coverage is judged inside the same clamped window, so the exclusion bound cannot be walked
+        // around by a range that merely reaches down across the target from above it.
+        let coverageHigh = Swift.min(target + tolerance, upperBound)
+        var covered = false
         var total = 0.0
         for range in ranges {
             guard range.start.isFinite, range.end.isFinite, range.end > range.start else { continue }
+            if range.start < coverageHigh, range.end > lowerBound { covered = true }
             let lo = Swift.max(range.start, lowerBound)
             let hi = Swift.min(range.end, upperBound)
             if hi > lo { total += hi - lo }
         }
-        return total
+        return covered ? total : 0
     }
 
     func play() {

@@ -947,6 +947,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
             sourceBitrate = dem.bitRate
 
+            // #409: settle the composition-offset repair while the demuxer still stands at the head.
+            // It reads a short sample and holds those packets, so nothing is consumed; doing it later
+            // would sample wherever the prewarm left the source, and hand the producer a head that is
+            // six seconds into the file. The segment plan below needs the verdict either way, because
+            // a repaired stream and the container's own index have to describe one ladder.
+            dem.decideCompositionOffsetRepair()
+
             // 2. Prewarm MKV Cues so libavformat's keyframe index is populated (1-2 byte-range reads).
             //    Bounded: a missing/out-of-bounds Cues index degrades into a multi-GB linear scan;
             //    abort past the deadline and fall back to the uniform-stride plan.

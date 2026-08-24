@@ -22,6 +22,41 @@ That list is the supported set, not the compiled set. The FFmpeg build also carr
 
 Interlaced sources (DVD-rip MPEG-2, SD / HD broadcast H.264) are deinterlaced through a persistent bwdif graph (yadif fallback) that engages on the first interlaced frame and costs nothing on progressive content. The dispatch decision lives in `AetherEngine.load` (`VideoRoutingPolicy`), gated per source on `VTCapabilityProbe`, codec id, declared field order, and on VOD the decode sample that verifies it.
 
+### MP4 without composition offsets
+
+Some writers emit a sample table with no `ctts` while the H.264 bitstream still reorders pictures.
+Every sample then reports `PTS == DTS`, and since the native route stream-copies those timestamps
+into fMP4, AVPlayer is handed decode order as presentation order: each future reference picture is
+shown before the B pictures that precede it. Measured through AVFoundation's own decoder on a twin
+pair (one encode muxed twice, composition offsets removed from one), 45 of 66 pictures landed at a
+time belonging to a different picture, with the content order stepping backwards 30 times (#409).
+
+The container lost the information, but the bitstream did not: every slice header carries a picture
+order count, which is display order, and libavcodec's H.264 parser reads it without decoding a pixel
+and takes MP4's length-prefixed payload directly. `H264CompositionOffsetRepair` samples the head
+(twelve pictures at most, held rather than re-read, so no rewind and no second fetch) and repairs a
+confirmed source at the demuxer boundary:
+
+    PTS = (decode time of the picture that opened this coded video sequence) + shift + rank * step
+    DTS = DTS + shift - reorderDelay * step
+
+Pulling decode time back by the reorder delay is what keeps `PTS >= DTS`; a healthy file carries the
+same negative head. `shift` is 0 or one reorder delay, depending on whether the writer left the
+sample ladder on the presentation axis or kept the edit list that trims the reorder head, and is
+clamped to that range so a malformed header cannot drag the picture off its audio. Because the
+rewrite happens once, in the demuxer, the fMP4 producer, the segment plan, the software decoder and
+the still extractor all read one axis, and the source keeps hardware decode: a missing table costs
+no route change. The container's own index is folded onto the same ladder, since the segment plan is
+built from index entries and then filled with these packets.
+
+Detection is fail-closed and costs a healthy file almost nothing: the first real PTS-DTS offset ends
+the sample (usually on the first packet, since a reordered file's head sample sits one delay below
+zero). A source is only repaired when every sampled pair is equal, the decode ladder is uniform, the
+picture order regresses, and the ranks it produces are distinct and fill the sampled window. Anything
+short of that (variable frame timing, a picture order that does not advance one rank per picture, a
+sample that starts nowhere it can be anchored) is delivered exactly as the container wrote it.
+Reported by @orut34iop.
+
 ## HDR routing
 
 | Source | Wrapper signaling |

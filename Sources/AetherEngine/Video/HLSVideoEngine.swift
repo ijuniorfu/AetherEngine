@@ -1668,6 +1668,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 dem.seek(to: Double(targetPts) * Double(tb.num) / Double(tb.den))
             }
         }
+        // #416: the pump harvests every subtitle packet it demuxes, so where it OPENS is where its
+        // coverage of the source begins. The subtitle drain reads "nothing between this set and the
+        // playhead" out of the same store, and below this position that answer means nothing.
+        if !plan.isEmpty {
+            let openIndex = max(0, min(initialProducerBaseIndex, plan.count - 1))
+            let tb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
+            subtitlePacketStore.noteHarvestAnchor(
+                .pump, at: Double(plan[openIndex].startPts) * Double(tb.num) / Double(tb.den))
+        }
         prod.start()
 
         // URL routing: master playlist (VIDEO-RANGE=PQ + SUPPLEMENTAL-CODECS=dvh1) only when
@@ -2532,6 +2541,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         let elapsedMs = msSince(restartStart)
         let absoluteTargetSeconds = Double(targetStartPts) * Double(videoTb.num) / Double(videoTb.den)
+        // #416: the outgoing pump's run ends where it got to and the new one begins here. Whatever
+        // lies between the two was skipped, and a subtitle set stranded on the near side of that
+        // gap can no longer be read as the line still on screen at the landing.
+        subtitlePacketStore.noteHarvestAnchor(.pump, at: absoluteTargetSeconds)
         // build = everything after the seek (re-validation, muxer/producer construction, start).
         let buildMs = max(0, elapsedMs - stopWaitMs - (reopenMs ?? 0) - seekMs)
         EngineLog.emit(

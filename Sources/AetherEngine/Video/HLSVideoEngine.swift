@@ -376,6 +376,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private func setPlaylistShiftSeconds(_ value: Double) {
         shiftLock.lock(); _playlistShiftSeconds = value; shiftLock.unlock()
     }
+
+    /// AE#418: the segment whose own start establishes the axis of the run AVPlayer is playing, and
+    /// by how much. Only an epoch's FIRST segment can carry a non-zero offset: a gate that had to
+    /// open below its boundary puts that much extra content into that one segment, and every segment
+    /// the epoch cuts after it starts exactly on its boundary. One pair, not a table, because a later
+    /// epoch marching through the same index produces an axis-true segment there and a table would
+    /// keep claiming the old offset for it.
+    private let anchorShiftLock = NSLock()
+    private var anchorShiftIndex: Int = .min
+    private var anchorShiftSeconds: Double = 0
     private let shiftLock = NSLock()
     private var _playlistShiftSeconds: Double = 0
 
@@ -1576,6 +1586,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         // 7. Wire provider, server, and URL.
         let manifestCodecs = audioHLSCodecs.map { "\(primaryCodecs),\($0)" } ?? primaryCodecs
+        // AE#418: where AVPlayer starts a fresh decode run decides the axis it plays on.
+        var coldAnchorHandler: (@Sendable (Int) -> Void)?
+        if !isLiveSession {
+            coldAnchorHandler = { [weak self] idx in
+                guard let self else { return }
+                self.handleColdAnchor(at: idx)
+            }
+        }
         let prov = VideoSegmentProvider(
             cache: segmentCache,
             segments: plan,
@@ -1628,7 +1646,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             stripASSMarkupInVTT: preserveASSMarkupForSubtitleTap,
             nativeSubtitleDefaultOrdinal: nativeSubtitleDefaultOrdinal,
             nativeSubtitleWholeProgram: nativeSubtitleWholeProgram,
-            currentShiftSeconds: { [weak self] in (self?.playlistShiftSeconds ?? 0) + (self?.subtitleStreamStartSeconds ?? 0) }
+            currentShiftSeconds: { [weak self] in (self?.playlistShiftSeconds ?? 0) + (self?.subtitleStreamStartSeconds ?? 0) },
+            coldAnchorHandler: coldAnchorHandler
         )
         self.provider = prov
         if isLiveSession {
@@ -2208,6 +2227,58 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private func handleVideoShiftKnown(_ shiftPts: Int64, firstItemTfdtPts: Int64) {
         let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
         let seamItemSeconds = Double(firstItemTfdtPts) * sourceVideoTbSeconds
+        // AE#418: record which segment this axis belongs to, so a decode run AVPlayer starts
+        // somewhere else does not inherit it.
+        if !isLiveSession {
+            let index = segmentIndexForPlaylistTime(seamItemSeconds)
+            anchorShiftLock.lock()
+            anchorShiftIndex = index
+            anchorShiftSeconds = seconds
+            anchorShiftLock.unlock()
+        }
+        publishPlaylistShift(seconds, seamItemSeconds: seamItemSeconds)
+    }
+
+    /// AE#418: AVPlayer began a fresh decode run at `index`, so the axis is whatever THAT segment's
+    /// own start is worth, and the previous run's offset stops applying.
+    ///
+    /// Measured with `play --picture-probe` on a fixture whose picture states its own source time: a
+    /// run started on an epoch's overlong first segment carries that segment's offset for as long as
+    /// it plays (across segment boundaries, so it is a property of the run and not of each segment),
+    /// and a seek that leaves the loaded region without provoking a restart lands on a sequentially
+    /// cut, axis-true segment, where the previous offset must not still be folded in. Publishing the
+    /// producer's offset alone got the first case right and the second wrong by the same amount.
+    func handleColdAnchor(at index: Int) {
+        guard !isLiveSession else { return }
+        anchorShiftLock.lock()
+        let shift = Self.axisShiftForRun(
+            beginningAt: index, anchorIndex: anchorShiftIndex, anchorShiftSeconds: anchorShiftSeconds)
+        anchorShiftLock.unlock()
+        guard abs(shift - playlistShiftSeconds) > 0.001 else { return }
+        restartLock.lock()
+        let plannedStart = index >= 0 && index < segmentPlan.count
+            ? segmentPlan[index].startSeconds : nil
+        restartLock.unlock()
+        guard let plannedStart else { return }
+        EngineLog.emit(
+            "[HLSVideoEngine] #418 decode run re-anchored at seg\(index) "
+            + "(advertised \(String(format: "%.3f", plannedStart))s): axis shift "
+            + "\(String(format: "%.3f", playlistShiftSeconds))s -> \(String(format: "%.3f", shift))s",
+            category: .session
+        )
+        publishPlaylistShift(shift, seamItemSeconds: plannedStart)
+    }
+
+    /// AE#418: the axis a decode run beginning at `index` plays on. Only the segment an epoch's gate
+    /// opened into can carry an offset; every other index was cut on its own boundary and is worth
+    /// exactly its advertised position, so a run beginning there must not inherit the previous run's.
+    static func axisShiftForRun(
+        beginningAt index: Int, anchorIndex: Int, anchorShiftSeconds: Double
+    ) -> Double {
+        return index == anchorIndex ? anchorShiftSeconds : 0
+    }
+
+    private func publishPlaylistShift(_ seconds: Double, seamItemSeconds: Double) {
         setPlaylistShiftSeconds(seconds)
         // Refresh every native subtitle store's shift so cuesInWindow stays on the correct AVPlayer
         // axis after a restart (matroska seek can land past the planned keyframe, #55). Snapshot under

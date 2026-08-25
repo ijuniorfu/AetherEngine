@@ -377,15 +377,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         shiftLock.lock(); _playlistShiftSeconds = value; shiftLock.unlock()
     }
 
-    /// AE#418: the segment whose own start establishes the axis of the run AVPlayer is playing, and
-    /// by how much. Only an epoch's FIRST segment can carry a non-zero offset: a gate that had to
-    /// open below its boundary puts that much extra content into that one segment, and every segment
-    /// the epoch cuts after it starts exactly on its boundary. One pair, not a table, because a later
-    /// epoch marching through the same index produces an axis-true segment there and a table would
-    /// keep claiming the old offset for it.
+    /// AE#418 round 2: what each stored segment adds to AVPlayer's axis when AVPlayer PLACES it.
+    ///
+    /// Only an epoch's FIRST segment can carry a non-zero offset: a gate that had to open below its
+    /// boundary puts that much extra content into that one segment, and every segment the epoch cuts
+    /// after it starts exactly on its boundary. Keyed by index rather than kept as one pair, because
+    /// several epochs can leave such a segment in the cache at once; an epoch marching through an
+    /// index rewrites it axis-true, which is what `recordingEpochAt` drops the entries above for.
     private let anchorShiftLock = NSLock()
-    private var anchorShiftIndex: Int = .min
-    private var anchorShiftSeconds: Double = 0
+    private var epochShiftByIndex: [Int: Double] = [:]
+    /// The last index a fetch declared. A cold fetch reaches the provider BEFORE the producer has
+    /// opened its gate, so the placement can precede the offset it is worth; this is what lets the
+    /// gate publish for a placement that already happened.
+    private var lastPlacedIndex: Int = .min
     private let shiftLock = NSLock()
     private var _playlistShiftSeconds: Double = 0
 
@@ -1586,12 +1590,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         // 7. Wire provider, server, and URL.
         let manifestCodecs = audioHLSCodecs.map { "\(primaryCodecs),\($0)" } ?? primaryCodecs
-        // AE#418: where AVPlayer starts a fresh decode run decides the axis it plays on.
-        var coldAnchorHandler: (@Sendable (Int) -> Void)?
+        // AE#418: a segment AVPlayer places is what moves the axis it reads.
+        var segmentPlacedHandler: (@Sendable (Int) -> Void)?
         if !isLiveSession {
-            coldAnchorHandler = { [weak self] idx in
+            segmentPlacedHandler = { [weak self] idx in
                 guard let self else { return }
-                self.handleColdAnchor(at: idx)
+                self.handleSegmentPlaced(at: idx)
             }
         }
         let prov = VideoSegmentProvider(
@@ -1647,7 +1651,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             nativeSubtitleDefaultOrdinal: nativeSubtitleDefaultOrdinal,
             nativeSubtitleWholeProgram: nativeSubtitleWholeProgram,
             currentShiftSeconds: { [weak self] in (self?.playlistShiftSeconds ?? 0) + (self?.subtitleStreamStartSeconds ?? 0) },
-            coldAnchorHandler: coldAnchorHandler
+            segmentPlacedHandler: segmentPlacedHandler
         )
         self.provider = prov
         if isLiveSession {
@@ -2227,55 +2231,114 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private func handleVideoShiftKnown(_ shiftPts: Int64, firstItemTfdtPts: Int64) {
         let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
         let seamItemSeconds = Double(firstItemTfdtPts) * sourceVideoTbSeconds
-        // AE#418: record which segment this axis belongs to, so a decode run AVPlayer starts
-        // somewhere else does not inherit it.
-        if !isLiveSession {
-            let index = segmentIndexForPlaylistTime(seamItemSeconds)
-            anchorShiftLock.lock()
-            anchorShiftIndex = index
-            anchorShiftSeconds = seconds
-            anchorShiftLock.unlock()
+        // Live rebases the whole timeline at a program boundary and nothing older comes back on
+        // screen, so its axis is the epoch's own and it publishes here as it always has.
+        guard !isLiveSession else {
+            publishPlaylistShift(seconds, seamItemSeconds: seamItemSeconds)
+            return
         }
-        publishPlaylistShift(seconds, seamItemSeconds: seamItemSeconds)
+        // AE#418 round 2: on VOD the axis moves when AVPlayer PLACES this segment, not when the
+        // producer writes it. Record what the segment is worth and let the placement publish it; an
+        // epoch AVPlayer never fetches from must not move the clock at all.
+        let index = segmentIndexForPlaylistTime(seamItemSeconds)
+        anchorShiftLock.lock()
+        epochShiftByIndex = Self.epochShiftTable(
+            epochShiftByIndex, recordingEpochAt: index, shift: seconds)
+        let placementAlreadyHappened = lastPlacedIndex == index
+        anchorShiftLock.unlock()
+        if placementAlreadyHappened {
+            handleSegmentPlaced(at: index)
+        }
     }
 
-    /// AE#418: AVPlayer began a fresh decode run at `index`, so the axis is whatever THAT segment's
-    /// own start is worth, and the previous run's offset stops applying.
+    /// AE#418 round 2: AVPlayer put the segment at `index` into its timeline, so whatever that
+    /// segment carries below its advertised start moves the axis by that much.
     ///
-    /// Measured with `play --picture-probe` on a fixture whose picture states its own source time: a
-    /// run started on an epoch's overlong first segment carries that segment's offset for as long as
-    /// it plays (across segment boundaries, so it is a property of the run and not of each segment),
-    /// and a seek that leaves the loaded region without provoking a restart lands on a sequentially
-    /// cut, axis-true segment, where the previous offset must not still be folded in. Publishing the
-    /// producer's offset alone got the first case right and the second wrong by the same amount.
-    func handleColdAnchor(at index: Int) {
+    /// Measured with `play --picture-probe` on a fixture whose picture states its own source time,
+    /// at re-aims of 1, 3, 5, 7, 9 and 11 s: the offset **composes**. A run keeps the offset it has
+    /// across every boundary it plays through (round 1 measured that), and re-placing an overlong
+    /// segment adds its offset again on top: a resume that opened 9 s below its boundary reads
+    /// `axisErr=-9.000`, and a seek that makes AVPlayer fetch that same segment a second time reads
+    /// `-18.000`, not `-9.000` and not the `0.000` round 1 published there.
+    ///
+    /// Round 1 keyed this to "the run began here" and answered it from the fetch sequence, which is
+    /// what the reporter's seek burst falsified: a fetch that does not follow its predecessor happens
+    /// while AVPlayer stays inside the run it is already playing, and the axis was then dropped to
+    /// zero under a picture that had not moved. Reproduced on the fixture (`start 53`, seek to 80:
+    /// `capErr=-8.983`), and gone once the axis only ever moves by what a placed segment is worth.
+    func handleSegmentPlaced(at index: Int) {
         guard !isLiveSession else { return }
         anchorShiftLock.lock()
-        let shift = Self.axisShiftForRun(
-            beginningAt: index, anchorIndex: anchorShiftIndex, anchorShiftSeconds: anchorShiftSeconds)
+        lastPlacedIndex = index
+        let epochShift = epochShiftByIndex[index] ?? 0
         anchorShiftLock.unlock()
-        guard abs(shift - playlistShiftSeconds) > 0.001 else { return }
+        guard epochShift != 0 else { return }
         restartLock.lock()
         let plannedStart = index >= 0 && index < segmentPlan.count
             ? segmentPlan[index].startSeconds : nil
         restartLock.unlock()
         guard let plannedStart else { return }
+        let current = playlistShiftSeconds
+        let composed = Self.axisShift(after: current, placing: epochShift)
+        let seam = Self.seamItemSeconds(advertisedStart: plannedStart, currentShift: current)
         EngineLog.emit(
-            "[HLSVideoEngine] #418 decode run re-anchored at seg\(index) "
-            + "(advertised \(String(format: "%.3f", plannedStart))s): axis shift "
-            + "\(String(format: "%.3f", playlistShiftSeconds))s -> \(String(format: "%.3f", shift))s",
+            "[HLSVideoEngine] #418 seg\(index) placed (advertised \(String(format: "%.3f", plannedStart))s, "
+            + "worth \(String(format: "%.3f", epochShift))s): axis shift "
+            + "\(String(format: "%.3f", current))s -> \(String(format: "%.3f", composed))s "
+            + "from item \(String(format: "%.3f", seam))s",
             category: .session
         )
-        publishPlaylistShift(shift, seamItemSeconds: plannedStart)
+        publishPlaylistShift(composed, seamItemSeconds: seam)
     }
 
-    /// AE#418: the axis a decode run beginning at `index` plays on. Only the segment an epoch's gate
-    /// opened into can carry an offset; every other index was cut on its own boundary and is worth
-    /// exactly its advertised position, so a run beginning there must not inherit the previous run's.
-    static func axisShiftForRun(
-        beginningAt index: Int, anchorIndex: Int, anchorShiftSeconds: Double
-    ) -> Double {
-        return index == anchorIndex ? anchorShiftSeconds : 0
+    /// AE#418 round 2: the axis after AVPlayer places a segment worth `epochShift`. It composes,
+    /// because AVPlayer puts the placed segment's advertised start where its CURRENT mapping says
+    /// that position is, not where the playlist says it is.
+    static func axisShift(after currentShift: Double, placing epochShift: Double) -> Double {
+        return currentShift + epochShift
+    }
+
+    /// The item position the placed segment's content begins at: its advertised start, read through
+    /// the axis that was in effect before it landed. Everything below that is still the old epoch's.
+    static func seamItemSeconds(advertisedStart: Double, currentShift: Double) -> Double {
+        return advertisedStart - currentShift
+    }
+
+    /// Record what the epoch beginning at `index` is worth, dropping every entry at or above it: a
+    /// producer that starts writing there rewrites those segments on their own boundaries, so an
+    /// older epoch's offset must stop being claimed for them.
+    static func epochShiftTable(
+        _ table: [Int: Double], recordingEpochAt index: Int, shift: Double
+    ) -> [Int: Double] {
+        var next = table.filter { $0.key < index }
+        if shift != 0 { next[index] = shift }
+        return next
+    }
+
+    /// AVPlayer discards a sub-second axis offset at a seek and snaps back to the playlist; a larger
+    /// one it keeps. Measured on the fixture: `-0.500` and `-0.875` read `axisErr=0.000` after a seek,
+    /// `-1.000`, `-1.083`, `-1.292`, `-1.500`, `-3.000`, `-4.000`, `-7.000`, `-9.000` and `-11.000`
+    /// all survive one unchanged. Anything below this is worth less than the frame it would move.
+    static let axisSnapsBelowSeconds = 1.0
+
+    static func axisShiftAfterSeek(_ shift: Double) -> Double {
+        return abs(shift) < axisSnapsBelowSeconds ? 0 : shift
+    }
+
+    /// AE#418 round 2: the host seeked and the axis was small enough for AVPlayer to throw away.
+    /// Publishing zero from the landing forward is what keeps the clock over the picture; the seam
+    /// leaves everything below the landing on the axis its bytes were placed with.
+    func snapAxisAfterSeek(landingItemSeconds: Double) {
+        guard !isLiveSession else { return }
+        let current = playlistShiftSeconds
+        let snapped = Self.axisShiftAfterSeek(current)
+        guard snapped != current else { return }
+        EngineLog.emit(
+            "[HLSVideoEngine] #418 axis \(String(format: "%.3f", current))s discarded at the seek "
+            + "landing \(String(format: "%.3f", landingItemSeconds))s (AVPlayer snaps a sub-second axis)",
+            category: .session
+        )
+        publishPlaylistShift(snapped, seamItemSeconds: landingItemSeconds)
     }
 
     private func publishPlaylistShift(_ seconds: Double, seamItemSeconds: Double) {

@@ -1828,9 +1828,17 @@ public final class AetherEngine: ObservableObject {
         guard let host = nativeHost, let player = currentAVPlayer,
               let item = player.currentItem else { return }
         guard player.timeControlStatus != .paused else { return }
+        // AE#422: the rendered position comes from the mirror, not from `player.currentTime()`.
+        // Two reasons, and either one is enough. It is the right VALUE: this parameter exists to keep
+        // the anchor from sitting below the frame on screen (#115), and `currentTime()` is the clock,
+        // which diverges from the rendered frame during exactly the landing this runs in (#123).
+        // And it is the right THREAD: `currentTime()` is a sync XPC round trip to mediaserverd, and
+        // this line runs on the main actor in the one state where that server is not answering. The
+        // reporter measured 13.3 s of fully blocked app on such a read, returning 30 ms after the
+        // watchdog fired. The mirror is written by the periodic observer and costs a lock.
         let anchor = Self.recoveryAnchorPosition(
             frozenPosition: position, pendingSeekTarget: pendingRecoverySeekClockTarget,
-            currentRendered: player.currentTime().seconds)
+            currentRendered: renderedPositionMirror.get())
         stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
         EngineLog.emit(
             "[AetherEngine] #65 re-engaging stalled AVPlayer (\(trigger)): nudge seek to "
@@ -2070,9 +2078,11 @@ public final class AetherEngine: ObservableObject {
         guard Self.stalledConsumerRecoveryAllowed(
             consumerIsPaused: player.timeControlStatus == .paused,
             allowPausedConsumer: allowPausedConsumer) else { return }
+        // AE#422: mirror, not `currentTime()`. See `reengageStalledConsumer`; this path runs one
+        // grace window deeper into the same stall.
         let anchor = Self.recoveryAnchorPosition(
             frozenPosition: position, pendingSeekTarget: pendingRecoverySeekClockTarget,
-            currentRendered: player.currentTime().seconds)
+            currentRendered: renderedPositionMirror.get())
         stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
         EngineLog.emit(
             "[AetherEngine] #65 nudge did not revive the consumer; reloading item at "
@@ -4082,8 +4092,12 @@ public final class AetherEngine: ObservableObject {
                 // window is only wide enough to keep a FAR backward target clear of it, and a near one
                 // (less than the window back) would otherwise read the old, full buffer as progress at the
                 // target and earn an extension the producer never served.
-                let targetIsland = host.bufferedSecondsAtTarget(
-                    clockTarget, excludeAtOrAbove: seekIsForward ? nil : avpReal)
+                // AE#422: one off-main reading for both figures. This loop runs while a seek is not
+                // landing, so every synchronous read here is taken in the state where the media
+                // server is least likely to answer, and it was doing four of them per pass.
+                let bufferSnapshot = await host.seekBufferSnapshot(
+                    target: clockTarget, excludeAtOrAbove: seekIsForward ? nil : avpReal)
+                let targetIsland = bufferSnapshot.targetIsland
                 if Self.shouldExtendSeekDeadlineForProgress(
                     targetIslandSeconds: targetIsland,
                     previousIslandSeconds: lastTargetIslandSeconds,
@@ -4106,7 +4120,7 @@ public final class AetherEngine: ObservableObject {
                         "[AetherEngine] seek slow but producer serving target "
                         + "(island=\(String(format: "%.2f", targetIsland))s at target, "
                         + "rendered=\(String(format: "%.2f", avpReal))s "
-                        + "buffered=\(String(format: "%.2f", host.bufferedEnd))s); extending budget "
+                        + "buffered=\(String(format: "%.2f", bufferSnapshot.bufferedEnd))s); extending budget "
                         + "\(deadlineExtensionsUsed)/\(Self.nativeSeekMaxDeadlineExtensions)",
                         category: .engine
                     )
@@ -4130,7 +4144,7 @@ public final class AetherEngine: ObservableObject {
                 // the re-anchored region, and wait for it to land -- reconciling FORWARD to the target,
                 // never back to the rendered position.
                 let wasStarved = seekIsWedged(
-                    renderedTime: avpReal, bufferedEnd: host.bufferedEnd)
+                    renderedTime: avpReal, bufferedEnd: bufferSnapshot.bufferedEnd)
                 // `targetBeyondCoverage` (AE#141) was computed above, before the extend branch, so it
                 // gates both the extension and this re-anchor decision.
                 let reason = wasStarved
@@ -4162,7 +4176,7 @@ public final class AetherEngine: ObservableObject {
                         + "\(reason), "
                         + "island=\(String(format: "%.2f", targetIsland))s at target, "
                         + "rendered=\(String(format: "%.2f", avpReal))s "
-                        + "buffered=\(String(format: "%.2f", host.bufferedEnd))s); holding clock at target "
+                        + "buffered=\(String(format: "%.2f", bufferSnapshot.bufferedEnd))s); holding clock at target "
                         + "\(String(format: "%.2f", target))s"
                         + (didReanchor
                             ? " and re-anchored producer at \(String(format: "%.2f", recoveryAnchor))s, re-seeking"

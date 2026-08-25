@@ -10,53 +10,11 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.43.0] - 2026-08-25
+
 ### Fixed
-
-- **A re-aimed gate stepped over the sync sample that would have covered its boundary, so a resume
-  into a keyframe drought landed further back than the source required (AE#423).** Each attempt
-  opens on the first sync sample at or above where it aimed, and everything above the previous aim
-  is already proven empty, so the DISTANCE between two attempts is the worst case by which the gate
-  can overshoot the best covering sample. The backoff doubled (4, 8, 16, 32), which spends that
-  error where it is largest: on the AE#408 fixture the 8 -> 16 jump aimed at 36.0, opened at 38.417,
-  and never saw the 43.0 sitting between it and the boundary at 52.0. The steps are now even
-  (4, 8, 12, ... 32), same reach, same three attempts on that fixture, and the gate opens at 43.0.
-  Even steps cost no more to walk because `gateProvenEmptyFromPts` stops each scan at the previous
-  aim rather than at the boundary, so an attempt reads its own window and not the whole drought.
-  Measured: `presentedShift` -13.583 s to -9.000 s on the resume, and `seektest` settles from the
-  seek side at 3.80 s of error against 8.38 s before, same burst and same throttle. The control
-  fixture, whose Cues are its sync samples, re-aims zero times on both arms.
-
-- **Recovery and deadline paths read AVPlayer synchronously on the main actor, where a busy media
-  server blocks the whole app (AE#422).** These getters are sync XPC round trips to mediaserverd;
-  `AVFoundationOffMain` has said so since #134 ("past the watchdog threshold, a process kill") but
-  only the 30 s memory probe used it. The reporter measured `AVPlayerItem.currentTime()` from a
-  host's main actor not returning for 13.3 s during a consumer wedge, coming back 30 ms after the
-  re-engage watchdog fired, with the app frozen throughout. Every path that runs while the server is
-  the thing not answering now reads off-main or from a mirror: the seek-deadline loop took four
-  round trips per pass (one island, three `bufferedEnd`) and now takes one batched
-  `seekBufferSnapshot`; the stall nudge and the item reload read the rendered-position mirror; the
-  VOD shift-publish line awaits its buffer figure; and the #287 premature-end recovery batches its
-  three witnesses. For the recovery anchors the mirror is also the correct VALUE rather than merely
-  the cheap one: `recoveryAnchorPosition(currentRendered:)` exists to keep the anchor off a frame
-  the viewer has already passed (#115), and `currentTime()` is the clock, which diverges from the
-  rendered frame during exactly the landing those paths run in (#123). The wedge path was already
-  passing the mirror; the stall watchdog next to it was not. Reads inside `load` and the seek
-  completion are deliberately left synchronous: both run at a moment where AVPlayer has just
-  answered.
-
-- **A wedge whose target was already on disk spent six seconds re-anchoring the producer before
-  nudging the consumer that was actually stuck (AE#421).** The wedge itself is an AVPlayer state
-  (#65 / #93: zero GETs while the item never fails), and the ladder had one repair for it: move the
-  producer, then, if the consumer is still silent after the grace window, ask the host to nudge it.
-  Two field logs say the first half could not work in their case. On an Apple TV the pump had
-  marched to segment 15 and was sent back to segment 3, the consumer fetched nothing for the whole
-  six seconds, and the nudge that followed landed the seek in 240 ms; the Mac run has the same
-  shape with a 44 MB segment already served. A re-anchor is the repair for a consumer STARVED of
-  content nobody is producing, so it is now chosen on that question: if the segment the consumer is
-  silent about is already stored, the nudge goes first and the re-anchor stays as the fallback for
-  a nudge that does not take. The `WEDGE BROKEN` line carries `consumerTargetStored=` and
-  `highStored=` so a report can say which of the two a wedge called for, which previously had to be
-  inferred. The 5 s park detection is deliberately unchanged.
 
 - **After a restart whose gate re-aimed below its boundary, the clock ran ahead of the picture by
   the re-aim (AE#418).** Captions early by the same amount, and a synced host's reported position
@@ -79,6 +37,52 @@ the public-API contract.
   went from `-13.550` to `-0.009` seconds of error between the picture and `sourceTime`; the
   control fixture, whose Cues are its sync samples, is untouched. The muxer's own shift is
   unchanged, so no landing moves.
+
+- **A wedge whose target was already on disk spent six seconds re-anchoring the producer before
+  nudging the consumer that was actually stuck (AE#421).** The wedge itself is an AVPlayer state
+  (#65 / #93: zero GETs while the item never fails), and the ladder had one repair for it: move the
+  producer, then, if the consumer is still silent after the grace window, ask the host to nudge it.
+  Two field logs say the first half could not work in their case. On an Apple TV the pump had
+  marched to segment 15 and was sent back to segment 3, the consumer fetched nothing for the whole
+  six seconds, and the nudge that followed landed the seek in 240 ms; the Mac run has the same
+  shape with a 44 MB segment already served. A re-anchor is the repair for a consumer STARVED of
+  content nobody is producing, so it is now chosen on that question: if the segment the consumer is
+  silent about is already stored, the nudge goes first and the re-anchor stays as the fallback for
+  a nudge that does not take. The `WEDGE BROKEN` line carries `consumerTargetStored=` and
+  `highStored=` so a report can say which of the two a wedge called for, which previously had to be
+  inferred. The 5 s park detection is deliberately unchanged.
+
+- **Recovery and deadline paths read AVPlayer synchronously on the main actor, where a busy media
+  server blocks the whole app (AE#422).** These getters are sync XPC round trips to mediaserverd;
+  `AVFoundationOffMain` has said so since #134 ("past the watchdog threshold, a process kill") but
+  only the 30 s memory probe used it. The reporter measured `AVPlayerItem.currentTime()` from a
+  host's main actor not returning for 13.3 s during a consumer wedge, coming back 30 ms after the
+  re-engage watchdog fired, with the app frozen throughout. Every path that runs while the server is
+  the thing not answering now reads off-main or from a mirror: the seek-deadline loop took four
+  round trips per pass (one island, three `bufferedEnd`) and now takes one batched
+  `seekBufferSnapshot`; the stall nudge and the item reload read the rendered-position mirror; the
+  VOD shift-publish line awaits its buffer figure; and the #287 premature-end recovery batches its
+  three witnesses. For the recovery anchors the mirror is also the correct VALUE rather than merely
+  the cheap one: `recoveryAnchorPosition(currentRendered:)` exists to keep the anchor off a frame
+  the viewer has already passed (#115), and `currentTime()` is the clock, which diverges from the
+  rendered frame during exactly the landing those paths run in (#123). The wedge path was already
+  passing the mirror; the stall watchdog next to it was not. Reads inside `load` and the seek
+  completion are deliberately left synchronous: both run at a moment where AVPlayer has just
+  answered.
+
+- **A re-aimed gate stepped over the sync sample that would have covered its boundary, so a resume
+  into a keyframe drought landed further back than the source required (AE#423).** Each attempt
+  opens on the first sync sample at or above where it aimed, and everything above the previous aim
+  is already proven empty, so the DISTANCE between two attempts is the worst case by which the gate
+  can overshoot the best covering sample. The backoff doubled (4, 8, 16, 32), which spends that
+  error where it is largest: on the AE#408 fixture the 8 -> 16 jump aimed at 36.0, opened at 38.417,
+  and never saw the 43.0 sitting between it and the boundary at 52.0. The steps are now even
+  (4, 8, 12, ... 32), same reach, same three attempts on that fixture, and the gate opens at 43.0.
+  Even steps cost no more to walk because `gateProvenEmptyFromPts` stops each scan at the previous
+  aim rather than at the boundary, so an attempt reads its own window and not the whole drought.
+  Measured: `presentedShift` -13.583 s to -9.000 s on the resume, and `seektest` settles from the
+  seek side at 3.80 s of error against 8.38 s before, same burst and same throttle. The control
+  fixture, whose Cues are its sync samples, re-aims zero times on both arms.
 
 ## [6.42.0] - 2026-08-25
 

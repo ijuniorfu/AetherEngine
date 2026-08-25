@@ -729,8 +729,15 @@ final class H264CompositionOffsetRepairSession {
         )
         switch verdict {
         case .repair(let plan):
+            // The cadence and its phase belong in the line: on a fractional ladder they are the
+            // reading the verdict rests on, and a repair that reports only a rounded step cannot be
+            // told apart from one that measured the ladder wrong.
+            let cadenceDescription = plan.cadence.map {
+                " cadence=\($0.numerator)/\($0.denominator) phase=\(plan.ladderPhase)"
+                    + " ladderAhead=\(plan.ladderOrdinalOffset)"
+            } ?? ""
             verdictDescription = "repair step=\(plan.step) lead=\(plan.decodeLead) "
-                + "shift=\(plan.shift) pocStep=\(plan.pocStep)"
+                + "shift=\(plan.shift) pocStep=\(plan.pocStep)" + cadenceDescription
             phase = .repairing
             var rewriter = H264CompositionOffsetRepair.Rewriter(plan: plan)
             for entry in held where entry.packet.pointee.stream_index == streamIndex {

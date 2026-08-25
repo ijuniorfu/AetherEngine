@@ -12,6 +12,20 @@ the public-API contract.
 
 ### Fixed
 
+- **A re-aimed gate stepped over the sync sample that would have covered its boundary, so a resume
+  into a keyframe drought landed further back than the source required (AE#423).** Each attempt
+  opens on the first sync sample at or above where it aimed, and everything above the previous aim
+  is already proven empty, so the DISTANCE between two attempts is the worst case by which the gate
+  can overshoot the best covering sample. The backoff doubled (4, 8, 16, 32), which spends that
+  error where it is largest: on the AE#408 fixture the 8 -> 16 jump aimed at 36.0, opened at 38.417,
+  and never saw the 43.0 sitting between it and the boundary at 52.0. The steps are now even
+  (4, 8, 12, ... 32), same reach, same three attempts on that fixture, and the gate opens at 43.0.
+  Even steps cost no more to walk because `gateProvenEmptyFromPts` stops each scan at the previous
+  aim rather than at the boundary, so an attempt reads its own window and not the whole drought.
+  Measured: `presentedShift` -13.583 s to -9.000 s on the resume, and `seektest` settles from the
+  seek side at 3.80 s of error against 8.38 s before, same burst and same throttle. The control
+  fixture, whose Cues are its sync samples, re-aims zero times on both arms.
+
 - **Recovery and deadline paths read AVPlayer synchronously on the main actor, where a busy media
   server blocks the whole app (AE#422).** These getters are sync XPC round trips to mediaserverd;
   `AVFoundationOffMain` has said so since #134 ("past the watchdog threshold, a process kill") but

@@ -833,6 +833,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return actualItemPts < desiredTfdtPts ? actualItemPts : desiredTfdtPts
     }
 
+    /// AE#418: the offset the HOST folds, which is not the offset the MUXER applies.
+    ///
+    /// Measured with `aetherctl play --picture-probe` against a fixture whose picture states its own
+    /// source time: AVPlayer presents a segment at the position the PLAYLIST gives it, not at the
+    /// tfdt the segment carries. So the axis a consumer reads is the distance between the first
+    /// frame's source time and the segment's ADVERTISED start, whatever the muxer wrote. On a pinned
+    /// (late) gate the pin makes the two identical, which is why publishing the mux shift held until
+    /// the early-opening gate of AE#408 landed; on a re-aimed gate they differ by the whole re-aim,
+    /// and the clock then ran that far ahead of the picture (captions early by the same amount).
+    static func presentedShiftPts(actualFirstDts: Int64, desiredTfdtPts: Int64) -> Int64 {
+        guard actualFirstDts != Int64.min, desiredTfdtPts != Int64.min else { return 0 }
+        return actualFirstDts &- desiredTfdtPts
+    }
+
     /// AE#408: aim the gate below a boundary that cannot be opened on, so the segment covers its own
     /// advertised start. Returns false when there is nothing left to try, in which case the caller
     /// keeps the old behaviour (open at the next random-access point and carry the shift).
@@ -3153,13 +3167,31 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             + (pinnedTfdtPts != desiredFirstVideoTfdtPts
                                 ? "pinnedTo=\(pinnedTfdtPts) " : "")
                             + "shift=\(videoShiftPts) "
+                            + (Self.presentedShiftPts(actualFirstDts: firstActualVideoDts,
+                                                      desiredTfdtPts: desiredFirstVideoTfdtPts) != videoShiftPts
+                                ? "presentedShift=\(Self.presentedShiftPts(actualFirstDts: firstActualVideoDts, desiredTfdtPts: desiredFirstVideoTfdtPts)) " : "")
                             // #133 follow-up diag: PID + reconstruct state per epoch, so retest logs separate a
                             // same-PID mid-stream parameter-set change from a reopen storm (each reopen is a fresh
                             // gate-open here; a same-PID change is NOT, it stays in one epoch and rotates in place).
                             + "videoPID=\(videoStreamIndex) reconstructed=\(pendingJoinVideoConfig != nil)",
                             category: .session
                         )
-                        onVideoShiftKnown?(videoShiftPts, pinnedTfdtPts)
+                        // AE#418: what the HOST folds is not the muxer's shift. Measured with
+                        // `play --picture-probe` against a picture that states its own source time:
+                        // AVPlayer presents a segment at the position the PLAYLIST gives it, not at
+                        // the tfdt the segment carries, so a gate that opened below its boundary has
+                        // its content presented that far late whatever it wrote. The muxer's shift
+                        // stays what it is (it is the source-to-item offset for the bytes), and the
+                        // axis the clock folds with is measured against the ADVERTISED start, which
+                        // is where AVPlayer will put the frame. The two coincide on a pinned (late)
+                        // gate, which is why publishing the mux shift held until the early-opening
+                        // gate landed in 6.40.0. Same reason the seam activates at the advertised
+                        // start: the stretch below it still belongs to the previous epoch on screen.
+                        onVideoShiftKnown?(
+                            Self.presentedShiftPts(
+                                actualFirstDts: firstActualVideoDts,
+                                desiredTfdtPts: desiredFirstVideoTfdtPts),
+                            desiredFirstVideoTfdtPts)
                         // #133 follow-up: the gating IDR's in-band SPS/PPS back this epoch's muxer avcC. Establish
                         // the baseline so a later same-PID parameter-set change (encoder restart / regional splice)
                         // is detected against it. joinConfig is non-nil only in the liveH264AnnexBJoin scope.

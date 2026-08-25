@@ -10,7 +10,29 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **After a restart whose gate re-aimed below its boundary, the clock ran ahead of the picture by
+  the re-aim (AE#418).** Captions early by the same amount, and a synced host's reported position
+  with them; lip sync survived because audio and video sit in the same segment. AE#408's
+  early-opening gate was built on the assumption that a segment keeping its own timestamps leaves
+  the item axis where the plan puts it, so it published no shift for that case. The assumption is
+  false, and nothing in the engine could see it: every axis observable here describes what the
+  engine WROTE, none said where AVPlayer PUT it. `aetherctl play --picture-probe` now reads the
+  source time out of AVPlayer's own video output, against a fixture whose picture states its own
+  frame number (`Scripts/timecode-fixture.sh`), and the reading is that **AVPlayer presents a
+  segment at the position the playlist gives it, not at the tfdt it carries, and then plays
+  continuously from there.** So the offset a consumer folds is measured against the segment's
+  ADVERTISED start (on a pinned late gate the two are identical, which is why publishing the
+  muxer's shift held until a gate that opens early existed), and that offset belongs to the decode
+  run rather than to the timeline: only an epoch's first segment can carry one, it holds across
+  every boundary the run plays through, and a seek that leaves the loaded region without provoking
+  a restart begins a fresh run on an axis-true segment where it stops applying. Publishing the
+  first half alone mirrors the defect instead of fixing it (measured `capErr +0.892` where it had
+  been `-0.875`). On a fixture carrying the reporting shape, a resume whose gate re-aimed 13.583 s
+  went from `-13.550` to `-0.009` seconds of error between the picture and `sourceTime`; the
+  control fixture, whose Cues are its sync samples, is untouched. The muxer's own shift is
+  unchanged, so no landing moves.
 
 ## [6.42.0] - 2026-08-25
 

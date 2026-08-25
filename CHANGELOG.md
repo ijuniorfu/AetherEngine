@@ -12,6 +12,20 @@ the public-API contract.
 
 ### Fixed
 
+- **A wedge whose target was already on disk spent six seconds re-anchoring the producer before
+  nudging the consumer that was actually stuck (AE#421).** The wedge itself is an AVPlayer state
+  (#65 / #93: zero GETs while the item never fails), and the ladder had one repair for it: move the
+  producer, then, if the consumer is still silent after the grace window, ask the host to nudge it.
+  Two field logs say the first half could not work in their case. On an Apple TV the pump had
+  marched to segment 15 and was sent back to segment 3, the consumer fetched nothing for the whole
+  six seconds, and the nudge that followed landed the seek in 240 ms; the Mac run has the same
+  shape with a 44 MB segment already served. A re-anchor is the repair for a consumer STARVED of
+  content nobody is producing, so it is now chosen on that question: if the segment the consumer is
+  silent about is already stored, the nudge goes first and the re-anchor stays as the fallback for
+  a nudge that does not take. The `WEDGE BROKEN` line carries `consumerTargetStored=` and
+  `highStored=` so a report can say which of the two a wedge called for, which previously had to be
+  inferred. The 5 s park detection is deliberately unchanged.
+
 - **After a restart whose gate re-aimed below its boundary, the clock ran ahead of the picture by
   the re-aim (AE#418).** Captions early by the same amount, and a synced host's reported position
   with them; lip sync survived because audio and video sit in the same segment. AE#408's

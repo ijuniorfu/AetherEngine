@@ -12,6 +12,24 @@ the public-API contract.
 
 ### Fixed
 
+- **Recovery and deadline paths read AVPlayer synchronously on the main actor, where a busy media
+  server blocks the whole app (AE#422).** These getters are sync XPC round trips to mediaserverd;
+  `AVFoundationOffMain` has said so since #134 ("past the watchdog threshold, a process kill") but
+  only the 30 s memory probe used it. The reporter measured `AVPlayerItem.currentTime()` from a
+  host's main actor not returning for 13.3 s during a consumer wedge, coming back 30 ms after the
+  re-engage watchdog fired, with the app frozen throughout. Every path that runs while the server is
+  the thing not answering now reads off-main or from a mirror: the seek-deadline loop took four
+  round trips per pass (one island, three `bufferedEnd`) and now takes one batched
+  `seekBufferSnapshot`; the stall nudge and the item reload read the rendered-position mirror; the
+  VOD shift-publish line awaits its buffer figure; and the #287 premature-end recovery batches its
+  three witnesses. For the recovery anchors the mirror is also the correct VALUE rather than merely
+  the cheap one: `recoveryAnchorPosition(currentRendered:)` exists to keep the anchor off a frame
+  the viewer has already passed (#115), and `currentTime()` is the clock, which diverges from the
+  rendered frame during exactly the landing those paths run in (#123). The wedge path was already
+  passing the mirror; the stall watchdog next to it was not. Reads inside `load` and the seek
+  completion are deliberately left synchronous: both run at a moment where AVPlayer has just
+  answered.
+
 - **A wedge whose target was already on disk spent six seconds re-anchoring the producer before
   nudging the consumer that was actually stuck (AE#421).** The wedge itself is an AVPlayer state
   (#65 / #93: zero GETs while the item never fails), and the ladder had one repair for it: move the

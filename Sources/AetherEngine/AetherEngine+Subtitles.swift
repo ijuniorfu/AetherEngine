@@ -273,9 +273,9 @@ extension AetherEngine {
         // #416: the pump is rendering the frame at the playhead, so it has necessarily read from
         // wherever it opened up to here. That is what the pump can state without a hook in its read
         // loop, and it is exactly the stretch a landing claim rests on: the ground between a set
-        // decoded behind the playhead and the playhead itself. Its forward lookahead is left
-        // unclaimed, which costs a landing line at worst and can never invent coverage.
-        store.noteHarvestProgress(.pump, through: playhead)
+        // decoded behind the playhead and the playhead itself. Its lookahead beyond the playhead
+        // comes from the packets it harvests, which the store notes as it takes them.
+        store.noteHarvestReach(.pump, through: playhead)
         // #271: wall time since the previous tick, so a tick that itself ran long cannot be read as
         // a seek by the next one. See SubtitleOverlayDrainer.drainPlan.
         let tickUptime = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000

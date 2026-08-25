@@ -60,7 +60,14 @@ struct SubtitleHarvestCoverage: Sendable, Equatable {
         open[writer] = Span(from: seconds, through: seconds)
     }
 
-    /// This reader's current run has now read through `seconds`.
+    /// One step of a reader working its way forwards: its loop has read through `seconds`.
+    ///
+    /// A step larger than `maxUnannouncedAdvanceSeconds` is not treated as reading but as a
+    /// reposition its reader did not announce, and starts a new run. That costs the coverage of a
+    /// reader whose notes are genuinely that far apart, and it is the safety net for the one failure
+    /// mode this type must not have: extending a run across ground nobody read would put the defect
+    /// back silently. Callers whose claim rests on an invariant rather than on observed steps use
+    /// `noteReach` instead.
     mutating func noteProgress(_ writer: SubtitlePacketStore.Writer, through seconds: Double) {
         guard seconds.isFinite else { return }
         guard var run = open[writer] else {
@@ -74,6 +81,30 @@ struct SubtitleHarvestCoverage: Sendable, Equatable {
             open[writer] = Span(from: seconds, through: seconds)
             return
         }
+        run.through = seconds
+        open[writer] = run
+    }
+
+    /// The caller states that this reader's current run has reached `seconds` from its anchor,
+    /// however far that is in one note.
+    ///
+    /// The pump's coverage is stated this way, because it does not come from watching its loop: it
+    /// comes from playback rendering at the playhead, which cannot happen unless the pump read
+    /// everything from where it opened up to there. A step-size rule has nothing to say about that
+    /// claim, and would break it exactly where it matters: a track selected an hour into a film
+    /// makes the drain's first note an hour-long step over ground the pump certainly read, and
+    /// refusing it would dark the very landing the selection is asking for.
+    ///
+    /// This trusts every reposition to be announced with `noteAnchor`. For the pump that is the
+    /// producer's open and restart on the native path (`makeProducer` has exactly those two
+    /// callers) and the host reposition on the software path.
+    mutating func noteReach(_ writer: SubtitlePacketStore.Writer, through seconds: Double) {
+        guard seconds.isFinite else { return }
+        guard var run = open[writer] else {
+            open[writer] = Span(from: seconds, through: seconds)
+            return
+        }
+        guard seconds > run.through else { return }
         run.through = seconds
         open[writer] = run
     }

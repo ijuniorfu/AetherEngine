@@ -138,10 +138,18 @@ final class SubtitlePacketStore: @unchecked Sendable {
         coverage.noteAnchor(writer, at: seconds)
     }
 
-    /// #416: that reader's current run has read through `seconds`.
+    /// #416: that reader's current run has read one step further, through `seconds`.
     func noteHarvestProgress(_ writer: Writer, through seconds: Double) {
         lock.lock(); defer { lock.unlock() }
         coverage.noteProgress(writer, through: seconds)
+    }
+
+    /// #416: that reader's current run has REACHED `seconds` from its anchor, however far that is
+    /// in one note. For a claim resting on an invariant rather than on observed steps; see
+    /// `SubtitleHarvestCoverage.noteReach`.
+    func noteHarvestReach(_ writer: Writer, through seconds: Double) {
+        lock.lock(); defer { lock.unlock() }
+        coverage.noteReach(writer, through: seconds)
     }
 
     /// #416: was the whole span between `from` and `through` read by some run this session?
@@ -298,6 +306,10 @@ final class SubtitlePacketStore: @unchecked Sendable {
                       flags: Int32, payload: Data, assembleSplitDisplaySets: Bool,
                       writer: Writer = .pump, webvttSettings: String? = nil) {
         lock.lock(); defer { lock.unlock() }
+        // #416: a harvested packet is a position its writer demonstrably read, so the run reaches
+        // it. This is what gives the pump the forward lookahead its playhead-based note cannot
+        // state, which is the region a backward seek into already-produced content lands in.
+        if let ptsSeconds { coverage.noteReach(writer, through: ptsSeconds) }
         guard assembleSplitDisplaySets else {
             guard let ptsSeconds else { return }
             appendLocked(streamIndex: streamIndex, ptsSeconds: ptsSeconds,

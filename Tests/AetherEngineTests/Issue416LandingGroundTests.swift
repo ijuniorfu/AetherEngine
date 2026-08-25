@@ -104,6 +104,25 @@ struct Issue416LandingGroundTests {
         #expect(coverage.covers(from: 193, through: 197))
     }
 
+    @Test("the pump's reach is stated from its anchor, however far the first note is")
+    func reachIsNotAStep() {
+        // A track selected an hour into a film: the drain's first note is an hour-long step over
+        // ground the pump certainly read, and it has to count.
+        var coverage = SubtitleHarvestCoverage()
+        coverage.noteAnchor(.pump, at: 0)
+        coverage.noteReach(.pump, through: 3600)
+        #expect(coverage.covers(from: 3585, through: 3600))
+    }
+
+    @Test("reach still cannot reach below its own anchor")
+    func reachStartsAtTheAnchor() {
+        var coverage = SubtitleHarvestCoverage()
+        coverage.noteAnchor(.pump, at: 192)
+        coverage.noteReach(.pump, through: 260)
+        #expect(!coverage.covers(from: 184, through: 197))
+        #expect(coverage.covers(from: 192, through: 260))
+    }
+
     // MARK: - The store
 
     @Test("a store nobody reports coverage to answers every span with yes")
@@ -120,7 +139,7 @@ struct Issue416LandingGroundTests {
             store.noteHarvestProgress(.prefetch, through: position)
         }
         store.noteHarvestAnchor(.pump, at: 192)
-        store.noteHarvestProgress(.pump, through: 197)
+        store.noteHarvestReach(.pump, through: 197)
         #expect(!store.hasReadSpan(from: 184, through: 197))
         #expect(store.hasReadSpan(from: 193, through: 197))
         store.clear()

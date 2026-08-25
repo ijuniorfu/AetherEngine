@@ -657,6 +657,16 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return (index, cache.foldCount(index))
     }
 
+    /// AE#421: whether the segment for `index` is already on disk, answered without reading it.
+    ///
+    /// This is what separates the two repairs for a wedge. A producer re-anchor is the fix for a
+    /// consumer STARVED of content nobody is producing; a consumer silent on a segment that is
+    /// already stored is not starved, and re-anchoring throws away the pump's forward work to
+    /// rebuild what it already has.
+    func hasStoredSegment(at index: Int) -> Bool {
+        return cache.peekURL(index: index) != nil
+    }
+
     /// What to do with a request for a non-resident index, given how often pumps have folded it (#358).
     enum FoldedTargetDecision: Equatable {
         /// Nobody has folded this index: it is ordinary read-ahead, wait for the producer.

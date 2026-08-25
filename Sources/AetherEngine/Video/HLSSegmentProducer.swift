@@ -1551,7 +1551,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 markBackpressureWedgeBroken()
                 EngineLog.emit(
                     "[HLSSegmentProducer] #65 backpressure WEDGE BROKEN (\(context)) head=\(head) "
-                    + "target=\(target) cacheTarget=\(cacheTarget) parked=\(parked)s"
+                    + "target=\(target) cacheTarget=\(cacheTarget) parked=\(parked)s "
+                    // AE#421: the line has to say which repair the wedge calls for, and that is
+                    // decided by whether the consumer's own target is already on disk. Without it a
+                    // report can show the wedge and the recovery but not whether re-anchoring the
+                    // producer could have helped at all, which is exactly what had to be inferred
+                    // from two field logs.
+                    + "consumerTargetStored=\(cache.peekURL(index: cacheTarget) != nil ? "y" : "n") "
+                    + "highStored=\(cache.highestStoredIndex) cached=\(cache.count)"
                     + (wedgeDetector.lastTripFast ? " (fast path: fetch target + rendered clock both frozen)" : "")
                     + "; exiting pump for host re-anchor on AVPlayer position",
                     category: .session

@@ -750,7 +750,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// The first step is deliberately short: the point at-or-before the boundary is what the segment
     /// needs, and aiming one segment back finds it whenever the source has any random access there at
     /// all. Wider steps exist for a real drought, and the list is the whole budget.
-    static let gateBackoffStepsSeconds: [Double] = [4, 8, 16, 32]
+    ///
+    /// AE#423: the steps are EVEN, not doubling. Each attempt opens on the first sync sample at or
+    /// above where it aimed, so the distance between two steps is the worst case by which the gate can
+    /// overshoot the last sample that would have covered the boundary, and a doubling step spends that
+    /// error where it is largest. On the AE#408 fixture the 8 -> 16 jump aimed at 36.0, took 38.417,
+    /// and never saw the 43.0 sitting between it and the boundary at 52.0: 4.6 s of landing accuracy
+    /// given away for nothing. Even steps cost no more to walk, because `gateProvenEmptyFromPts` stops
+    /// each scan at the previous aim rather than at the boundary, so an attempt reads its own window
+    /// and not the whole drought. Same 32 s of reach as the doubling list.
+    static let gateBackoffStepsSeconds: [Double] = [4, 8, 12, 16, 20, 24, 28, 32]
 
     /// Floor for the tolerance below; the reorder depth of the stream widens it (see
     /// `boundaryOpenToleranceTicks`).

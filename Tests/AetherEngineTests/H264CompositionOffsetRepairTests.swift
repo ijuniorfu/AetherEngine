@@ -403,6 +403,25 @@ struct H264CompositionOffsetRepairTests {
         #expect(rewriter.rewrite(dts: 600606, pictureOrderCount: 8, isKeyframe: false).map(\.pts) == 800808)
     }
 
+    @Test("a sequence the lattice cannot place is still repaired, by the rounded step")
+    func offLatticeSequenceFallsBackToTheStep() {
+        guard case .repair(let plan) = verdict(
+            quantizedLadderSamples(), videoDelay: 2, streamStartTime: 0, ladderStart: -80081) else {
+            Issue.record("expected a repair")
+            return
+        }
+        var rewriter = H264CompositionOffsetRepair.Rewriter(plan: plan)
+        rewriter.noteSeek()
+        // A sequence opening one tick beside the lattice: the ladder has stopped describing itself.
+        // The rounded step still describes it to within a tick, and it anchors on the container's own
+        // timestamp, so it cannot drift. Handing the picture on in decode order would be the defect.
+        let head = rewriter.rewrite(dts: 560567, pictureOrderCount: 0, isKeyframe: true)
+        #expect(head?.pts == 640648)
+        #expect(head?.dts == 560567)
+        #expect(rewriter.rewrite(dts: 600607, pictureOrderCount: 8, isKeyframe: false)?.pts == 800808)
+        #expect(rewriter.unrepairedPictures == 0)
+    }
+
     @Test("a sample taken away from the head describes the same axis as one taken at it")
     func quantizedLadderClassifiesFromAnywhere() {
         // The same fixture, sampled from its second IDR instead of its first. The ladder starts on a

@@ -212,9 +212,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Current engine playlist shift (AVPlayer clock = source_pts - shift), read at serve time so whole-program
     /// cues land on the same AVPlayer axis as the video even when the shift was not known at load (Sodalite#32).
     private let currentShiftSeconds: @Sendable () -> Double
-    /// AE#418: fired with the index AVPlayer starts a fresh decode run on (a fetch that does not
-    /// follow the previous one). Where that run begins decides the axis for everything it plays.
-    private let coldAnchorHandler: (@Sendable (Int) -> Void)?
+    /// AE#418: fired with the index AVPlayer just placed into its timeline. What that segment
+    /// carries below its advertised start is what moves the axis every consumer folds with.
+    private let segmentPlacedHandler: (@Sendable (Int) -> Void)?
     /// Sodalite#32 Phase 2: tap-fed stores can carry raw ASS event lines (the overlay renders the
     /// styling); the WebVTT rendition must serve plain text, so strip at build time.
     private let stripASSMarkupInVTT: Bool
@@ -367,7 +367,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         nativeSubtitleDefaultOrdinal: Int = 0,
         nativeSubtitleWholeProgram: Bool = false,
         currentShiftSeconds: @escaping @Sendable () -> Double = { 0 },
-        coldAnchorHandler: (@Sendable (Int) -> Void)? = nil
+        segmentPlacedHandler: (@Sendable (Int) -> Void)? = nil
     ) {
         self.cache = cache
         self.segments = segments
@@ -402,7 +402,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.nativeSubtitleDefaultOrdinal = nativeSubtitleDefaultOrdinal
         self.nativeSubtitleWholeProgram = nativeSubtitleWholeProgram
         self.currentShiftSeconds = currentShiftSeconds
-        self.coldAnchorHandler = coldAnchorHandler
+        self.segmentPlacedHandler = segmentPlacedHandler
     }
 
     /// Append a finalized live segment. Index must equal segments.count; out-of-order ignored.
@@ -680,13 +680,18 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         case fail
     }
 
-    /// AE#418: whether this request is where AVPlayer begins a fresh decode run.
+    /// AE#418 round 2: whether this request puts a segment into AVPlayer's timeline anew.
     ///
-    /// Following its predecessor means the run continues, and a run carries the axis of the segment
-    /// it began on across every boundary it plays through. Asking for the SAME index again is a
-    /// retry, not a new run: treating it as one would republish an axis mid-run.
-    static func beginsFreshDecodeRun(index: Int, previousTarget: Int) -> Bool {
-        return index != previousTarget &+ 1 && index != previousTarget
+    /// Round 1 asked a narrower question here, whether the fetch BEGAN a decode run, and answered it
+    /// from the fetch order: anything that did not follow its predecessor. The reporter's seek burst
+    /// falsified that. A fetch out of sequence happens while AVPlayer stays inside the run it is
+    /// already playing, so the axis was republished from under a picture that had not moved.
+    ///
+    /// What the axis actually turns on is placement, and every fetch is one, whatever its order.
+    /// Asking for the SAME index again is the one exception: that is a retry of a placement already
+    /// counted, and counting it twice would move the axis by an offset AVPlayer applied once.
+    static func placesSegmentAnew(index: Int, previousTarget: Int) -> Bool {
+        return index != previousTarget
     }
 
     static func foldedTargetDecision(folds: Int, alreadyReanchoredHere: Bool) -> FoldedTargetDecision {
@@ -709,13 +714,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let previousTarget = cache.targetIndex
         cache.declareTarget(index)
 
-        // AE#418: a request that does not follow its predecessor is where AVPlayer begins a fresh
-        // decode run, and a fresh run is anchored at the manifest position of the segment it begins
-        // on (measured with `play --picture-probe`). A re-run of the same index is a retry, not an
-        // anchor. Everything after this fetch is presented continuously from here, so the axis this
-        // segment establishes holds until the next such fetch.
-        if Self.beginsFreshDecodeRun(index: index, previousTarget: previousTarget) {
-            coldAnchorHandler?(index)
+        // AE#418: AVPlayer places this segment at the position the PLAYLIST gives it, read through
+        // the axis its timeline already carries (measured with `play --picture-probe`). So a segment
+        // whose content starts below its advertised start moves the axis by that much, every time it
+        // is placed. A re-request of the same index is a retry of one placement, not a second one.
+        if Self.placesSegmentAnew(index: index, previousTarget: previousTarget) {
+            segmentPlacedHandler?(index)
         }
 
         // #358: the consumer is asking for a plan index a pump folded away, because no keyframe

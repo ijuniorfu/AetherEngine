@@ -3915,6 +3915,13 @@ public final class AetherEngine: ObservableObject {
         // i.e. clockTarget == the 0-based playlist time (AE#105). Origin 0 off disc, so this stays
         // `target - playlistShiftSeconds` for normal VOD; SW/audio hosts run on source time (shift 0), no-op.
         let clockTarget = PresentationAxis.source(displayTime: target, origin: sourcePresentationOrigin) - playlistShiftSeconds
+        // AE#418 round 2: AVPlayer throws a sub-second axis offset away at a seek and snaps back to
+        // the playlist; a larger one it carries through unchanged (measured with `play
+        // --picture-probe`: -0.500 and -0.875 read `axisErr=0.000` after a seek, -1.000 through
+        // -11.000 all survive one). The target above is deliberately computed on the axis AVPlayer
+        // still had when the seek was issued; from the landing forward the clock describes the axis
+        // it will have instead.
+        nativeVideoSession?.snapAxisAfterSeek(landingItemSeconds: clockTarget)
         let gen = loadGeneration
         // Publish the native-path seek target up front so the scrub clock snaps immediately (#37); the host
         // suppresses periodic-observer reads until landing. SW/audio hosts resolve synchronously and write

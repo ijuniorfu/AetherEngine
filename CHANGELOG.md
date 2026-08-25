@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.44.0] - 2026-08-25
+
 ### Fixed
 
 - **A picture that is not a whole number of ticks long left #409's repair with nothing to stand on,
@@ -34,6 +38,14 @@ the public-API contract.
   delivered them. Verified against a fractional twin pair (33 packets, three coded video sequences,
   both writer shapes, from the head and after a seek): every repaired packet carries the healthy
   twin's PTS and DTS exactly. Reported and diagnosed by @orut34iop.
+
+### Changed
+
+- **The #409 verdict line names the cadence it measured.** On a fractional ladder the cadence and its
+  phase are the reading the whole verdict rests on, and a line that reports only a rounded step
+  cannot be told apart from one that measured the ladder wrong: `repair step=40040 lead=80081
+  shift=80081 pocStep=2 cadence=200202/5 phase=3 ladderAhead=2 samples=12`. A whole-tick ladder logs
+  exactly what it logged before.
 
 ## [6.43.0] - 2026-08-25
 

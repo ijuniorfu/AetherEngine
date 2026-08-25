@@ -14,8 +14,24 @@
 #   swift run aetherctl play --seconds 12 --start-position 53 --picture-probe file:///tmp/tc-cues-lie.mkv
 #
 # `tc-drought.mkv` is the control arm (its Cues ARE its sync samples, `axisErr` stays 0 on every
-# tick); `tc-cues-lie.mkv` is the case. A resume at 53 s re-aims the gate three times, opens at
-# 38.417 and reads `axisErr=-13.583`, the whole re-aim, constant for the run.
+# tick); `tc-cues-lie.mkv` is the case. A resume at 53 s re-aims the gate, opens at 43.000 against a
+# boundary at 52.000 and reads `axisErr=-9.000`, the whole re-aim, constant for the run. (Before
+# AE#423 evened out the backoff steps it opened at 38.417 and read `-13.583`.)
+#
+# AE#418 round 2 needs one seek on top of that, because the axis COMPOSES and a resume alone cannot
+# show it. Add `--seek-every 12 --seek-count 1 --seek-pattern <target>` to the line above:
+#
+#   80  a seek onto an axis-true segment: the axis must stay -9.000 (the reporter's failing case)
+#   65  a seek that re-places the overlong segment: the axis doubles to -18.000
+#   60  a seek whose restart re-aims 5 s more: the axis composes to -14.000
+#
+# `capErr` is the verdict in all three, and it is the error a host placing a cue at `sourceTime`
+# would make: about +0.017 (one frame at 24 fps) when the engine describes the axis correctly, and
+# -8.983 for each of the three under 6.43.0.
+#
+# For magnitudes this fixture cannot reach, engineer the droughts: a key 3 s below a boundary gives
+# -3, 5 s gives -5, and a key under a second below one gives an axis AVPlayer THROWS AWAY at the
+# next seek (measured: -0.500 and -0.875 snap to 0, -1.000 and above survive).
 set -euo pipefail
 OUT_DIR="${1:?usage: timecode-fixture.sh <out-dir>}"
 DUR=120

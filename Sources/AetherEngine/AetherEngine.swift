@@ -3863,6 +3863,7 @@ public final class AetherEngine: ObservableObject {
             // Live SW: drive the host's ring-backed DVR reseed directly; no AVPlayer-clock translation applies.
             if softwareHost != nil, nativeHost == nil {
                 EngineLog.emit("[AetherEngine] SW live seek target=\(target)", category: .engine)
+                softwareSubtitlePacketStore?.noteHarvestAnchor(.pump, at: target)   // #416
                 await softwareHost?.seek(to: target)
                 guard loadGeneration == loadGen, seekGeneration == seekGen else { return }
                 clock.currentTime = target
@@ -3924,6 +3925,11 @@ public final class AetherEngine: ObservableObject {
         } else if let host = audioHost {
             hostReposition = await host.seek(to: clockTarget)
         } else if let host = softwareHost {
+            // #416: the software pump is this path's subtitle harvest, and it reads forwards from
+            // wherever this reposition puts it. Everything between where it had got to and here is
+            // ground nobody read; the drain must not read an empty store there as an authored
+            // silence. Stated before the seek: the demuxer lands at or before the target.
+            softwareSubtitlePacketStore?.noteHarvestAnchor(.pump, at: clockTarget)
             hostReposition = await host.seek(to: clockTarget)
         } else {
             // #93 retest: remember the target as recovery intent BEFORE awaiting; a wedged seek

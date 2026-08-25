@@ -12,6 +12,29 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.42.0] - 2026-08-25
+
+### Fixed
+
+- **A PGS set stranded on the near side of ground no reader passed over was published as the line
+  still on screen at a seek landing (AE#416).** A display set has no end of its own, so the
+  reconstruction pass reads "no packet stored between this set and the playhead" as "this set is
+  still up". Where a run was re-aimed just after it harvested a set, that set's own clear sits in
+  the stretch the re-aim skipped, so it decodes at the landing looking unclosed, becomes the
+  landing's active line and takes its end from the next stored packet, which is the far side of the
+  authored silence rather than its own successor (reported: a two-second sound-effect caption
+  standing over a scene ten seconds later, on an Apple TV 4K and on an M4 Pro). #362 round 2
+  measured that the packets alone cannot show this, since a reader re-anchored forward hangs its
+  packets in ascending order behind the stretch it skipped, and named the coverage ledger as the
+  signal. It is now built: `SubtitleHarvestCoverage` keeps one span per harvest run in the packet
+  store, the forward prefetcher reports its anchor, every in-place re-anchor and its read position,
+  and the pump's run begins where the producer opens or restarts and reaches at least the playhead,
+  since playback is rendering there. A set whose ground up to the playhead is not covered can no
+  longer be the landing's active line, and the same rule closes the #100 hold's door onto the
+  identical claim. A store nobody reports coverage to answers every span with yes, so a harvest path
+  without notes behaves exactly as before. Refusals are counted as `landingWithheld=` on the #357
+  delivery line.
+
 ## [6.41.0] - 2026-08-25
 
 ### Fixed

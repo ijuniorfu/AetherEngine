@@ -10,7 +10,30 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A picture that is not a whole number of ticks long left #409's repair with nothing to stand on,
+  so the reporting asset still juddered from the first frame (AE#409).** The repair reads a rank out
+  of the bitstream and puts it back on the ladder the container wrote, and it needed that ladder to
+  advance by one constant. A constant frame rate does not always produce one: at a 1200000 timescale
+  the retest asset's pictures are `200202/5` ticks apart, so its sample table can only alternate
+  between 40040 and 40041, and the classifier fell closed on a ladder it read as variable frame
+  timing. A two-valued ladder is now read as the quantization it is: the cycle it repeats names the
+  fraction (a cycle counts only when it is seen through twice), and the pattern it rounds to names
+  the phase of the lattice it was quantized from, which is the one thing a whole-tick ladder cannot
+  carry and this one can. Ranks are then placed on that lattice instead of on a step, so the repair
+  reproduces the muxer exactly rather than a tick beside it, and the whole-tick ladder stays the
+  special case it always was, untouched. The phase also makes the verdict independent of where the
+  sample was taken, so a session that starts inside the file describes the same axis as one that
+  starts at byte 0. Nothing else changed: how far the ladder runs ahead of presentation is still
+  read from the container header (the ladder fits every alignment equally well, so it cannot answer
+  that), the container index is still folded by one constant so an index entry can never disagree
+  with the packet it points at, and a picture the lattice cannot place still falls back to the
+  rounded step rather than being handed on in decode order. Genuine variable frame timing, a ladder
+  with a dropped picture, and a wobble that never repeats are all still left exactly as the container
+  delivered them. Verified against a fractional twin pair (33 packets, three coded video sequences,
+  both writer shapes, from the head and after a seek): every repaired packet carries the healthy
+  twin's PTS and DTS exactly. Reported and diagnosed by @orut34iop.
 
 ## [6.43.0] - 2026-08-25
 

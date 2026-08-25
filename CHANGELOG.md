@@ -12,6 +12,31 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.45.0] - 2026-08-25
+
+### Fixed
+
+- **An axis offset composes, and 6.43.0 treated it as something a decode run owns, so a seek burst
+  put the clock back ahead of the picture (AE#418).** 6.43.0 published the offset a re-aimed gate
+  puts into AVPlayer's timeline and ended it when AVPlayer began a fresh decode run, reading that
+  from the fetch order: any request that did not follow its predecessor. The reporter's forward-seek
+  burst falsified it. AVPlayer asks for a segment below its target on a seek, and it asks out of
+  order while continuing the run it is already playing, so the axis was republished from under a
+  picture that had not moved and the captions ran 14 s ahead again. Measured with `play
+  --picture-probe` at re-aims of 0.5, 0.875, 1, 3, 5, 7, 9 and 11 s, what the axis turns on is
+  PLACEMENT, and it composes: AVPlayer puts a segment at its advertised start read through the
+  mapping its timeline already carries, so re-placing an overlong segment adds its offset again
+  (a run at `-9.000` reads `-18.000` after a seek that re-fetches that segment, and `-14.000` when
+  the seek's restart re-aims 5 s more; 6.43.0 published `0.000` for both). The axis now moves by
+  exactly what a placed segment carries below its advertised start, the seam sits at that advertised
+  start read through the axis in effect before it landed, and the record is keyed by index because
+  several epochs can leave such a segment in the cache at once. A gate no longer publishes on its
+  own: it records what its segment is worth and the placement publishes it, so an epoch AVPlayer
+  never fetches from cannot move the clock. One exception, also measured: AVPlayer discards a
+  sub-second axis at a seek and snaps back to the playlist, so the VOD seek path publishes that snap
+  from the landing forward. Thirteen arms of the fixture matrix, including the four that read
+  `capErr=-8.983` before, now read `+0.017`, one frame at 24 fps.
+
 ## [6.44.0] - 2026-08-25
 
 ### Fixed

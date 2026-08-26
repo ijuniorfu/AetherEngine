@@ -657,6 +657,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return (index, cache.foldCount(index))
     }
 
+    /// AE#412: what the stored segment at `index` offers a cold arrival, or nil when the producer
+    /// made no claim for it. See `SegmentCache.VideoReach`.
+    func videoReach(at index: Int) -> SegmentCache.VideoReach? {
+        return cache.videoReach(index)
+    }
+
     /// AE#421: whether the segment for `index` is already on disk, answered without reading it.
     ///
     /// This is what separates the two repairs for a wedge. A producer re-anchor is the fix for a

@@ -416,6 +416,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Live segment index captured when pending packet was examined; the live cutter advances at keyframes.
     private var pendingVideoSegIndex: Int = 0
+    /// AE#412: item-axis timestamp of the FIRST random-access point routed into each segment this
+    /// epoch has open, consumed at adopt. Keyed by the muxer's index, not the cutter's: audio can
+    /// have advanced the muxer past a boundary the keyframe-gated cutter folded, and a fetch asks
+    /// for the segment the bytes ended up in. Pump thread only, like every other routing field.
+    private var firstSyncItemPtsBySegment: [Int: Int64] = [:]
     private var pendingAudioSegIndex: Int = 0
 
     /// VOD keyframe-gated cutter: opens each segment at the IRAP that reaches its plan boundary (#92).
@@ -2022,7 +2027,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             )
             cache.adopt(index: currentMuxerSegmentIndex,
                         stagingPath: path,
-                        byteCount: bytesWritten)
+                        byteCount: bytesWritten,
+                        videoReach: takeVideoReach(forSegmentIndex: currentMuxerSegmentIndex))
             // AE#286: per-epoch head. cache.highestStoredIndex is monotonic across restarts and would
             // credit this pump with the previous epoch's production.
             pumpEpochHighestStored = max(pumpEpochHighestStored, currentMuxerSegmentIndex)
@@ -2201,6 +2207,41 @@ final class HLSSegmentProducer: @unchecked Sendable {
         onLiveSegmentFinalized?(index, duration, startSeconds, discontinuous)
     }
 
+    /// AE#412: what the segment finalized at `index` offers a cold arrival, as an offset from its
+    /// ADVERTISED start, so the answer carries no axis with it. Consumes the recording.
+    ///
+    /// nil means "no claim", which is exactly today's behaviour: live (its playlist only ever offers
+    /// what was finalized), an unresolved video time base, or an index outside this epoch's plan.
+    /// `.none` is a claim, and a load-bearing one: audio opened a boundary the cutter folded, so the
+    /// segment carries no random-access point at all and nothing in it can start a decode run.
+    private func takeVideoReach(forSegmentIndex index: Int) -> SegmentCache.VideoReach? {
+        let syncPts = firstSyncItemPtsBySegment.removeValue(forKey: index)
+        firstSyncItemPtsBySegment = firstSyncItemPtsBySegment.filter { $0.key > index }
+        guard !isLive, sourceVideoTbSeconds > 0 else { return nil }
+        let localI = index - baseIndex
+        guard localI >= 0, localI < segmentBoundaries.count else { return nil }
+        guard let syncPts, syncPts != Int64.min else {
+            EngineLog.emit(
+                "[HLSSegmentProducer] #412 seg-\(index) carries no random-access point "
+                + "(advertised \(String(format: "%.3f", Double(segmentBoundaries[localI]) * sourceVideoTbSeconds))s); "
+                + "a cold arrival cannot start a decode run in it",
+                category: .session
+            )
+            return SegmentCache.VideoReach.none
+        }
+        let shiftTicks = videoShiftPts == Int64.min ? 0 : videoShiftPts
+        let syncSourcePts = syncPts &+ shiftTicks
+        let offset = Double(syncSourcePts &- segmentBoundaries[localI]) * sourceVideoTbSeconds
+        if offset > 0 {
+            EngineLog.emit(
+                "[HLSSegmentProducer] #412 seg-\(index) opens \(String(format: "%.3f", offset))s "
+                + "below its first random-access point; a cold arrival below that lands late",
+                category: .session, level: .verbose
+            )
+        }
+        return .syncAt(offsetSeconds: offset)
+    }
+
     private func finalizeSessionMuxerAndAdopt() {
         guard let muxer = currentMuxer else { return }
         let idx = currentMuxerSegmentIndex
@@ -2210,7 +2251,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 category: .session, level: .verbose
             )
             cache.adopt(index: idx, stagingPath: result.path,
-                        byteCount: result.bytesWritten)
+                        byteCount: result.bytesWritten,
+                        videoReach: takeVideoReach(forSegmentIndex: idx))
             if isLive {
                 reportLiveSegmentFinalized(index: idx, nextIndex: nil)
             } else if onSequentialSegmentFinalized != nil {
@@ -3543,6 +3585,17 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             )
                         }
                         if let muxer = ensureMuxer(forSegmentIndex: prevSeg) {
+                            // AE#412: a cold arrival can only start a decode run on a random-access
+                            // point, so what a segment is worth to one is where its first sync sample
+                            // sits. Recorded here, against the muxer's own index, because that is the
+                            // segment these bytes are actually in.
+                            if !isLive, (prev.pointee.flags & AV_PKT_FLAG_KEY) != 0 {
+                                let openIdx = muxer.currentSegmentIndex
+                                if firstSyncItemPtsBySegment[openIdx] == nil {
+                                    firstSyncItemPtsBySegment[openIdx] =
+                                        prev.pointee.dts != Int64.min ? prev.pointee.dts : prev.pointee.pts
+                                }
+                            }
                             finalizeAndWriteVideo(prev, nextDts: packet.pointee.dts, muxer: muxer)
                             bumpPacketsWritten()
                         } else {

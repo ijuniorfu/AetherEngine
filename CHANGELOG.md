@@ -12,6 +12,60 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.48.0] - 2026-08-26
+
+### Fixed
+
+- **A producer restart that replaced the reader left `playbackPhase` on `.stalled(reconnecting:)`
+  for the rest of the session (AE#433).** The axis a host reads for "the source is delivering" is
+  per session, the dedupe gate that feeds it is per reader instance, and the handover let the two
+  drift apart. The restart opens its replacement demuxer first and wires the phase sink one step
+  later, so everything `find_stream_info` read went through the gate into a nil sink and latched it
+  on `.flowing`. By the time the sink existed, the reader now serving the session had nothing left
+  to say, and the phase kept describing the reader that had just been aborted: reported as 454.8 s
+  of `.stalled(reconnecting: true)`, 298 s of it over normally playing video. Two adjacent holes
+  came out of the same reading: the replaced demuxer kept its sink, so an aborted pump outliving the
+  swap could still move the axis for a session it no longer feeds, and the live reopen never wired
+  the sink onto its fresh demuxer at all, which left that path unable to recover the axis for the
+  rest of the session.
+
+  The gate now deduplicates for a LISTENER rather than for a reader instance: attaching a sink
+  clears its history, because a listener that just arrived has heard nothing regardless of what the
+  reader said into the void beforehand. Sink and gate moved under one leaf lock, since the handover
+  thread installs while the demux thread emits. At the swap the outgoing demuxer is unwired and the
+  incoming one takes the sink on both the restart and the live-reopen paths, so the fresh reader
+  publishes a non-stalled phase off its own first measured delivery instead of anyone asserting
+  health at the swap. `setReaderNetworkPhase` also logs its transitions now
+  (`source network axis reconnecting -> flowing`); the axis moves a handful of times per session and
+  was named nowhere in the log, which forced the report to reconstruct it from reader generation
+  counters.
+
+  Measured against an origin that stops delivering on established sockets without closing them, so
+  the reader parks in a blocking read and the recovery takes the wedged-producer restart. Three runs
+  per arm, identical every time: before, 24 telemetry ticks reading `.stalled(reconnecting: true)`
+  with the clock advancing at 1.0x and zero drops through 21 of them; after, 3 ticks covering the
+  outage itself and `playing` from the first tick after the restart.
+
+- **A live source that stopped carrying timestamps wedged the segment cutter (AE#432).** A live
+  MPEG-TS whose video PES headers stopped carrying PTS/DTS put 1792 packets and 30 keyframes into
+  one 85 MB segment advertised as 0.5 s, and produced nothing afterwards. The repair for a packet
+  arriving with neither dts nor pts was `lastValidDts + 1`, one tick of the source time base, which
+  satisfies the muxer's monotonic invariant and nothing else: on the 90 kHz MPEG-TS axis it claims
+  11 microseconds of presentation time for a 20 ms frame. The live cutter's clock IS that timestamp,
+  so a run of timestamp-less packets froze it and no keyframe in the window could cut.
+
+  Such a packet now advances by a plausible frame interval: the demuxer's own duration for the
+  packet, else the last genuine inter-packet delta the stream showed (learned from genuine
+  timestamps only, never from a repaired one, and never across a delta past a second, which is a
+  program boundary rather than a cadence), else the frame duration the producer already carries,
+  else the historical single tick for a stream that never carried a usable timestamp at all. The
+  dts-only case (matroska B-frames) keeps its minimal bump, where pts is real and must not be
+  crossed. The repair states once per pump that the source stopped carrying timestamps and what
+  replaced them, and the no-cut stall line reports how many packets in its window carried a
+  synthesized timestamp, so `videoPtsAdvance` reads as a statement about the source rather than
+  about the engine's own repair. Measured on a 50 fps HEVC MPEG-TS losing its timestamps at t=20 s:
+  5 segments and a cutter wedge before, 12 segments through 52.8 s and uninterrupted playback after.
+
 ## [6.47.0] - 2026-08-26
 
 ### Fixed

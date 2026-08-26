@@ -12,6 +12,27 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.46.0] - 2026-08-26
+
+### Fixed
+
+- **A cold seek into a keyframe drought landed past its target and silently skipped content
+  (AE#412).** Audio routes packets into segments by plan boundary while video routes them
+  keyframe-gated, so where a plan boundary has no random-access point the audio still opens it and
+  the segment's video starts mid-GOP. AVPlayer reaches back a fixed span on a cold seek, measured at
+  6 to 8 s with `play --picture-probe`, and does not search for a random-access point, so a drought
+  wider than that reach left the picture starting at the next sync sample ABOVE the target. Measured
+  on a 12 s drought against a control cut on the source's real sync samples: a seek to 50.0 s played
+  from 55.0 s and one to 54.0 s from 54.96 s, where the control landed exactly on both. The producer
+  now records, per segment, where its first random-access point sits as an offset from the segment's
+  advertised start, and a cold seek re-cuts the landing segment from its covering point when neither
+  it nor the segments within reach below it can open a decode run at the target. After: 50.00 and
+  54.00, matching the control. Nothing changes for a sequential arrival, for live, or for a landing
+  a random-access point already covers.
+
+  The extra fetch AVPlayer makes below a seek target is not a repair for this and never was: the
+  same reach back happens on the control, where every segment is independent.
+
 ## [6.45.0] - 2026-08-25
 
 ### Fixed

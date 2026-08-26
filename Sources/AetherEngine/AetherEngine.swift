@@ -133,8 +133,18 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// Main-actor entry point for the demuxer's `@Sendable onNetworkPhaseChanged` callback (#85).
+    ///
+    /// #433: transitions are logged. This axis is the only signal a host has for "the source is delivering",
+    /// it moves a handful of times per session, and when it latched there was nothing in the diagnostic log
+    /// that named the state or the moment it stopped moving: the report had to reconstruct it from the
+    /// reader's generation counters.
     func setReaderNetworkPhase(_ phase: ReaderNetworkPhase) {
-        if readerStall != phase { readerStall = phase }
+        guard readerStall != phase else { return }
+        EngineLog.emit(
+            "[AetherEngine] source network axis \(readerStall) -> \(phase)",
+            category: .session
+        )
+        readerStall = phase
     }
 
     /// Bumped at every `seek(to:)` entry; a seek finalizes isSeeking only when its generation still matches,

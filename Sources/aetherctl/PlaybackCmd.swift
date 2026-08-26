@@ -377,8 +377,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
             engine.setRate(1.0)
         case "reloadlive", "seekback", "overlapseek":
             break  // reloadlive handled at load time, seekback/overlapseek in the telemetry loop
+        case let call where call.hasPrefix("seekfar"):
+            break  // #433, in the telemetry loop; `seekfar@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,reloadlive,seekback,overlapseek)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,reloadlive,seekback,seekfar,overlapseek)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }
@@ -478,6 +480,13 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
     var observedDisplaySize: CGSize?
     var observedCodedSize: (Int32, Int32) = (0, 0)
 
+    // #433: `seekfar` (optionally `seekfar@N`) picks the second the far seek is issued in, so a run can
+    // put the restart on top of a reader that is deep enough into its ladder to still be parked.
+    let seekFarTick: Int? = hostCalls.first(where: { $0.hasPrefix("seekfar") }).map { call in
+        let parts = call.split(separator: "@")
+        return parts.count == 2 ? (Int(parts[1]) ?? 15) : 15
+    }
+
     let ticks = max(1, Int(seconds))
     for tick in 1...ticks {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -532,6 +541,18 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         if hostCalls.contains("seekback"), tick == 15 {
             let target = max(0, engine.currentTime - 20)
             print(String(format: "  HOSTCALL seek(to: %.2f) (currentTime - 20)", target))
+            await engine.seek(to: target)
+        }
+        // #433: a seek PAST the produced window, so the landing needs a producer restart rather than
+        // cached output. Paired with an origin outage, this is the reported discriminator: the restart
+        // finds the old pump parked in its reconnect ladder, aborts it, and serves the rest of the
+        // session from a reader the phase axis has never heard from.
+        if tick == seekFarTick {
+            // Past `bufferedPosition`, not merely ahead of the playhead: the producer runs tens of
+            // seconds ahead, and a seek INTO its cache lands without restarting anything.
+            let target = max(engine.bufferedPosition + 60, engine.duration * 0.85)
+            print(String(format: "  HOSTCALL seek(to: %.2f) (past bufferedPosition %.2f, so the landing needs a producer restart)",
+                         target, engine.bufferedPosition))
             await engine.seek(to: target)
         }
         if hostCalls.contains("seekback"), tick == 30 {

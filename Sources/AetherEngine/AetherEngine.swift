@@ -263,6 +263,17 @@ public final class AetherEngine: ObservableObject {
         setDeferredSeek(inFlight: false, target: nil)
     }
 
+    /// AE#412: run `preparedSeekLanding` off the main actor. It parks on the pump while a re-cut
+    /// opens its gate, and a seek must not hold the main actor for that (AE#422).
+    private static func prepareSeekLanding(
+        session: HLSVideoEngine?, itemSeconds: Double
+    ) async -> Double {
+        guard let session else { return itemSeconds }
+        return await Task.detached(priority: .userInitiated) {
+            session.preparedSeekLanding(itemSeconds: itemSeconds)
+        }.value
+    }
+
     /// Rejection path: the seek never reached a host, so it gets a standalone event and no `.began`.
     func emitSeekRejected(_ reason: SeekEvent.Rejection, target: Double) {
         emitSeekEvent(id: nextSeekEventID(), origin: .programmatic, outcome: .rejected(reason), target: target)
@@ -3914,7 +3925,7 @@ public final class AetherEngine: ObservableObject {
         // STC base so `target` (0-based, matching duration) lands on the source-PTS shift the producer subtracts,
         // i.e. clockTarget == the 0-based playlist time (AE#105). Origin 0 off disc, so this stays
         // `target - playlistShiftSeconds` for normal VOD; SW/audio hosts run on source time (shift 0), no-op.
-        let clockTarget = PresentationAxis.source(displayTime: target, origin: sourcePresentationOrigin) - playlistShiftSeconds
+        var clockTarget = PresentationAxis.source(displayTime: target, origin: sourcePresentationOrigin) - playlistShiftSeconds
         // AE#418 round 2: AVPlayer throws a sub-second axis offset away at a seek and snaps back to
         // the playlist; a larger one it carries through unchanged (measured with `play
         // --picture-probe`: -0.500 and -0.875 read `axisErr=0.000` after a seek, -1.000 through
@@ -3922,6 +3933,17 @@ public final class AetherEngine: ObservableObject {
         // still had when the seek was issued; from the landing forward the clock describes the axis
         // it will have instead.
         nativeVideoSession?.snapAxisAfterSeek(landingItemSeconds: clockTarget)
+        // AE#412: inside a keyframe drought, audio opened plan boundaries the keyframe-gated cutter
+        // folded, so the landing segment can carry no random-access point at all. AVPlayer reaches
+        // back a fixed few seconds on a cold seek and does not look for one, so the picture would
+        // start at the next sync sample ABOVE the target and the seek would silently skip content
+        // (measured: a seek to 50.0 s landed at 55.0 s on a 12 s drought). This re-cuts that segment
+        // from its covering random-access point so it covers the target before the seek goes out.
+        // The target itself is unchanged: AVPlayer places the re-cut segment at its own tfdt inside
+        // the timeline it is already building. Off the main actor: it parks on the pump.
+        clockTarget = await Self.prepareSeekLanding(
+            session: nativeVideoSession, itemSeconds: clockTarget)
+        guard loadGeneration == loadGen, seekGeneration == seekGen else { return }
         let gen = loadGeneration
         // Publish the native-path seek target up front so the scrub clock snaps immediately (#37); the host
         // suppresses periodic-observer reads until landing. SW/audio hosts resolve synchronously and write

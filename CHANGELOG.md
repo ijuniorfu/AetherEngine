@@ -12,6 +12,30 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.47.0] - 2026-08-26
+
+### Fixed
+
+- **Every emitted log line carried its URL's credentials into OSLog and into the host handler.**
+  The engine logs whole URLs on purpose, since host, path and query are what a playback report is
+  diagnosed from, but media servers routinely put the access token in that same query (Jellyfin's
+  `api_key=`). So `[AetherEngine] load url=`, `[NativeAVPlayerHost] load url=` and `asset.url=` held
+  a live credential, emitted at `.public` privacy, which means a Console.app capture or a
+  sysdiagnose showed it in clear text and the host handler passed it to whatever in-app log a
+  consumer built on it. This belongs here rather than in each consumer: the engine composes the
+  line, it reaches three sinks a consumer does not control, and a host-side scrub only covers the
+  one sink that host owns. Both `emit` overloads now funnel through one path that strips
+  `api_key`, `apikey`, `access_token`, `token`, `secret`, `password`, `signature`, `x-emby-token`,
+  `x-mediabrowser-token` and `connect.sid` values in the query form, both header forms and the
+  cookie form, replacing each value whole rather than truncating it. Everything else about the URL
+  survives. Public API is unchanged and the redactor is internal.
+
+  Redaction sits at the funnel, never at the call sites, so a URL logged by code added later is
+  covered without its author knowing the redactor exists. It works on UTF-8 bytes and allocates its
+  output only when something matches: a first version compared `Character`s and built a lowercased
+  `String` per position, which cost enough to shift request timing in
+  `ServedFromMemoryProgressTests`, since `emit` is called from the demuxer and the segment producer.
+
 ## [6.46.0] - 2026-08-26
 
 ### Fixed

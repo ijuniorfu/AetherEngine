@@ -10,7 +10,28 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **`setRate` documented the software path as playing speed without pitch correction, and it never
+  did (AE#434).** Both transport surfaces were running AVFoundation's TimeDomain algorithm, the
+  default an app linked on or after iOS 15 / macOS 12 gets, and the engine set the property nowhere,
+  so the sentence read perfectly while describing nothing in the build. The report measured it the
+  other way round on a VP9 / Opus MKV that routes to software decode: 1.25, 1.5 and 1.75 with no
+  pitch shift, on a route confirmed in the log rather than assumed. A wrong capability claim costs
+  more than a missing one, and this one came within a step of a per-peer capability bit in a
+  group-playback protocol, recomputed per title because routing depends on codec, resolution, frame
+  rate and hardware, to avoid offering speed to whoever landed in software.
+
+  `audioTimePitchAlgorithm` is now pinned to TimeDomain at all four hosts through one
+  `AudioRatePolicy`: on the native `AVPlayerItem`, on the audio-only item, and on the software
+  path's `AVSampleBufferAudioRenderer`, whose algorithm is what the synchronizer's timebase rate
+  runs through. The guarantee stops depending on the host app's link age (the default has moved
+  once already and differs per platform below those versions), and it is the same on every route.
+  Pitch behaviour is unchanged on any current build; what changes is that the documentation, in
+  `setRate`'s docstring and in docs/api.md, now says what the code does, with a test holding the
+  three statements to the configured value.
+
+  Thanks to @rrgomes for measuring the documented claim instead of budgeting against it.
 
 ## [6.48.0] - 2026-08-26
 

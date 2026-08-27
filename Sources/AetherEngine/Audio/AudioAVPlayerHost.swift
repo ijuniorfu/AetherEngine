@@ -117,6 +117,7 @@ final class AudioAVPlayerHost {
             asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": httpHeaders])
         }
         let item = AVPlayerItem(asset: asset)
+        AudioRatePolicy.apply(to: item)
         // externalMetadata is unavailable on macOS (package builds there for tests/aetherctl).
         #if !os(macOS)
         item.externalMetadata = pendingExternalMetadata

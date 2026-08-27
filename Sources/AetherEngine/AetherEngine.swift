@@ -4960,7 +4960,9 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// Set playback speed. Clamped to `maxSupportedRate` (AetherEngine#39). 0 pauses.
-    /// Native path: pitch-corrected via audioTimePitchAlgorithm. SW path: no pitch correction.
+    /// Both paths are pitch-preserving: the engine pins `audioTimePitchAlgorithm` to TimeDomain on the
+    /// native `AVPlayerItem` and on the software path's audio renderer, so speed never depends on which
+    /// decode route a title took (#434).
     public func setRate(_ rate: Float) {
         let cap = maxSupportedRate
         let clamped = min(rate, cap)

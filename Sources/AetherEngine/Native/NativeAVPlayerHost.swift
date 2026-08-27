@@ -1212,7 +1212,19 @@ final class NativeAVPlayerHost {
     func setRate(_ value: Float) {
         // Non-zero rate counts as play intent (must survive replaceCurrentItem swap like play() does).
         playIntent = (value != 0)
+        // #436: `play()` is rate 1.0 by definition, and it is re-issued from paths no client can see:
+        // the readyToPlay re-assert after an item swap, interruption and background resume, the #287
+        // premature-end recovery, plus AVKit's own transport and the remote command centre calling
+        // play() straight on this player. `defaultRate` is what AVPlayer starts at when told to play,
+        // so recording the speed there is what makes it survive all of them, with no rate write in
+        // anyone's resume window. Setting `rate` does not update it (AVPlayer.h), hence both.
+        if value != 0 { avPlayer.defaultRate = value }
         avPlayer.rate = value
+    }
+
+    func setResumeRate(_ rate: Float) {
+        guard rate != 0 else { return }
+        avPlayer.defaultRate = rate
     }
 
     var volume: Float {

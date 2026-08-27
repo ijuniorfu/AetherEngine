@@ -288,6 +288,7 @@ extension AetherEngine {
         // plays audio into a black view (#120). Mirrors loadNative's post-host call.
         presentCurrentLayer()
         applyDesiredVolume(to: host)
+        applyDesiredRate(to: host)
         // No loopback producer; playhead is the raw AVPlayer clock. Shift stays 0.
         self.playlistShiftSeconds = 0
         self.setPresentationAxis(PresentationAxisMap())
@@ -1006,6 +1007,7 @@ extension AetherEngine {
         replayVideoNowPlayingInfo(to: host)
         self.nativeHost = host
         applyDesiredVolume(to: host)
+        applyDesiredRate(to: host)
         // Publish before wiring mirrors so subscribers see the AVPlayer before the first time update. Only emit on change: re-publishing the same instance retriggers the AVKit re-registration this reuse path avoids.
         if currentAVPlayer !== host.avPlayer {
             self.currentAVPlayer = host.avPlayer
@@ -1480,6 +1482,7 @@ extension AetherEngine {
             }
         }
         applyDesiredVolume(to: host)
+        applyDesiredRate(to: host)
         // #112 rework: SW-host subtitle tap feeds a session packet store; the shared
         // playhead-paced drainer reads it exactly like the HLS session's store.
         let packetStore = SubtitlePacketStore()
@@ -1574,6 +1577,7 @@ extension AetherEngine {
         let host = AudioPlaybackHost()
         self.audioHost = host
         applyDesiredVolume(to: host)
+        applyDesiredRate(to: host)
         self.playlistShiftSeconds = 0
         self.setPresentationAxis(PresentationAxisMap())
 
@@ -1642,6 +1646,9 @@ extension AetherEngine {
         self.audioAVPlayerHost = host
         applyDesiredVolume(to: host)
         self.audioAVPlayerActive = true
+        // After the active flag: `maxSupportedRate` is 3.0 only once this session counts as audio-only,
+        // and applyDesiredRate clamps against it (#436).
+        applyDesiredRate(to: host)
         self.playlistShiftSeconds = 0
         self.setPresentationAxis(PresentationAxisMap())
         // Reclaim Now-Playing ownership for this session on each track start,

@@ -2725,6 +2725,11 @@ public final class AetherEngine: ObservableObject {
     ) async throws -> SourceProbe? {
         var source = source
         var options = options
+        // #436: a speed the host set belongs to the item it was set on. The rebuilds a session makes
+        // on its own (reload at position, audio-track switch, AirPlay LAN swap, background return)
+        // reopen the same source and keep it; a different item starts at 1.0, so a host whose speed
+        // control resets per item cannot end up showing 1.0 over a session still running at 1.5.
+        if !Self.rateSurvivesLoad(of: source, loadedURL: loadedURL) { desiredRate = nil }
         // #199: a live master whose #168 carriage verdict already fired routes straight onto the
         // live-ingest loopback. Remounting the native bypass would burn readyToPlay plus the watchdog
         // grace on a deterministic no-video-track outcome; after an ingest death that discovery tax
@@ -4543,6 +4548,9 @@ public final class AetherEngine: ObservableObject {
         // Surviving stopInternal is deliberate (a reload keeps the card through the seam).
         pendingVideoNowPlayingInfo = [:]
         #endif
+        // #436: the speed belongs to the item, so it leaves with it. Same lifetime as the staged
+        // Now-Playing card above, and for the same reason: a reload keeps it through the seam.
+        desiredRate = nil
         // Clear loadedURL on public stop() so reloadAtCurrentPosition can't resurrect the URL after dismissal
         // and selectSubtitleTrack can't spawn a side demuxer against a stopped session.
         loadedURL = nil
@@ -4972,6 +4980,36 @@ public final class AetherEngine: ObservableObject {
         if let v = desiredVolume { host.volume = v }
     }
 
+    /// The speed the host asked for, remembered so the host rebuilds a session makes on its own
+    /// (reload at position, audio-track switch, AirPlay LAN swap, background return) come back at it
+    /// instead of silently at 1.0 (#436). Lifetime is the item: a load of a different source clears
+    /// it, as does `stop()`, so a host whose speed control resets per item stays in step. Within a
+    /// session the resume itself is the host's own business (`AVPlayer.defaultRate` on the native
+    /// paths, `lastRate` on the software ones), which is what covers the play() calls neither the
+    /// engine nor a client issues.
+    var desiredRate: Float?
+
+    func applyDesiredRate(to host: any TransportControllable) {
+        // Seeded on every host the load builds, including the "no speed set" case: the native and
+        // audio AVPlayer hosts are REUSED across loads, and the rate they resume at lives on that
+        // player, so a new item would otherwise inherit the previous one's speed from a host object
+        // the engine's own memory no longer describes.
+        // Re-clamped per host: the cap is 3.0 for an audio-only session and 2.0 for video, so a rate
+        // carried out of one must not outrun the other.
+        host.setResumeRate(min(desiredRate ?? 1.0, maxSupportedRate))
+    }
+
+    /// #436: whether a speed set on the current item survives this load. A rebuild of the same source
+    /// keeps it; a different item starts at 1.0. A custom source has no URL to compare, and the only
+    /// way one is reopened is the engine reusing the retained reader, so a loaded session keeps it.
+    static func rateSurvivesLoad(of source: MediaSource, loadedURL: URL?) -> Bool {
+        guard let loaded = loadedURL else { return false }
+        switch source {
+        case .url(let url): return url == loaded
+        case .custom: return true
+        }
+    }
+
     /// Maximum reliable forward rate: 3x for audio-only sessions, 2x for video.
     /// Above the cap AVPlayer fast-forward becomes unstable (AetherEngine#39).
     /// Hosts should size their speed picker against this. Query after load; returns 2.0 while idle.
@@ -4989,6 +5027,8 @@ public final class AetherEngine: ObservableObject {
         if clamped != rate {
             EngineLog.emit("[AetherEngine] setRate(\(rate)) clamped to \(clamped) (max supported on this path)", category: .engine)
         }
+        // Zero is a pause, not a speed: it must not become what a later resume comes back at (#436).
+        if clamped != 0 { desiredRate = clamped }
         activeTransportHost?.setRate(clamped)
     }
 

@@ -12,6 +12,32 @@ the public-API contract.
 
 ### Fixed
 
+- **A resume came back at 1.0 and discarded the playback speed, and no client could hold it from
+  outside (AE#436).** `AVPlayer.play()` is rate 1.0 by definition, and the native video host latched
+  a boolean play intent rather than a rate, so every pause dropped the speed. Re-applying it from the
+  outside did not work either, as the report measured: the engine re-issues play() from paths a
+  client cannot observe (the readyToPlay re-assert after an item swap, interruption and background
+  resume, the #287 premature-end recovery), and AVKit and the remote command centre call play()
+  straight on the player, so one client write was overwritten 45 ms later and again three seconds
+  after that, with the playback phase never changing to key a backstop on.
+
+  The rate a resume comes back at is `AVPlayer.defaultRate`, the platform's own "rate at which to
+  start playback when play is called", so both AVPlayer-backed hosts record the speed there and every
+  one of those paths resumes at it, with nobody writing rate inside a resume window. Zero is treated
+  as a pause rather than a speed at all four hosts: recorded as one it became the rate the next
+  resume, the software clock arming, and a rebuffer recovery all came back at, which brought a
+  session back frozen while it reported itself playing. The engine also remembers the requested speed
+  (`desiredRate`, the neighbour of `desiredVolume` the report asked for) and seeds it into each host
+  it builds, re-clamped to that host's ceiling, so the rebuilds a session makes on its own keep it.
+  The speed belongs to the item: a load of a different source, or `stop()`, returns to 1.0.
+
+  `aetherctl play --host-calls ratehold` is the measurement: it sets 1.5, pauses, resumes without the
+  client writing a rate, and reads the rate back off the transport itself. It reproduces the report
+  on the previous code and passes on this one, on the native and the software path.
+
+  Thanks to @rrgomes for measuring the client-side workaround as well as the defect, which is what
+  showed the re-issues were unreachable from outside.
+
 - **A 3D Blu-ray MVC remux played black on the native path (AE#435).** These files carry both eyes
   inside one H.264 track, which Matroska declares as StereoMode 13 / 14 (`block_lr` / `block_rl`,
   both eyes in one block) and libavformat reports as stream-level `AV_STEREO3D_FRAMESEQUENCE`. The

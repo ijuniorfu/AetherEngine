@@ -375,16 +375,24 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         case "setrate":
             print("  HOSTCALL setRate(1.0)")
             engine.setRate(1.0)
-        case "reloadlive", "seekback", "overlapseek":
+        case "ratehold":
+            // #436: the speed a host set has to survive the transport's own resume. Set here, paused
+            // at tick 3 and resumed at tick 5 in the telemetry loop; the verdict reads the rate back
+            // off the transport itself, not off anything the engine remembers.
+            print("  HOSTCALL setRate(\(Issue436RateHold.rate)) (held across a pause/resume)")
+            engine.setRate(Issue436RateHold.rate)
+        case "reloadlive", "seekback", "overlapseek", "ratehold-tail":
             break  // reloadlive handled at load time, seekback/overlapseek in the telemetry loop
         case let call where call.hasPrefix("seekfar"):
             break  // #433, in the telemetry loop; `seekfar@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,reloadlive,seekback,seekfar,overlapseek)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,reloadlive,seekback,seekfar,overlapseek)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }
 
+    var rateHoldAfterResume: Float?
+    var rateHoldAtEnd: Float?
     var monitor: AudioContinuityMonitor?
     var tapTask: Task<Void, Never>?
     if audioStats {
@@ -538,6 +546,23 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         print(line)
         // DVR-seek smoke: rewind 20 s mid-session, then live-edge return 15 s later, so the
         // telemetry shows whether the clock and the audio look-ahead recover from both.
+        if hostCalls.contains("ratehold") {
+            if tick == 3 {
+                print(String(format: "  HOSTCALL pause() at rate %.2f", Issue436RateHold.observedRate(engine)))
+                engine.pause()
+            }
+            if tick == 5 {
+                print("  HOSTCALL play() (no rate written by the client, which is the point)")
+                engine.play()
+            }
+            if tick >= 6, rateHoldAfterResume == nil {
+                rateHoldAfterResume = Issue436RateHold.observedRate(engine)
+            }
+            // Read again every tick after that: a rebuild the session runs later (an audio-track
+            // switch, a live reload) builds a fresh host, and whether the speed crosses that seam is
+            // the other half of the report.
+            if tick >= 6 { rateHoldAtEnd = Issue436RateHold.observedRate(engine) }
+        }
         if hostCalls.contains("seekback"), tick == 15 {
             let target = max(0, engine.currentTime - 20)
             print(String(format: "  HOSTCALL seek(to: %.2f) (currentTime - 20)", target))
@@ -683,6 +708,24 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         print("VERDICT: session ended in error: \(message)")
         return 2
     }
+    if hostCalls.contains("ratehold") {
+        let observed = rateHoldAfterResume
+        print(String(format: "#436 rate hold: requested %.2f, transport reported %.2f after the resume",
+                     Issue436RateHold.rate, observed ?? -1))
+        guard let observed else {
+            print("VERDICT: #436 drill inconclusive (session ended before the resume tick)")
+            return 5
+        }
+        if abs(observed - Issue436RateHold.rate) > 0.01 {
+            print("VERDICT: #436 reproduced (the resume discarded the rate)")
+            return 4
+        }
+        if let atEnd = rateHoldAtEnd, abs(atEnd - Issue436RateHold.rate) > 0.01 {
+            print(String(format: "VERDICT: #436 held across the resume but lost later (%.2f at the last tick); "
+                         + "a rebuild in between dropped it", atEnd))
+            return 4
+        }
+    }
     if hostCalls.contains("overlapseek") {
         print("#292 seek-window drills:")
         for verdict in overlapVerdicts { print("  \(verdict)") }
@@ -722,4 +765,22 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
     }
     print("VERDICT: OK")
     return 0
+}
+
+
+/// #436: reading the rate back off the transport, whichever one is serving. The native paths run an
+/// AVPlayer; the software paths run their own synchronizer, and its timebase is the only place their
+/// effective rate exists. Neither is a value the engine caches, which is what makes the drill's
+/// answer worth having.
+enum Issue436RateHold {
+    static let rate: Float = 1.5
+
+    @MainActor
+    static func observedRate(_ engine: AetherEngine) -> Float {
+        if let player = engine.currentAVPlayer { return player.rate }
+        if let timebase = engine.softwarePresentationTimebase {
+            return Float(CMTimebaseGetRate(timebase))
+        }
+        return -1
+    }
 }

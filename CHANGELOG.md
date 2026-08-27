@@ -12,6 +12,35 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.50.1] - 2026-08-27
+
+### Fixed
+
+- **The H.264 `CODECS` attribute misspelled any profile that carries a constraint flag.** The
+  master's entry was formatted straight from `AVCodecParameters.profile`, and that field is not a
+  bare `profile_idc`: libavcodec ORs the constraint flags into the high bits, so Constrained Baseline
+  arrives as `66|AV_PROFILE_H264_CONSTRAINED` = 578. `%02X` is a minimum width rather than a maximum,
+  so it printed as three digits and the attribute came out `avc1.2420028`, seven hex digits where RFC
+  6381 defines exactly six. Constrained High and the High 10 / 4:2:2 / 4:4:4 Intra profiles overflow
+  the same way; Main and High carry no flags, which is why remuxed sources never showed it. The
+  hardcoded middle byte was the other half of it: `profile_compatibility` carries those same
+  constraint flags, and declaring zero for every source contradicted the sample entry the muxer
+  writes from the same extradata.
+
+  All three bytes now come from the source in whatever form it carries them, the way the HEVC branch
+  already worked: the avcC states them outright, an MPEG-TS stream states them in the first three
+  bytes of its SPS, and only a source with neither falls back to the codecpar fields, masked, with
+  the two flags libavcodec preserved mapped back into the compatibility byte. Deriving the attribute
+  from the same extradata the muxer stream-copies into the sample entry is what keeps the manifest
+  and the init segment from disagreeing by construction. Only the manifest attribute changes, no
+  segment or init byte moves, and only the master route is affected: a media-direct session declares
+  no `CODECS` at all. Sources whose profile carries no constraint flags are byte-identical before and
+  after, verified side by side on the same fixtures.
+
+  Not claimed: that the malformed string broke playback. macOS AVFoundation accepted both spellings
+  in an A/B on identical media, so this is a specification violation whose consequence on tvOS is
+  untested.
+
 ## [6.50.0] - 2026-08-27
 
 ### Fixed

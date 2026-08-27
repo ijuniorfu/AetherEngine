@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.49.0] - 2026-08-27
+
 ### Fixed
 
 - **A resume came back at 1.0 and discarded the playback speed, and no client could hold it from

@@ -12,6 +12,29 @@ the public-API contract.
 
 ### Fixed
 
+- **A 3D Blu-ray MVC remux played black on the native path (AE#435).** These files carry both eyes
+  inside one H.264 track, which Matroska declares as StereoMode 13 / 14 (`block_lr` / `block_rl`,
+  both eyes in one block) and libavformat reports as stream-level `AV_STEREO3D_FRAMESEQUENCE`. The
+  dependent view's slices reference a subset SPS the base decoder never receives, so a plain H.264
+  decoder can only skip them. libavcodec does exactly that and decodes the base view, which is the
+  left eye and the 2D fallback every non-3D player shows; VideoToolbox is handed whole samples with
+  both views' NALs inside and renders nothing, so the session played its audio over a black screen.
+  Nothing in the engine had ever read the stereo declaration, so these files took the native path on
+  the strength of being progressive H.264.
+
+  The container says it before a packet is decoded, so routing reads it at load: H.264 declaring
+  either both-eyes-in-one-block carriage now takes the software path, the one decoder that produces
+  a picture from it. Same shape as the rules already there for interlaced H.264 and High 4:2:2,
+  where the format looks native on paper and comes out wrong in practice. The frame-packed modes
+  (side by side, top / bottom, checkerboard, row or column interleaved, anaglyph) are single
+  self-contained pictures and keep the native path with hardware decode; cropping an eye out of one
+  of those stays the host's call. MV-HEVC keeps the native path too, being Apple's own format with a
+  base layer AVPlayer plays. Real MVC 3D output is not offered on any path, and the dispatch now
+  logs the decision, so a session that took this route says so.
+
+  Thanks to @TheyCallMeSpy for the report, which came with the packet cadence, the container tag and
+  the ffmpeg decode that narrows it to routing rather than decode.
+
 - **`setRate` documented the software path as playing speed without pitch correction, and it never
   did (AE#434).** Both transport surfaces were running AVFoundation's TimeDomain algorithm, the
   default an app linked on or after iOS 15 / macOS 12 gets, and the engine set the property nowhere,

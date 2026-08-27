@@ -3356,11 +3356,31 @@ public final class AetherEngine: ObservableObject {
                 )
             }
         }
+        // #435: a 3D Blu-ray MVC remux muxes both eyes into one H.264 track (Matroska StereoMode
+        // block_lr / block_rl, which libavformat reports as stream-level AV_STEREO3D_FRAMESEQUENCE).
+        // VideoToolbox is handed samples carrying both views and renders nothing; libavcodec skips the
+        // dependent view's NALs and decodes the base view, which is the left eye. Read here so the
+        // decision stays in the pure policy.
+        var containerStereoType: AVStereo3DType?
+        if probeOpened, let vStream = probe.stream(at: probe.videoStreamIndex) {
+            containerStereoType = Self.stereo3DType(stream: vStream)
+        }
+        let multiviewCarriage = VideoRoutingPolicy.routesSoftwareForMultiviewCarriage(
+            codecID: detectedCodecID, stereo3DType: containerStereoType)
+        if multiviewCarriage {
+            EngineLog.emit(
+                "[AetherEngine] H.264 carries both stereo views in one track "
+                + "(container stereo3d=frame sequence, MVC 3D remux); VideoToolbox has no base-view-only "
+                + "mode, routing to the software path so the left eye plays as 2D (#435)",
+                category: .engine
+            )
+        }
         var useSoftwarePath = VideoRoutingPolicy.requiresSoftwarePath(
             codecID: detectedCodecID,
             fieldOrder: detectedFieldOrder,
             av1Available: VTCapabilityProbe.av1Available,
-            spsIndicatesInterlaced: spsIndicatesInterlaced
+            spsIndicatesInterlaced: spsIndicatesInterlaced,
+            stereo3DType: containerStereoType
         )
         // #232: a declared interlaced field order is not evidence that any frame IS interlaced.
         // European 25 fps Blu-ray masters ship as 1080i25 (there is no 1080p25): interlaced carriage,
@@ -3373,7 +3393,7 @@ public final class AetherEngine: ObservableObject {
         // the demuxer the session reuses, and live 1080i broadcast (the case the rule exists for) is
         // neither seekable nor mis-declared.
         if useSoftwarePath, probeOpened, !options.isLive, probe.isSourceSeekable,
-           probe.videoStreamIndex >= 0,
+           probe.videoStreamIndex >= 0, !multiviewCarriage,
            VideoRoutingPolicy.routesSoftwareForDeclaredInterlace(
                codecID: detectedCodecID,
                fieldOrder: detectedFieldOrder,

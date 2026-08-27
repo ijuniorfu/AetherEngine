@@ -12,6 +12,41 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.50.0] - 2026-08-27
+
+### Fixed
+
+- **The local HLS origin answered anyone on the same network, not only this session.** The listener
+  binds `0.0.0.0` so an AirPlay receiver can reach it over the LAN (#86), which also puts it in front
+  of every other host on that network, and there was no access control at all: the endpoint names are
+  fixed (`/master.m3u8`, `/media.m3u8`, `/init.mp4`, `/segN.mp4`) and the peer address was read for a
+  diagnostic line rather than to filter, so the ephemeral port was the only thing a scan on the same
+  WiFi had to find before it could pull the stream that was playing. Every path now carries a 128-bit
+  per-session token as its first component, and a request without it is refused before it reaches the
+  router. Nothing else had to change: playlist URIs are relative, so segments, the init segment and
+  the subtitle renditions resolve under the prefix on their own, and only the three entry-point
+  accessors name it. `AirPlayPlaylistDecision.receiverURL` used to overwrite the whole path when it
+  swapped in `media.m3u8`, which would have handed the receiver an address the server now refuses; it
+  replaces the last component and keeps what precedes it.
+
+  Worth stating plainly, so this is not read as more than it was: no path traversal existed and none
+  is added (subtitle paths parse as integers, segments come from memory, no request maps to the file
+  system), and no credential was ever reachable there. What was reachable was the stream itself.
+
+### Changed
+
+- **FFmpegBuild 2.5.0, for a libzvbi security update.** libzvbi 0.2.45 fixes an out-of-bounds read,
+  an out-of-bounds write and an integer underflow (GHSA-86rm-g7qf-j2fh, moderate, no CVE assigned).
+  The `libzvbi_teletext` decoder is built and the teletext path is wired end to end, so a DVB
+  teletext stream reaches that code. The same release drops the `concat` demuxer, a script demuxer
+  selectable by probing alone, which made any stream handed to `avformat_open_input` a potential
+  file-open primitive; nothing here ever asked for it by name. It also carries dav1d 1.5.4 and zimg
+  3.0.6, neither under an advisory. FFmpeg stays on `n8.1.2`.
+
+- **LibDovi 2.1.0 (`dolby_vision` 3.4.0).** No advisory. The header change is additive only: two new
+  CMv4.0 metadata entry points, nothing removed, so the Profile 7 to 8.1 conversion path is
+  untouched.
+
 ## [6.49.0] - 2026-08-27
 
 ### Fixed

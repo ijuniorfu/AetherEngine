@@ -137,6 +137,12 @@ extension AetherEngine {
             ?? (outputFloor + playlistShiftSeconds)
     }
 
+    /// AE#442: the TARGETDURATION the live playlist is serving, nil on every path that serves none
+    /// (remote HLS live, the software live path, and before the first playlist build).
+    var liveTargetDurationSeconds: Double? {
+        nativeVideoSession?.sealedLiveTargetDurationSeconds().map(Double.init)
+    }
+
     /// Publish `liveEdgeTime`, `seekableLiveRange`, `isAtLiveEdge`, `behindLiveSeconds`. Path-agnostic; no-op when no live window is active.
     @MainActor
     func publishLiveWindow(edgeSessionTime: Double) {
@@ -145,6 +151,12 @@ extension AetherEngine {
         w.notePlayhead(currentTime)
         w.noteResidentFloor(residentLiveFloorSessionSeconds())
         liveWindow = w
+        // AE#442: tick-to-tick advancement, not a running maximum: a backward DVR seek drops the
+        // playhead, and the next advancing publish has to be able to record the new, larger distance.
+        if let previous = lastPublishedLivePlayhead, currentTime > previous + 0.05 {
+            liveBehindWhenLastAdvancing = w.behindLiveSeconds
+        }
+        lastPublishedLivePlayhead = currentTime
         clock.liveEdgeTime = w.edgeTime
         clock.seekableLiveRange = w.seekableRange
         clock.isAtLiveEdge = w.isAtEdge

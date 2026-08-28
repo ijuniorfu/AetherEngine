@@ -119,7 +119,10 @@ func runLive(
     discontinuityAt: Double? = nil,
     realtime: Bool = false,
     fastZap: Bool = false,
-    pacingPreroll: Double? = nil
+    pacingPreroll: Double? = nil,
+    freezeAfter: Double? = nil,
+    rewindBeforeFreeze: Double? = nil,
+    forceRecoveryReloadAt: Double? = nil
 ) -> Int32 {
     // Relative timestamps make join latency (readyToPlay et al.) readable off the log (AE#195).
     let logEpoch = Date()
@@ -136,6 +139,9 @@ func runLive(
     print("aetherctl live: seed=\(resolvedSeed) seconds=\(playSeconds)" +
           (dvrWindow.map { " dvr-window=\($0)" } ?? " dvr-window=none (live-only floor)") +
           (dropAfter.map { " drop-after=\($0)s" } ?? "") +
+          (freezeAfter.map { " freeze-after=\($0)s" } ?? "") +
+          (rewindBeforeFreeze.map { " rewind-before-freeze=\($0)s" } ?? "") +
+          (forceRecoveryReloadAt.map { " force-recovery-reload-at=\($0)s" } ?? "") +
           (discontinuityAt.map { " discontinuity-at=\($0)s" } ?? "") +
           (measureRSS ? " measure-rss=true" : "") +
           (reportCacheBytes ? " report-cache-bytes=true" : ""))
@@ -148,6 +154,7 @@ func runLive(
         return 1
     }
     fixture.dropAfterSeconds = dropAfter
+    fixture.freezeAfterSeconds = freezeAfter
     fixture.discontinuityAfterSeconds = discontinuityAt
     fixture.paced = realtime
     if realtime {
@@ -200,6 +207,16 @@ func runLive(
         if reloadTest {
             box.value = await liveReloadTest(url: liveURL, seconds: playSeconds,
                                              dvrWindow: dvrWindow ?? 600)
+            fixture.stop()
+            CFRunLoopStop(CFRunLoopGetMain())
+            return
+        }
+        if let freezeAt = freezeAfter {
+            box.value = await liveFreezeTest(url: liveURL, seconds: playSeconds,
+                                             dvrWindow: dvrWindow ?? 1800,
+                                             freezeAt: freezeAt,
+                                             rewindBehind: rewindBeforeFreeze ?? 300,
+                                             forceRecoveryReloadAt: forceRecoveryReloadAt)
             fixture.stop()
             CFRunLoopStop(CFRunLoopGetMain())
             return
@@ -564,4 +581,158 @@ private func liveRewindTest(url: URL, seconds playSeconds: Double,
     print(String(format: "VERDICT: native DVR rewind+return FAIL (rewind=%@ return=%@ normalStable=%@)",
                  "\(rewindPass)", "\(atEdge)", "\(normalStable)"))
     return 1
+}
+
+// MARK: - live freeze (AE#442)
+
+/// Counts the recovery lines the freeze leg is about, so the verdict can name the path that ran
+/// instead of leaving it to whoever reads the scrollback.
+private final class FreezeRecoveryCounters: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var itemDeaths = 0
+    private(set) var edgeRejoins = 0
+    private(set) var keptPlace = 0
+    private(set) var reopenAttempts = 0
+    private(set) var fullReloads = 0
+    private(set) var unsatisfiable = 0
+
+    func note(_ line: String) {
+        lock.lock(); defer { lock.unlock() }
+        if line.contains("item death (failedToPlayToEndTime)") { itemDeaths += 1 }
+        if line.contains("nudge did not revive the consumer") {
+            if line.contains("the place it held") { keptPlace += 1 } else { edgeRejoins += 1 }
+        }
+        if line.contains("live reopen attempt") { reopenAttempts += 1 }
+        if line.contains("reload: stopInternal start") { fullReloads += 1 }
+        if line.contains("blocking reload msn=") { unsatisfiable += 1 }
+    }
+}
+
+/// AE#442 repro: rewind into the DVR window, then freeze the upstream (connection stays open, no
+/// further bytes). The edge stops advancing, the local playlist server answers the blocking reloads
+/// `503 unsatisfiable`, and the question this leg exists to settle is what happens to a playhead that
+/// is minutes behind while its segment cache still holds every second ahead of it.
+///
+/// Two numbers carry the verdict: whether the playhead SNAPPED forward (the reported loss), and
+/// whether the clock kept advancing afterwards (whether the cache runway was actually playable).
+@MainActor
+private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Double,
+                            freezeAt: Double, rewindBehind: Double,
+                            forceRecoveryReloadAt: Double? = nil) async -> Int32 {
+    let counters = FreezeRecoveryCounters()
+    let prior = EngineLog.handler
+    EngineLog.handler = { line in counters.note(line); prior?(line) }
+
+    let engine: AetherEngine
+    do {
+        engine = try AetherEngine()
+    } catch {
+        print("VERDICT: live-freeze FAIL: engine init error: \(error.localizedDescription)")
+        return 1
+    }
+
+    var options = LoadOptions(isLive: true)
+    options.suppressDisplayCriteria = true
+    options.dvrWindowSeconds = dvrWindow
+    do {
+        try await engine.load(url: url, options: options)
+    } catch {
+        print("VERDICT: live-freeze FAIL: load error: \(error.localizedDescription)")
+        engine.stop()
+        return 1
+    }
+
+    // The fixture arms its freeze from the moment its serve loop starts, which is the reader's
+    // connect, not this clock. Same order of magnitude, and every printed tick carries both.
+    let startTime = Date()
+    let rewindAt = max(5.0, freezeAt - 12.0)
+    var didRewind = false
+    var behindAtFreeze: Double? = nil
+    var playheadAtFreeze: Double? = nil
+    var maxForwardSnap: Double = 0
+    var advanceAfterFreeze: Double = 0
+    var prevT = engine.currentTime
+    var firstPostFreezeT: Double? = nil
+    var lastT = engine.currentTime
+    var didForceReload = false
+    var playheadBeforeForcedReload: Double? = nil
+
+    let ticks = max(1, Int(playSeconds))
+    for _ in 0..<ticks {
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        let elapsed = Date().timeIntervalSince(startTime)
+
+        if !didRewind, elapsed >= rewindAt {
+            didRewind = true
+            let target = max(0, engine.liveEdgeTime - rewindBehind)
+            print(String(format: "  REWIND: edge=%.2fs target=%.2fs (%.0fs behind)",
+                         engine.liveEdgeTime, target, rewindBehind))
+            await engine.seek(to: target)
+            print(String(format: "  REWIND: landed t=%.2fs behind=%.2fs",
+                         engine.currentTime, engine.liveEdgeTime - engine.currentTime))
+            prevT = engine.currentTime
+        }
+
+        if !didForceReload, let forceAt = forceRecoveryReloadAt, elapsed >= forceAt {
+            didForceReload = true
+            playheadBeforeForcedReload = engine.currentTime
+            print(String(format: "  FORCE: driving the #93/#65 stage-2 recovery reload at t=%.2fs "
+                         + "(%.2fs behind the edge)",
+                         engine.currentTime, engine.liveEdgeTime - engine.currentTime))
+            engine.forceStalledConsumerReloadForTesting()
+        }
+
+        let t = engine.currentTime
+        let edge = engine.liveEdgeTime
+        if elapsed >= freezeAt {
+            if behindAtFreeze == nil {
+                behindAtFreeze = edge - t
+                playheadAtFreeze = t
+                print(String(format: "  FREEZE: playhead=%.2fs edge=%.2fs behind=%.2fs", t, edge, edge - t))
+            } else {
+                if firstPostFreezeT == nil { firstPostFreezeT = t }
+                maxForwardSnap = max(maxForwardSnap, t - prevT)
+                advanceAfterFreeze = t - (firstPostFreezeT ?? t)
+            }
+        }
+        prevT = t
+        lastT = t
+
+        let range = engine.seekableLiveRange.map {
+            String(format: "%.1f...%.1f", $0.lowerBound, $0.upperBound)
+        } ?? "nil"
+        print(String(format: "  state=%@ t=%.2fs edge=%.2fs behind=%.2fs range=%@ deaths=%d rejoins=%d",
+                     "\(engine.state)", t, edge, max(0, edge - t), range,
+                     counters.itemDeaths, counters.edgeRejoins + counters.keptPlace))
+    }
+
+    let finalState = engine.state
+    engine.stop()
+    EngineLog.handler = prior
+
+    print("")
+    print("=== AE#442 FREEZE LEG ===")
+    print(String(format: "  playhead at freeze:   %.2fs (%.2fs behind the edge)",
+                 playheadAtFreeze ?? -1, behindAtFreeze ?? -1))
+    print(String(format: "  playhead at the end:  %.2fs", lastT))
+    print(String(format: "  largest forward step: %.2fs", maxForwardSnap))
+    print(String(format: "  advance after freeze: %.2fs", advanceAfterFreeze))
+    if let before = playheadBeforeForcedReload {
+        print(String(format: "  forced recovery reload: playhead %.2fs before", before))
+    }
+    print("  recovery lines: itemDeath=\(counters.itemDeaths) edgeRejoin=\(counters.edgeRejoins) "
+          + "keptPlace=\(counters.keptPlace) "
+          + "reopen=\(counters.reopenAttempts) fullReload=\(counters.fullReloads) "
+          + "unsatisfiable503=\(counters.unsatisfiable)")
+    print("  final state: \(finalState)")
+
+    // A snap is the reported defect: the playhead leaves its parked position for the edge in one step.
+    let snapped = maxForwardSnap > 30.0
+    if snapped {
+        print(String(format: "VERDICT: live-freeze POSITION LOST (forward step %.2fs)", maxForwardSnap))
+        return 1
+    }
+    print(String(format: "VERDICT: live-freeze position held (largest step %.2fs, advanced %.2fs after the freeze)",
+                 maxForwardSnap, advanceAfterFreeze))
+    return 0
 }

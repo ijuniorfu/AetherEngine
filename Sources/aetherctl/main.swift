@@ -101,6 +101,7 @@ func printUsage() {
                           --software runs a real session through the SW sink, exit 3 if it yields no audible PCM)
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] [--audio-index N] <file>
       aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--gen-highbitrate-seed]
+                     [--freeze-after N] [--rewind-before-freeze N] [--force-recovery-reload-at N]
       aetherctl dvr [--path native|sw|both] [--seconds N] [--dvr-window N]
       aetherctl dualsubs <file> --primary <streamIndex> --secondary <streamIndex> [--seek <seconds>]
       aetherctl hlsfixture <input.ts> [--port N] [--segment-seconds N] [--target-duration N] [--window N]
@@ -460,6 +461,14 @@ if first == "live" {
         let path = seed ?? "Fixtures/user/highbitrate-1080p.ts"
         exit(ensureHighBitrateSeed(path: path) ? 0 : 1)
     }
+    // AE#442: --freeze-after N freezes the upstream (connection open, no bytes) after N seconds, and
+    // --rewind-before-freeze N parks the playhead N seconds inside the DVR window first. Together they
+    // are the reporter's shape: a viewer minutes behind live when the source dies.
+    let freezeAfter = takeDoubleFlag("--freeze-after", from: &rest)
+    let rewindBeforeFreeze = takeDoubleFlag("--rewind-before-freeze", from: &rest)
+    // AE#442: drive the stage-2 recovery reload at N seconds instead of waiting for a real item death,
+    // so where a parked live session comes back from it is measurable in one run.
+    let forceRecoveryReloadAt = takeDoubleFlag("--force-recovery-reload-at", from: &rest)
     // --sliding: accepted but ignored; sliding is now unconditional for live sessions.
     _ = takeFlag("--sliding", from: &rest)
     rejectStrayFlags(rest, subcommand: "live")
@@ -469,7 +478,9 @@ if first == "live" {
                  reloadTest: reloadTest,
                  forceSoftware: forceSW, dropAfter: dropAfter,
                  discontinuityAt: discontinuityAt, realtime: realtime,
-                 fastZap: fastZap, pacingPreroll: preroll))
+                 fastZap: fastZap, pacingPreroll: preroll,
+                 freezeAfter: freezeAfter, rewindBeforeFreeze: rewindBeforeFreeze,
+                 forceRecoveryReloadAt: forceRecoveryReloadAt))
 }
 
 if first == "play" {

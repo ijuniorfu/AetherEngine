@@ -1206,6 +1206,14 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return Double(3 * (sealed ?? 6))
     }
 
+    /// AE#442: the TARGETDURATION the live playlist is actually serving, once sealed. nil before the
+    /// first playlist build, which is also the only window in which nothing can be parked behind live.
+    var sealedLiveTargetDurationSeconds: Int? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return liveTargetDurationSeal.value
+    }
+
     var liveProductionHalted: Bool {
         stateLock.lock()
         defer { stateLock.unlock() }

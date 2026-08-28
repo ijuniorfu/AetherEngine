@@ -12,6 +12,36 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.53.0] - 2026-08-28
+
+### Fixed
+
+- **A session counter describes the session now, not the object the session replaced.** Every
+  "lifetime" number in `LiveTelemetry` was read straight off the live instance that holds it, so it
+  fell back to a fresh instance's partial total in the middle of a healthy session, with nothing in
+  the line to say it had. `networkTransferredBytes` and `droppedFrameCount` read the newest
+  `AVPlayerItemAccessLogEvent`, whose counters are totals per entry, and AVFoundation opens a new
+  entry whenever the playback session changes under it. Measured on the live loopback harness, one
+  origin connection and no producer restart in the whole run: `rx` went 3.4 to 2.2 to 0.6 MB and
+  `drop` 44 to 0 while the session played on. Summed across entries, both stay monotonic over the
+  same run. `demuxerBytesFetched`, `muxedBytesLifetime` and `producerRestartCount` had the same
+  defect one layer down: a live reopen rebuilds the demuxer and the producer, and a muxer rotation
+  rebuilds the muxer, so each replacement now folds the outgoing instance's totals into the
+  session's. A reporter spent two rounds attributing one of these falls to an origin socket event
+  that never happened (AE#443).
+- **`producerRestartCount` no longer claims more than it can see.** A producer restarts at most once,
+  so the field was a 0/1 flag on the current instance rather than a count for the session, and on a
+  live session it is 0 by construction: the live recoveries replace the producer instead of
+  restarting one, and say so in the log (`live reopen attempt`, `live producer rebuilt in place`).
+  It counts across producers now, and its documentation states the live case.
+
+### Changed
+
+- **`aetherctl` shows the origin link next to the consumer link.** The two are not the same and on
+  the native path they cannot be: `rx` is what AVPlayer pulled from the engine's own loopback server,
+  while an origin question is about the source. `play` prints `origin=` beside `rx=`, and `live`
+  prints `origin=` and `restarts=` per tick, which is where a `--drop-after` recovery is driven.
+
 ## [6.52.0] - 2026-08-28
 
 ### Added

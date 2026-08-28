@@ -382,6 +382,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// `audioMoovPrimeUnobtainable`.
     var audioBridgeFeedStats: AudioBridge.FeedStats? { audioConfig?.bridge?.feedStats }
     private var currentMuxer: MP4SegmentMuxer?
+    /// AE#443: totals folded off muxers this producer has ROTATED away. A rotation (program switch, ad
+    /// pod, a rebuilt muxer after a failure) hands the session a fresh `ByteCounter`, so a read of the
+    /// current muxer alone drops everything the previous ones emitted, and the "lifetime" it is read as
+    /// silently means "since the last rotation". Guarded by `stateLock` with `currentMuxer` itself.
+    private var retiredMuxerBytes: Int = 0
+    private var retiredMuxerFragmentCuts: Int = 0
     private var currentMuxerSegmentIndex: Int = .min
 
     /// Latched once first muxer emits ftyp+moov bytes; subsequent muxers' init bytes are discarded.
@@ -994,13 +1000,25 @@ final class HLSSegmentProducer: @unchecked Sendable {
     var muxerLifetimeFragmentBytes: Int {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return currentMuxer?.lifetimeFragmentBytesEmitted ?? 0
+        return retiredMuxerBytes + (currentMuxer?.lifetimeFragmentBytesEmitted ?? 0)
     }
 
     var muxerFragmentCuts: Int {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return currentMuxer?.fragmentCutCount ?? 0
+        return retiredMuxerFragmentCuts + (currentMuxer?.fragmentCutCount ?? 0)
+    }
+
+    /// The only way `currentMuxer` changes. Folds the outgoing muxer's totals in first, so every
+    /// rotation site inherits the accounting instead of having to remember it (AE#443).
+    private func installMuxer(_ new: MP4SegmentMuxer?) {
+        stateLock.lock()
+        if let outgoing = currentMuxer {
+            retiredMuxerBytes &+= outgoing.lifetimeFragmentBytesEmitted
+            retiredMuxerFragmentCuts &+= outgoing.fragmentCutCount
+        }
+        currentMuxer = new
+        stateLock.unlock()
     }
 
     private let finishCondition = NSCondition()
@@ -1898,10 +1916,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     }
                 }
             )
-            // Write under stateLock: telemetry getters read currentMuxer under the same lock.
-            stateLock.lock()
-            self.currentMuxer = muxer
-            stateLock.unlock()
+            // Write through installMuxer: telemetry getters read currentMuxer under stateLock, and the
+            // outgoing muxer's totals have to be folded before the reference goes.
+            self.installMuxer(muxer)
             self.currentMuxerSegmentIndex = initialSegmentIndex
             return muxer
         } catch {
@@ -2346,9 +2363,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 category: .session
             )
         }
-        stateLock.lock()
-        currentMuxer = nil
-        stateLock.unlock()
+        installMuxer(nil)
         currentMuxerSegmentIndex = .min
     }
 
@@ -2364,9 +2379,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 category: .session
             )
         }
-        stateLock.lock()
-        currentMuxer = nil
-        stateLock.unlock()
+        installMuxer(nil)
         currentMuxerSegmentIndex = .min
     }
 

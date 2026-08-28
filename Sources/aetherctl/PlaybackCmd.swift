@@ -59,14 +59,21 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
 
 /// #306: the network half of the 1 Hz snapshot, appended to the transport line. Every field is
 /// omitted where the snapshot has none, so the software path's numbers can be read off a run instead
-/// of inferred from a memprobe half a minute wide. `rx` is the reader's lifetime pull, `ahead` the
-/// part of it the demuxer has not consumed, and `cushion` the decoded video queued past the clock.
+/// of inferred from a memprobe half a minute wide. `ahead` is the fetched part the demuxer has not
+/// consumed, and `cushion` the decoded video queued past the clock.
+///
+/// AE#443: `rx` and `origin` are two different links, and the run that made that worth spelling out was
+/// a reporter reading a fall in `rx` as an origin socket event. `origin` is the session's pull from the
+/// SOURCE, which is the one an origin question is about; `rx` is what the playback consumer pulled over
+/// its own link, which on the native path is the loopback server and therefore says nothing about the
+/// origin at all. Both are session totals now.
 @MainActor
 private func networkTelemetryFragment(_ telemetry: LiveTelemetry?) -> String {
     guard let telemetry else { return "" }
     var out = ""
     if let mbps = telemetry.networkThroughputMbps { out += String(format: " net=%.2fMbps", mbps) }
     if let rx = telemetry.networkTransferredBytes { out += String(format: " rx=%.1fMB", Double(rx) / 1_048_576) }
+    out += String(format: " origin=%.1fMB", Double(telemetry.demuxerBytesFetched) / 1_048_576)
     if let ahead = telemetry.readerWindowAheadBytes { out += String(format: " ahead=%.1fMB", Double(ahead) / 1_048_576) }
     if let cushion = telemetry.displayCushionSeconds { out += String(format: " cushion=%.2fs", cushion) }
     if let fwd = telemetry.forwardBufferSeconds { out += String(format: " fwd=%.1fs", fwd) }

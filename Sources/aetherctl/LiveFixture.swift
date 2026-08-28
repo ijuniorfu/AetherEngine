@@ -98,6 +98,10 @@ final class LiveFixture: @unchecked Sendable {
     /// reloads go unsatisfiable, and AVPlayer starves at the edge into item death. The reporter's
     /// source failed this way, and the segment cache keeps everything behind the playhead throughout.
     var freezeAfterSeconds: Double? = nil
+    /// AE#446 round 2: seconds of freeze before the upstream starts delivering again. nil = never,
+    /// which is the only regime `--freeze-after` alone can drive and therefore the only one the
+    /// recovery-after-an-outage path was never exercised in.
+    var unfreezeAfterSeconds: Double? = nil
     private var frozen = false
     private var didFireFreeze = false
 
@@ -376,6 +380,14 @@ final class LiveFixture: @unchecked Sendable {
                           + "(connection stays open, no further bytes, fd=\(fd))")
                 }
                 self.stateLock.unlock()
+                guard let thaw = self.unfreezeAfterSeconds else { return }
+                self.workQueue.asyncAfter(deadline: .now() + thaw) { [weak self] in
+                    guard let self else { return }
+                    self.stateLock.lock()
+                    self.frozen = false
+                    self.stateLock.unlock()
+                    print("[LiveFixture] Upstream delivering again after ~\(Int(thaw))s of freeze")
+                }
             }
         }
 

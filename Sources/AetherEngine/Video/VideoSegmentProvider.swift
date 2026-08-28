@@ -331,6 +331,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// stopped delivering. See `liveDeliveryStalled`.
     private var _lastLiveSegmentFinalizedAt: Date?
     private var _liveDeliveryStalledLatched = false
+    /// AE#446 round 2: once ENDLIST has been served it can never be withdrawn to the item that saw it,
+    /// so the decision latches. See `liveOutageEndlist`.
+    private var _liveOutageEndlistLatched = false
     private var refreshCounter: Int = 0
     /// EXT-X-MEDIA-SEQUENCE first index; monotonically advancing, stays 0 for VOD.
     private var _liveFirstVisible: Int = 0
@@ -1367,6 +1370,102 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             category: .session
         )
         return true
+    }
+
+    /// AE#446 round 2: serve the remaining window as a finished asset while the source is not delivering.
+    ///
+    /// A live playlist whose tail stops moving stops being fetched, and the segments it still lists go
+    /// with it. Measured on the harness, a viewer 147 s inside the window with the source frozen: six
+    /// more segments arrive at playback rate, AVPlayer draws `-12888 Playlist File unchanged` on every
+    /// reload, and after the sixth it stops polling AND stops requesting, with 115 s of its own runway
+    /// resident on disk. Then, when the playlist finally moves again, it rejoins at
+    /// edge-minus-HOLD-BACK by itself and the position is gone (measured forward step 117.76 s), which
+    /// is a second way to lose a place that no reload policy of ours can cover.
+    ///
+    /// Two cheaper answers were built and measured and neither moves it, so neither is worth trying again:
+    /// - `EXT-X-SODALITE-REFRESH` makes every response byte-distinct (verified live: two polls 4 s apart
+    ///   differ in that line alone) and AVPlayer still calls the playlist unchanged. Its test reads the
+    ///   parsed playlist, so a tag it does not know cannot count.
+    /// - Sliding the window forward on the clock, so `EXT-X-MEDIA-SEQUENCE` advances one segment per
+    ///   TARGETDURATION, does not reset that clock either: same `-12888` cadence, same strike-out at the
+    ///   same second, and it spends the viewer's rewind depth to buy nothing. What AVPlayer watches is
+    ///   the TAIL of the playlist, not its identity.
+    ///
+    /// So the window is served as what it actually is while the source is down: a finite asset. Latched,
+    /// because a playlist that has carried ENDLIST can never take it back.
+    ///
+    /// Not for a viewer at the edge: with nothing resident ahead, ENDLIST would only convert a stall into
+    /// an end. The gate is the consumer's own fetch point.
+    var liveOutageEndlist: Bool {
+        let consumerTarget = cache.targetIndex
+        stateLock.lock()
+        if _liveOutageEndlistLatched {
+            stateLock.unlock()
+            return true
+        }
+        let total = segments.count
+        let stale = sourceIsLateLocked()
+        stateLock.unlock()
+        guard isLive, consumerTarget >= 0, consumerTarget + 1 < total, stale else { return false }
+        stateLock.lock()
+        _liveOutageEndlistLatched = true
+        stateLock.unlock()
+        EngineLog.emit(
+            "[VideoSegmentProvider] #446 the source stopped delivering with the consumer at "
+            + "\(consumerTarget) of \(total); serving the rest of the window as a finished asset "
+            + "(ENDLIST) so AVPlayer keeps fetching the runway it already holds instead of striking "
+            + "out on an unchanged playlist",
+            category: .session
+        )
+        return true
+    }
+
+    /// AE#446 round 2: has the window already been closed? A pure read, unlike `liveOutageEndlist`,
+    /// which decides and latches. Anything outside the playlist build wants this one.
+    var liveOutageEndlistLatched: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _liveOutageEndlistLatched
+    }
+
+    /// AE#446 round 2: is the source late by its own advertised cadence? Read FRESH rather than through
+    /// `liveDeliveryStalled`, which latches for the lifetime of the session on purpose (#167: a
+    /// returning CAN-BLOCK-RELOAD would flap). A window closed by an outage has to be able to re-open,
+    /// so the condition that closes it has to be able to become false again. Call under stateLock.
+    private func sourceIsLateLocked() -> Bool {
+        guard let last = _lastLiveSegmentFinalizedAt, let td = liveTargetDurationSeal.value,
+              td > 0 else { return false }
+        return Date().timeIntervalSince(last) > 1.5 * Double(td)
+    }
+
+    /// AE#446 round 2: the source is delivering again, so the session can go back to being live. Only
+    /// an item swap can act on it: an item that has seen ENDLIST never reloads its playlist again,
+    /// which is exactly why the swap is required.
+    ///
+    /// Deliberately the exact complement of what closed the window, rather than "one more segment than
+    /// there was". A dying source cuts a last partial segment on its way out (the no-cut watchdog's
+    /// final flush is one), and counting that as a recovery swaps the item into a window that is still
+    /// closed, where a live rejoin has no edge to aim at and starts the viewer at the beginning of it.
+    /// Measured doing exactly that: a rejoin 180 s below the place it was supposed to hold.
+    var liveOutageProductionResumed: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _liveOutageEndlistLatched && !sourceIsLateLocked()
+    }
+
+    /// AE#446 round 2: re-open the window as live, for a FRESH item only. Safe because the item that
+    /// saw the ENDLIST has stopped polling, so it cannot observe the tag being withdrawn.
+    func clearLiveOutageEndlist() {
+        stateLock.lock()
+        let wasLatched = _liveOutageEndlistLatched
+        _liveOutageEndlistLatched = false
+        stateLock.unlock()
+        guard wasLatched else { return }
+        EngineLog.emit(
+            "[VideoSegmentProvider] #446 the source is cutting again; the window is live once more "
+            + "for the next item",
+            category: .session
+        )
     }
 
     /// Blocking-reload hold bound: 3 x sealed TARGETDURATION (= the advertised HOLD-BACK depth).

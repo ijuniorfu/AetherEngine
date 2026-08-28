@@ -2694,6 +2694,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
         subsystemSnapshot().producer?.isLiveHeadroomParked
     }
 
+    /// AE#446 round 2: this session's window is being served as a finished asset because its source
+    /// stopped delivering while a viewer still had resident segments ahead. See
+    /// `VideoSegmentProvider.liveOutageEndlist`.
+    var liveOutageEndlistActive: Bool { provider?.liveOutageEndlistLatched ?? false }
+
+    /// AE#446 round 2: the source has cut again since that happened.
+    var liveOutageProductionResumed: Bool { provider?.liveOutageProductionResumed ?? false }
+
+    /// AE#446 round 2: re-open the window as live for the next item. Call it immediately before the
+    /// item swap that will fetch the playlist again, never while the current item could still poll.
+    func clearLiveOutageEndlist() { provider?.clearLiveOutageEndlist() }
+
     /// #178: called by the engine when a NEW user seek is dispatched. A recovery re-anchor still
     /// holding the coalescer's authoritative slot belongs to the superseded seek; left in place it
     /// would drop the new seek's segment-driven restart and land the producer on the stale

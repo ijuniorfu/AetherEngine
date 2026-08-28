@@ -206,6 +206,25 @@ Verifies SW-path background audio (iOS keepalive) headless on macOS, where the `
 
 Wraps a local file in a custom `IOReader` and plays it through `load(source:)`. `--memory` reads via `DataIOReader`, `--forward-only` drops the seek capability, `--audio-only` routes through the audio-only pipeline, and `--reload` / `--switch-audio` / `--select-subs` / `--extract` exercise the optional capabilities (background reload, audio-track switch, embedded subtitles, scrub preview) end-to-end. `--audio-index N` names the audio stream at LOAD and prints what it asked for next to what it got. Pair it with `--forward-only` for the one question a live host has to answer: `selectAudioTrack` refuses such a source (rebuilding a drained FIFO), so naming the stream at load is the only way onto another track, and this is where that was measured rather than assumed (Sodalite#64).
 
+### `--live`: a host-owned live spool, and the memory it costs (AE#445)
+
+`customio --live <file.ts>` puts the same file behind a reader shaped like a live host's: paced at
+`--rate-kbps` (default 8000) against the wall clock, blocking at the edge instead of ever returning
+EOF, answering `AVSEEK_SIZE` negative, and seekable by logical offset. `--seconds N` sets the run
+length (default 720), `--dvr-window N` the timeshift, `--report-size` makes the size known, and
+`--no-wrap` stops it looping the file. Every ten seconds it prints `physFP` and its slope, and it
+closes with that slope stated against the source's own mux rate:
+
+```
+VERDICT: physFP 105 -> 402 MB over 240s = 1.24 MB/s (source mux rate 0.95 MB/s, retention ratio 1.30)
+```
+
+A ratio near 1 means the session keeps one byte for every byte it plays, which on a source that never
+EOFs is unbounded by construction; near 0 means the footprint is the session's, not the stream's. That
+is the whole measurement, and before AE#445 the custom-source live shape had no harness at all: the
+defect it found (host reader callbacks ran on the pump's undrained thread) was reachable by every
+custom reader and visible to none of the engine's own buckets.
+
 ## disc-inspect
 
 Walks a local DVD-Video or Blu-ray ISO at the filesystem layer (FFmpeg-free) and reports what `DiscReader.wrap` makes of it: the recognition verdict and the stages it went through (ISO9660 / UDF signatures, BDMV / VIDEO_TS contents, resolved extents), so a disc that fails to play is debuggable instead of surfacing a bare `INVALIDDATA`. It also prints the full selectable-title list with each title's duration and chapter offsets (the same titles + chapters the engine exposes via `discTitles` / `discChapters`). Exit 0 when the image is recognized as playable, else 1. `--dump` adds the verbose UDF volume structure under the `.demux` log.

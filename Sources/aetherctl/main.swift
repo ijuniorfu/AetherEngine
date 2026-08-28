@@ -100,6 +100,9 @@ func printUsage() {
                          (#95: decode the loopback audio track to mono 48k WAV, print continuity stats;
                           --software runs a real session through the SW sink, exit 3 if it yields no audible PCM)
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] [--audio-index N] <file>
+      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] <file.ts>
+                         (AE#445: a host-owned live spool behind MediaSource.custom, paced at the mux rate,
+                          never EOF, unknown size; prints physFP and its slope against that rate)
       aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--gen-highbitrate-seed]
                      [--freeze-after N] [--rewind-before-freeze N] [--force-recovery-reload-at N]
       aetherctl dvr [--path native|sw|both] [--seconds N] [--dvr-window N]
@@ -624,11 +627,20 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     let forwardOnly = takeFlag("--forward-only", from: &rest)
     let customAudioIndex = takeIntFlag("--audio-index", from: &rest).map(Int32.init)
     let audioOnlyFlag = takeFlag("--audio-only", from: &rest)
+    // AE#445: the custom-source live shape had no harness at all, so a retention question about it
+    // could only be reasoned about. These four flags are the reporter's reader in parameters.
+    let customLive = takeFlag("--live", from: &rest)
+    let customRateKbps = takeIntFlag("--rate-kbps", from: &rest) ?? 8000
+    let customDvrWindow = takeDoubleFlag("--dvr-window", from: &rest)
+    let customReportsSize = takeFlag("--report-size", from: &rest)
+    let customNoWrap = takeFlag("--no-wrap", from: &rest)
+    let customMallocCensus = takeFlag("--malloc-census", from: &rest)
     let reloadFlag = takeFlag("--reload", from: &rest)
     let switchAudioFlag = takeFlag("--switch-audio", from: &rest)
     let selectSubsFlag = takeFlag("--select-subs", from: &rest)
     let extractFlag = takeFlag("--extract", from: &rest)
-    let audioSeconds = takeDoubleFlag("--seconds", from: &rest) ?? 10
+    let secondsFlag = takeDoubleFlag("--seconds", from: &rest)
+    let audioSeconds = secondsFlag ?? 10
     // --native-subs: diagnostics affordance for mov_text subtitle track (#55); serve only.
     let nativeSubsIndex = takeIntFlag("--native-subs", from: &rest)
     // --throttle-kbps: slow-CDN simulation; starves the producer below real-time to provoke rebuffers.
@@ -669,6 +681,11 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     case "audio":
         exit(runAudio(url: url, seconds: audioSeconds))
     case "customio":
+        if customLive {
+            exit(runCustomLiveSpool(path: urlArg, seconds: secondsFlag ?? 720, rateKbps: customRateKbps,
+                                    dvrWindow: customDvrWindow, reportsSize: customReportsSize,
+                                    wraps: !customNoWrap, mallocCensus: customMallocCensus))
+        }
         exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag, reload: reloadFlag, switchAudio: switchAudioFlag, selectSubs: selectSubsFlag, extract: extractFlag, audioIndex: customAudioIndex))
     default:
         printUsage()

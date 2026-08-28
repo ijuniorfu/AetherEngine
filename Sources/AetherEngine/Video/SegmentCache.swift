@@ -346,8 +346,9 @@ final class SegmentCache: @unchecked Sendable {
         return currentTargetIndex >= target
     }
 
-    /// Evict segments strictly below cutoff (= live firstVisible). Bounded by firstVisible <= currentTargetIndex
-    /// so it only removes segments the playlist already dropped; pruneOutsideWindow handles the forward bound.
+    /// Evict segments strictly below cutoff, which the live caller bounds at the consumer's own fetch
+    /// point (`VideoSegmentProvider.liveEvictionFloor`) so this never unlinks the segment a response is
+    /// about to stat; pruneOutsideWindow handles the forward bound.
     func evictBelow(_ cutoff: Int) {
         condition.lock()
         var doomed: [URL] = []

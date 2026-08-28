@@ -590,7 +590,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                     // its own lock; nesting the two here would invert the ordering evictBelow's async
                     // hop exists to avoid).
                     let consumerTarget = cacheRef.targetIndex
-                    cacheRef.evictBelow(cutoff)
+                    cacheRef.evictBelow(Self.liveEvictionFloor(firstVisible: cutoff,
+                                                               consumerTarget: consumerTarget))
                     self?.noteWindowSlideRelativeToConsumer(cutoff: cutoff, consumerTarget: consumerTarget)
                 }
             }
@@ -606,6 +607,36 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return (segments.count, 0, refreshCounter, false, 0)
     }
 
+    /// AE#441 round 3: what a window slide costs is decided by the consumer's NEXT fetch, not its last.
+    ///
+    /// `declareTarget` is called as a segment is served and the consumer walks indices forward one at a
+    /// time, so everything strictly below `consumerTarget` is already in AVPlayer's own buffer and the
+    /// index it will ask for next is `consumerTarget + 1`. A viewer parked at the floor therefore sits
+    /// at `firstVisible - 1` for part of every segment, by the same one-segment sawtooth
+    /// `residentFloorOutputSeconds()` has against the rendered playhead: the slide moves in whole
+    /// segments while the consumer moves continuously. Its next fetch is `firstVisible` itself, which is
+    /// resident, so nothing is missed. From `firstVisible - 2` down the index it is about to ask for has
+    /// been deleted, and that is the cache miss this line exists to name.
+    static func windowSlidPastConsumer(firstVisible: Int, consumerTarget: Int) -> Bool {
+        return consumerTarget + 1 < firstVisible
+    }
+
+    /// The lowest index a window slide may unlink, which is not always the playlist's new first visible.
+    ///
+    /// A serve holds a URL, not a file handle: `mediaSegmentURL` hands `peekURL`'s result to a response
+    /// that stats and opens the file afterwards, so unlinking the segment currently being served turns
+    /// into a 404 for an index the playlist offered when it was asked for. And a viewer riding the floor
+    /// puts the slide exactly one segment above the fetch point routinely, not rarely (measured: every
+    /// latched line of a 220 s parked run had `firstVisible == consumerTarget + 1`). So eviction stops at
+    /// the fetch point, which is the bound `evictBelow` already documents for itself.
+    ///
+    /// Bounded on the other side too: the floor never trails `firstVisible` by more than one segment, so
+    /// a consumer that has stopped fetching entirely cannot pin retention behind it.
+    static func liveEvictionFloor(firstVisible: Int, consumerTarget: Int) -> Int {
+        guard consumerTarget >= 0 else { return firstVisible }
+        return max(firstVisible - 1, min(firstVisible, consumerTarget))
+    }
+
     /// The sliding window overtaking the consumer's fetch point is the failure mode the removed advance
     /// park used to make impossible (it capped the producer 10 segments ahead of that point). Live is
     /// source-paced, so a real-time origin cannot get there; an origin that hands over more than one
@@ -616,7 +647,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private func noteWindowSlideRelativeToConsumer(cutoff: Int, consumerTarget: Int) {
         guard consumerTarget >= 0 else { return }
         stateLock.lock()
-        let outside = consumerTarget < cutoff
+        let outside = Self.windowSlidPastConsumer(firstVisible: cutoff, consumerTarget: consumerTarget)
         let shouldLog = outside && !_liveConsumerOutsideWindowLatched
         _liveConsumerOutsideWindowLatched = outside
         stateLock.unlock()

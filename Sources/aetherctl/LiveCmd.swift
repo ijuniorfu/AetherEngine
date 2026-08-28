@@ -785,10 +785,18 @@ private func liveRewindHoldTest(url: URL, seconds playSeconds: Double, dvrWindow
         return 1
     }
 
-    // Fill the window before rewinding: parking just above the floor only means anything once the
-    // floor is retention rather than the session's own start.
-    let fillFor = min(max(10.0, dvrWindow * 0.6), playSeconds * 0.4)
-    print(String(format: "  FILL: %.0fs before the rewind (window=%.0fs)", fillFor, dvrWindow))
+    // Fill the window before rewinding, and fill it PAST full. A floor below a window that has not
+    // filled yet is the session's own start, which never moves, so a park against it measures a
+    // regime that has no eviction in it at all. The first version of this leg filled `window * 0.6`
+    // and therefore reported a clean bill of health for a regime it could not reach.
+    let fillFor = dvrWindow + 12.0
+    print(String(format: "  FILL: %.0fs before the rewind (window=%.0fs, filled past full)",
+                 fillFor, dvrWindow))
+    if playSeconds < fillFor + 30.0 {
+        print(String(format: "  WARNING: --seconds %.0f leaves %.0fs of hold after a %.0fs fill; "
+                     + "the window will not be sliding for long enough to read anything",
+                     playSeconds, playSeconds - fillFor, fillFor))
+    }
     let startTime = Date()
     while Date().timeIntervalSince(startTime) < fillFor {
         try? await Task.sleep(nanoseconds: 500_000_000)
@@ -830,7 +838,10 @@ private func liveRewindHoldTest(url: URL, seconds playSeconds: Double, dvrWindow
     print(String(format: "  ticks with floor above the playhead: %d/%d (max %.2fs)",
                  invertedTicks, holdTicks, maxInversion))
     print(String(format: "  ticks where the clock did not advance: %d/%d", stalledTicks, holdTicks))
-    print("  'live window slid past the consumer': \(slides.count)")
+    print("  'live window slid past the consumer': \(slides.count)"
+          + (slides.count > 0
+             ? " (max firstVisible-consumerTarget gap \(slides.maxGap), \(slides.gapsAboveOne) above one segment)"
+             : ""))
     print("  final state: \(finalState)")
 
     // The inversion alone is not the defect; the window passing the consumer's FETCH point is.
@@ -843,11 +854,27 @@ private func liveRewindHoldTest(url: URL, seconds playSeconds: Double, dvrWindow
     return 0
 }
 
+/// Counts the latched slide line AND reads its shape. The gap `firstVisible - consumerTarget` is the
+/// whole reading: a gap of 1 means the consumer's next fetch is the new first visible segment, which
+/// is still resident, while a gap above 1 means the segment it will ask for next is already deleted.
 private final class SlideCounter: @unchecked Sendable {
     private let lock = NSLock()
     private(set) var count = 0
+    private(set) var maxGap = 0
+    private(set) var gapsAboveOne = 0
     func note(_ line: String) {
         lock.lock(); defer { lock.unlock() }
-        if line.contains("live window slid past the consumer") { count += 1 }
+        guard line.contains("live window slid past the consumer") else { return }
+        count += 1
+        guard let first = Self.intField("firstVisible=", in: line),
+              let target = Self.intField("consumerTarget=", in: line) else { return }
+        let gap = first - target
+        maxGap = max(maxGap, gap)
+        if gap > 1 { gapsAboveOne += 1 }
+    }
+    private static func intField(_ key: String, in line: String) -> Int? {
+        guard let r = line.range(of: key) else { return nil }
+        let rest = line[r.upperBound...].prefix { $0 == "-" || $0.isNumber }
+        return Int(rest)
     }
 }

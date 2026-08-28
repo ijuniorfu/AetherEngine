@@ -280,9 +280,19 @@ Measured against pre-cut GOP-aligned segments, `play --live --fast-zap` entered 
 | 1 s | 2 | 7 | 2 | 1.003 / 1.005 / 1.010 s |
 | 0.5 s GOP inside 1 s segments | 2 | 3 | 2 | **0.510 s, three times** |
 
-Removing the padding changes nothing. The served TARGETDURATION is `max(advertised, ceil(observed arrival cadence), ceil(max own EXTINF), ceil(1.5 x cut target))`, and a strict-realtime origin's real inter-arrival gap is always a hair above the nominal cut, so the `ceil` lands on `cut + 1` whether or not the origin advertises it. Deepening the window changes nothing either: the ingest joins exactly three segments behind the edge at window 3, 5 and 7, so a deeper upstream window never becomes a deeper cushion. What moves is the cut, because the fastZap grace is `min(2.0, max(0.5, own cut duration))` and the engine re-cuts at the source GOP.
+Removing the padding changed nothing **at 6.34.1**, and that finding is what AE#447 later turned out to be. The served TARGETDURATION was `max(advertised, ceil(observed arrival cadence), ceil(max own EXTINF), ceil(1.5 x cut target))`, and a strict-realtime origin's real inter-arrival gap is always a hair above the nominal cut, so the `ceil` landed on `cut + 1` whether or not the origin advertised it. Reading that as "the padding is not what you pay for" was right; reading it as "there is nothing to pay" was not. Both terms were wrong for the same reason: an arrival interval is a cadence, and `ceil` treats it as a segment duration.
 
-Over-padding costs somewhere else than the join. TD 5 on 2 s cuts still serves in 2.010 s, because the bounded fastZap exit fires on the grace either way, but the served playlist then carries a 15 s holdback, so AVPlayer targets that far behind the live edge for the rest of the session.
+From **6.56.0** the advertised value is not read at all (it is printed in the seal line and nowhere else), and a measured cadence enters as the TARGETDURATION its patience actually needs, `ceil(gap / 1.5)`, because `1.5 x TD` is the unchanged-playlist tolerance the floor exists to satisfy. On the same 2 s origin advertising 3, measured on this harness: served TD **3, then 4, then 4** across three joins before, holdback 9 s then 12 s twice, escalating because the gate's own wait was being measured as the source's cadence; served TD **2** on every join after, holdback 6 s, measured floor 2.019 to 2.141 s. Deepening the window changes nothing either: the ingest joins exactly three segments behind the edge at window 3, 5 and 7, so a deeper upstream window never becomes a deeper cushion. What moves is the cut, because the fastZap grace is `min(2.0, max(0.5, own cut duration))` and the engine re-cuts at the source GOP.
+
+Over-padding costs somewhere else than the join. TD 5 on 2 s cuts still serves in 2.010 s, because the bounded fastZap exit fires on the grace either way, but the served playlist then carries a 15 s holdback, so AVPlayer targets that far behind the live edge for the rest of the session. Since 6.56.0 an over-padded advert cannot produce that at all: only the source's own segments and its closed inter-arrival gaps can.
+
+The seal line is where the whole derivation is now readable, once per session:
+
+```
+[HLSVideoEngine] live TARGETDURATION sealed at 2s (holdback 6.000s): max EXTINF 2.000s,
+  1.5 x cut target 0.750s, measured floor 2.069s needs 2s of patience;
+  upstream advertises 3.000s (reported, not used)
+```
 
 ### The header-enforcing origin (AE#363)
 

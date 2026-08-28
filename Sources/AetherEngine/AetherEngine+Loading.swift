@@ -592,7 +592,20 @@ extension AetherEngine {
         } else {
             liveCadenceObservation = nil
         }
-        let initialTargetDurationFloor = liveIngest?.upstreamTargetDuration
+        // AE#447: the floor is measured (arrival cadence + the longest segment the upstream really
+        // served), the advert rides along for the seal log only. Both weak, same reason as above.
+        let liveClosedCadenceObservation: (@Sendable () -> Double?)?
+        let liveUpstreamSegmentDurationObservation: (@Sendable () -> Double?)?
+        if let liveIngest {
+            liveClosedCadenceObservation = { [weak liveIngest] in liveIngest?.closedLiveCadenceSeconds }
+            liveUpstreamSegmentDurationObservation = { [weak liveIngest] in
+                liveIngest?.upstreamSegmentDurationSeconds
+            }
+        } else {
+            liveClosedCadenceObservation = nil
+            liveUpstreamSegmentDurationObservation = nil
+        }
+        let upstreamSelfReportedTargetDuration = liveIngest?.upstreamTargetDuration
         // #199: in-engine reopen transport for live ingest sessions. Only HLSLiveIngestReader main
         // readers are reconstructible blind (immutable URL + headers, hint always "mpegts"); the
         // demuxed-audio shape is excluded because a reopen would also have to rebuild the side audio
@@ -623,7 +636,9 @@ extension AetherEngine {
             liveJoinProfile: loadedOptions.liveJoinProfile,
             blockingReloadOverride: loadedOptions.liveBlockingReload,
             liveCadenceObservation: liveCadenceObservation,
-            initialTargetDurationFloor: initialTargetDurationFloor,
+            liveClosedCadenceObservation: liveClosedCadenceObservation,
+            liveUpstreamSegmentDurationObservation: liveUpstreamSegmentDurationObservation,
+            upstreamSelfReportedTargetDuration: upstreamSelfReportedTargetDuration,
             preopenedDemuxer: preopenedDemuxer,
             sourceReopenableByURL: !isCustomSource,
             customSourceReopenFactory: ingestReopenFactory,

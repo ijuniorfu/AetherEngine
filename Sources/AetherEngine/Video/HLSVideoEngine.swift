@@ -717,7 +717,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         liveCutTargetSeconds: Double? = nil,
         blockingReloadOverride: Bool? = nil,
         liveCadenceObservation: (@Sendable () -> Double?)? = nil,
-        initialTargetDurationFloor: Double? = nil,
+        liveClosedCadenceObservation: (@Sendable () -> Double?)? = nil,
+        liveUpstreamSegmentDurationObservation: (@Sendable () -> Double?)? = nil,
+        upstreamSelfReportedTargetDuration: Double? = nil,
         preopenedDemuxer: Demuxer? = nil,
         sourceReopenableByURL: Bool = true,
         customSourceReopenFactory: CustomSourceReopenFactory? = nil,
@@ -755,12 +757,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // Trust OBSERVED arrival cadence, not the upstream's self-reported TARGETDURATION, for blocking-reload
         // eligibility and the TARGETDURATION floor (-15410, AetherEngine#167). Built only for live ingest
         // sources that expose a cadence observation; URL live and VOD leave it nil and fall back to the
-        // signal-less default (blocking-reload on, server's own 1.5x-cut-target floor).
+        // signal-less default (blocking-reload on, server's own 1.5x-cut-target floor). AE#447: the advert
+        // is passed for the seal log, it no longer seeds the floor.
         self.liveCadencePolicy = liveCadenceObservation.map { observe in
             LiveCadencePolicy(
                 observe: observe,
                 cutTargetSeconds: resolvedLiveCutTarget,
-                initialFloorSeconds: initialTargetDurationFloor
+                observeSealEvidence: {
+                    LiveCadenceEvidence(
+                        closedCadenceSeconds: liveClosedCadenceObservation?(),
+                        servedSegmentDurationSeconds: liveUpstreamSegmentDurationObservation?()
+                    )
+                },
+                selfReportedTargetDurationSeconds: upstreamSelfReportedTargetDuration
             )
         }
         self.preopenedDemuxer = preopenedDemuxer

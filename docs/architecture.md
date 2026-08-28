@@ -290,7 +290,7 @@ Sources/AetherEngine/
 │       ├── LiveIngestSourceInfo.swift       Internal seam: upstream segment cadence (shapes TARGETDURATION + blocking-reload eligibility) and DualSourceMergeOrder for the dual-source DTS merge
 │       ├── HLSVODIngestReader.swift         Ingest reader for an immutable ENDLIST playlist: seeks restart the source at the segment preceding the requested playlist time, on an elapsed-media-time axis (the EXTINF sum) rather than the container's PTS
 │       ├── HLSCarriageProbe.swift           Reads a live source's video carriage from its playlist and the first segment's PMT, so the #168 verdict is available while the native mount is still inside its watchdog grace instead of seconds after it (#293, #296)
-│       └── LiveArrivalCadenceMeter.swift    Measures the observed segment-arrival cadence of a live upstream (interval between batches of new segments plus the currently open gap), the signal LL-HLS shaping trusts instead of a self-reported TARGETDURATION
+│       └── LiveArrivalCadenceMeter.swift    Measures the observed segment-arrival cadence of a live upstream (interval between batches of new segments plus the currently open gap), the signal LL-HLS shaping trusts instead of a self-reported TARGETDURATION. The closed intervals are reported separately, because the seal may not be taken from a gap the first-serve gate is itself holding open (AE#447)
 ├── Native/
 │   ├── AudioLookahead.swift                 SW live feeder audio look-ahead pump policy + cursor state: audio lead decoupled from video decode pace, live-edge underrun rebuffer (#107)
 │   ├── Issue93ItemDeathRevive.swift         Bounded revive budget (`ItemDeathReviveGate`) for items killed by accumulated -12889 media timeouts (`failedToPlayToEndTime`, #93 round 3)

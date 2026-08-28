@@ -98,15 +98,33 @@ enum LiveEdgePolicy {
     /// Never serve an empty or single-segment live playlist (a 1-segment window is an instant -12888).
     static let minStartupSegments = 2
 
+    /// AVPlayer's unchanged-playlist patience: it tolerates a playlist that has not changed for this
+    /// multiple of the served TARGETDURATION before drawing `-12888`. The one number the cadence floor
+    /// is answerable to.
+    static let unchangedPlaylistPatienceMultiplier: Double = 1.5
+
+    /// The TARGETDURATION a measured arrival cadence requires: enough that `1.5 x TD` of patience covers
+    /// the gap. AE#447: the floor used to enter as `ceil(gap)`, which demands `1.5 x` the gap in patience
+    /// and, through the `3 x TD` holdback, `4.5 x` it in startup depth. Nobody chose that margin; it came
+    /// from treating an arrival interval as if it were a segment duration. The conservatism belongs where
+    /// it is already paid for: the meter reports the MAX over a trailing window, not the mean, so the gap
+    /// handed in here is a worst case already. Multiplying a worst case by 1.5 counts it twice, and at a
+    /// 2.000 s cadence the ordinary jitter that makes it 2.05 then buys a whole extra second of TD and
+    /// three of holdback (measured: 1.07-1.09 s of wall clock per zap).
+    static func targetDurationForCadence(_ cadenceSeconds: Double) -> Int {
+        Int(ceil(cadenceSeconds / unchangedPlaylistPatienceMultiplier))
+    }
+
     /// Served `#EXT-X-TARGETDURATION`, in whole seconds: `>= ceil(max EXTINF)` (HLS requirement), floored
-    /// by `ceil(1.5 x cut target)` (widens AVPlayer's unchanged-playlist patience, anti -12888) and the
-    /// observed-cadence floor. `cutTargetSeconds` / `cadenceFloorSeconds` are nil for VOD/EVENT.
+    /// by `ceil(1.5 x cut target)` (widens AVPlayer's unchanged-playlist patience, anti -12888) and by
+    /// what the observed cadence needs to stay inside that patience. `cutTargetSeconds` /
+    /// `cadenceFloorSeconds` are nil for VOD/EVENT.
     static func targetDurationSeconds(maxSegmentDuration: Double,
                                       cutTargetSeconds: Double?,
                                       cadenceFloorSeconds: Double?) -> Int {
         var td = Int(ceil(max(1.0, maxSegmentDuration)))
         if let cut = cutTargetSeconds { td = max(td, Int(ceil(cut * 1.5))) }
-        if let floor = cadenceFloorSeconds { td = max(td, Int(ceil(floor))) }
+        if let floor = cadenceFloorSeconds { td = max(td, targetDurationForCadence(floor)) }
         return td
     }
 
@@ -182,20 +200,50 @@ enum LiveEdgePolicy {
     }
 }
 
+/// AE#447: the served TARGETDURATION with the terms it was derived from, so the seal can say in one
+/// line why the session will hold this value for its whole life. Every term but `selfReported` feeds
+/// the max; `selfReported` is what the upstream CLAIMED, printed beside what was measured.
+struct LiveTargetDurationDerivation {
+    let value: Int
+    let maxSegmentDuration: Double
+    let cutTargetFloor: Double?
+    let cadenceFloor: Double?
+    let selfReported: Double?
+
+    /// One line, in the order the terms are maxed. Reads as an argument for the number it reports.
+    var account: String {
+        var terms = ["max EXTINF \(LiveEdgePolicy.seconds(maxSegmentDuration))s"]
+        if let cutTargetFloor {
+            terms.append("1.5 x cut target \(LiveEdgePolicy.seconds(cutTargetFloor * 1.5))s")
+        }
+        terms.append("measured floor "
+                     + (cadenceFloor.map {
+                        "\(LiveEdgePolicy.seconds($0))s needs "
+                        + "\(LiveEdgePolicy.targetDurationForCadence($0))s of patience"
+                     } ?? "none yet"))
+        let claim = selfReported.map {
+            "; upstream advertises \(LiveEdgePolicy.seconds($0))s (reported, not used)"
+        } ?? ""
+        return "live TARGETDURATION sealed at \(value)s "
+            + "(holdback \(LiveEdgePolicy.seconds(LiveEdgePolicy.holdBackSeconds(targetDuration: value)))s): "
+            + terms.joined(separator: ", ") + claim
+    }
+}
+
 struct LiveTargetDurationSeal {
     private(set) var value: Int?
     private var didLogUpwardDrift = false
 
-    mutating func resolve(candidate: Int) -> (value: Int, shouldLogDrift: Bool) {
+    mutating func resolve(candidate: Int) -> (value: Int, shouldLogDrift: Bool, didSeal: Bool) {
         guard let sealed = value else {
             value = candidate
-            return (candidate, false)
+            return (candidate, false, true)
         }
         guard candidate > sealed, !didLogUpwardDrift else {
-            return (sealed, false)
+            return (sealed, false, false)
         }
         didLogUpwardDrift = true
-        return (sealed, true)
+        return (sealed, true, false)
     }
 }
 
@@ -1512,23 +1560,34 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
 
     func currentLiveTargetDuration(
         maxSegmentDuration: Double
-    ) -> (value: Int, cadenceFloor: Double?) {
+    ) -> LiveTargetDurationDerivation {
+        let cutTarget = liveWindowSizing.targetSegmentDurationSeconds
         let floor = liveCadencePolicy?.targetDurationFloorSeconds
-        return (
-            LiveEdgePolicy.targetDurationSeconds(
+        return LiveTargetDurationDerivation(
+            value: LiveEdgePolicy.targetDurationSeconds(
                 maxSegmentDuration: maxSegmentDuration,
-                cutTargetSeconds: liveWindowSizing.targetSegmentDurationSeconds,
+                cutTargetSeconds: cutTarget,
                 cadenceFloorSeconds: floor
             ),
-            floor
+            maxSegmentDuration: maxSegmentDuration,
+            cutTargetFloor: cutTarget,
+            cadenceFloor: floor,
+            selfReported: liveCadencePolicy?.selfReportedTargetDurationSeconds
         )
     }
 
-    private func sealLiveTargetDuration(candidate: Int) -> Int {
+    /// Takes the seal and, on the call that actually takes it, publishes the derivation. The value is
+    /// frozen for the session (RFC 8216 forbids a changing TARGETDURATION, AE#209), so the one line that
+    /// explains it has to be emitted here or nowhere: a host reading a 9 s holdback later has no way to
+    /// tell a measured cadence from an inherited advert (AE#447).
+    private func sealLiveTargetDuration(_ derivation: LiveTargetDurationDerivation) -> Int {
         stateLock.lock()
-        let resolved = liveTargetDurationSeal.resolve(candidate: candidate).value
+        let resolved = liveTargetDurationSeal.resolve(candidate: derivation.value)
         stateLock.unlock()
-        return resolved
+        if resolved.didSeal {
+            EngineLog.emit("[HLSVideoEngine] \(derivation.account)", category: .session)
+        }
+        return resolved.value
     }
 
     func liveTargetDurationSeconds(maxSegmentDuration: Double) -> Int {
@@ -1536,6 +1595,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         stateLock.lock()
         let resolved = liveTargetDurationSeal.resolve(candidate: candidate.value)
         stateLock.unlock()
+        if resolved.didSeal {
+            EngineLog.emit("[HLSVideoEngine] \(candidate.account)", category: .session)
+        }
 
         if resolved.shouldLogDrift {
             EngineLog.emit(
@@ -1604,7 +1666,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                                                        summedDurationSeconds: snap.summed,
                                                        targetDuration: target.value,
                                                        windowSegmentCount: window) {
-                let sealed = sealLiveTargetDuration(candidate: target.value)
+                let sealed = sealLiveTargetDuration(target)
                 accountForFirstServe(since: enteredAt, snapshot: snap, targetDuration: sealed)
                 return true
             }
@@ -1627,14 +1689,14 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                                                           summedDurationSeconds: after.summed,
                                                           targetDuration: afterTarget.value,
                                                           windowSegmentCount: window) {
-                    let sealed = sealLiveTargetDuration(candidate: afterTarget.value)
+                    let sealed = sealLiveTargetDuration(afterTarget)
                     accountForFirstServe(since: enteredAt, snapshot: after, targetDuration: sealed)
                     return true
                 }
                 if let degradedDeadline,
                    Date() >= degradedDeadline,
                    after.count >= LiveEdgePolicy.minStartupSegments {
-                    let sealed = sealLiveTargetDuration(candidate: afterTarget.value)
+                    let sealed = sealLiveTargetDuration(afterTarget)
                     // AE#374: the grace is the last leg of this wait, not the wait. Reporting it alone
                     // left a bounded start reading as a half-second one when it had held for twelve.
                     accountForFirstServe(
@@ -1657,7 +1719,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 }
                 // The satisfied re-read above has already returned, so reaching the deadline here means the
                 // cushion is undersized by definition.
-                let sealed = sealLiveTargetDuration(candidate: afterTarget.value)
+                let sealed = sealLiveTargetDuration(afterTarget)
                 accountForFirstServe(
                     since: enteredAt, snapshot: after, targetDuration: sealed, warning: true,
                     note: "\(Int(timeout))s timeout (undersized startup cushion)"

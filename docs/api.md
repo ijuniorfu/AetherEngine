@@ -341,10 +341,35 @@ before the rate rolls, and honestly so: one is intent and the other is a picture
 `.loading` for the whole hold and turns `.playing` on the roll.
 
 **`liveJoinStartsImmediately` cuts the hold short**, once per load, on a live session, over a buffer
-AVPlayer reports as non-empty. It is the other half of the trade `.fastZap` already prices: playback
-begins on a thinner cushion, so a source that hiccups just after the join rebuffers where it would
-otherwise have started later and played through. Every later hold in the session keeps AVPlayer's own
-policy, so a mid-stream rebuffer is untouched.
+AVPlayer reports as non-empty and that carries at least 1.5 s ahead of the playhead. It is the other half
+of the trade `.fastZap` already prices: playback begins on a thinner cushion, so a source that hiccups
+just after the join rebuffers where it would otherwise have started later and played through. Every later
+hold in the session keeps AVPlayer's own policy, so a mid-stream rebuffer is untouched.
+
+**It is on by default since 6.55.0**, on a device A/B rather than an argument. Two runs of ten channel
+changes on the reported stack, control then lever:
+
+| | control | lever |
+|---|---|---|
+| press to moving picture, warm | 6.4 / 6.5 / 7.2 s | 4.3 / 4.8 / 5.1 / 5.6 s |
+| press to first PICTURE | 3.4-3.9 s | 3.4-3.9 s |
+| stalls / dropped frames | 0 / 0 | 0 / 0 |
+| cold joins | ~6.5 s | ~6.5 s |
+
+First picture is unchanged, so what the lever removes is exactly the frozen tail and nothing else, and
+the cold case is untouched because the guards keep it out of a starved join. Set it `false` to keep
+AVPlayer's own policy for the join.
+
+**Why a depth and not just the empty flag.** `isPlaybackBufferEmpty` is the precondition `AVPlayer.h`
+documents, not a measure of safety: one served fragment reads `false` exactly as a four-second cushion
+does. Sampling the buffer across every hold in the control run above read non-empty with **3.7 to 4.9 s**
+ahead of the playhead for the hold's whole duration, which says the hold on that stack is always AVPlayer
+waiting on its own rate estimate and never starvation at the edge. That is why cutting it short cost
+nothing there, and it is also why the guard reads the depth: behind the same `false`, a genuinely starved
+join holds a fraction of a second, and starting there would trade a still picture for an immediate stall.
+The depth is the contiguous span ahead of the playhead, so an island past a gap does not count. When the
+floor is not met the engine says so once per load (`leaving the stall-avoidance wait alone (buffer ahead
+...s, ...)`), which is what separates the two mechanisms in a report after the fact.
 
 ### The rewind depth a live session really has
 
@@ -431,7 +456,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `dvrWindowSeconds` | nil | Timeshift window. nil means live-only and `seek` is a no-op. |
 | `liveJoinProfile` | `.standard` | A `LiveJoinProfile`. `.fastZap` collapses TARGETDURATION to the source GOP so an IPTV join costs seconds instead of a full holdback. |
 | `clampsLiveResumeToWindow` | true | Whether `play()` may move a behind-live playhead by itself (edge snap on a live-only source more than 45 s behind, or a landing above the retained floor when a DVR window has slid past it). `false` hands the whole decision to the host, which then also owns the eviction case. |
-| `liveJoinStartsImmediately` | false | Cuts AVPlayer's stall-avoidance wait short once at the live join, over a buffer that is already non-empty. The join tail no host can otherwise reach; see the live-join section. |
+| `liveJoinStartsImmediately` | true | Cuts AVPlayer's stall-avoidance wait short once at the live join, over a buffer that is non-empty and at least 1.5 s deep. The join tail no host can otherwise reach; default since 6.55.0 on a device A/B, see the live-join section. |
 | `liveBlockingReload` | nil (auto) | LL-HLS blocking-reload override for loopback live sessions. Auto derives eligibility from observed upstream cadence, which is what keeps a bursty relay off a `-15410` loop. |
 | `nativeRemoteHLS` | false | Hand a remote `master.m3u8` straight to AVPlayer: no demuxer probe, no loopback. Pair with `isLive: true`. |
 | `nativeRemoteHLSIngestFallback` | true | The #168 / #293 carriage recovery and the #363 401/403 bypass refusal recovery. Setting it false turns both off. |

@@ -283,8 +283,18 @@ public struct LoadOptions: Sendable, Equatable {
     ///
     /// The trade is the one `.fastZap` already prices, from the other end: playback starts on a thinner
     /// cushion, so a source that hiccups right after the join rebuffers where it would otherwise have
-    /// started later and played through. Opt in for zapping UX.
-    public var liveJoinStartsImmediately: Bool = false
+    /// started later and played through.
+    ///
+    /// Default `true` since 6.55.0, on a device A/B rather than an argument. Two runs of ten channel
+    /// changes on the reported stack: press-to-moving-picture fell from 6.4 / 6.5 / 7.2 s to
+    /// 4.3 / 4.8 / 5.1 / 5.6 s, first PICTURE was unchanged at 3.4 to 3.9 s in both arms (so what it
+    /// removes is exactly the frozen tail), and stalls and dropped frames stayed at zero in both. The
+    /// buffer was sampled across every hold in the control arm and read non-empty with 3.7 to 4.9 s
+    /// ahead throughout: on that stack the hold is always AVPlayer waiting on its own rate estimate,
+    /// never starvation, which is why cutting it short cost nothing. Cold joins were identical in both
+    /// arms, the guards keeping the lever out of the starved case as designed. Set `false` to keep
+    /// AVPlayer's own policy for the join.
+    public var liveJoinStartsImmediately: Bool = true
 
     /// Whether `play()` may move a behind-live playhead by itself. Default `true`, which is the historical
     /// behaviour (AE#444).
@@ -477,7 +487,7 @@ public struct LoadOptions: Sendable, Equatable {
         dvrWindowSeconds: Double? = nil,
         liveBlockingReload: Bool? = nil,
         liveJoinProfile: LiveJoinProfile = .standard,
-        liveJoinStartsImmediately: Bool = false,
+        liveJoinStartsImmediately: Bool = true,
         clampsLiveResumeToWindow: Bool = true,
         nativeRemoteHLS: Bool = false,
         nativeRemoteHLSIngestFallback: Bool = true,

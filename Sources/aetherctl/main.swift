@@ -508,8 +508,14 @@ if first == "play" {
     // AE#440: LoadOptions.liveJoinStartsImmediately. The join tail after the first serve, where AVPlayer
     // holds a presented frame still while it evaluates whether its cushion will sustain playback. The
     // hold does not reproduce on this harness (loopback answers at memory speed, so the evaluation
-    // concludes immediately), so this flag is here to drive the OTHER end of the A/B on a device.
+    // concludes immediately); these flags drive the OTHER end of the A/B on a device.
+    //
+    // On by default in the engine since 6.55.0, so this mirrors that default rather than passing a
+    // literal `false` and silently making the CLI the one place the lever is off. The positive flag
+    // stays accepted, since the device A/B script passes it explicitly.
     let playLiveStartImmediately = takeFlag("--live-start-immediately", from: &rest)
+    let playNoLiveStartImmediately = takeFlag("--no-live-start-immediately", from: &rest)
+    let liveStartImmediately = playLiveStartImmediately ? true : !playNoLiveStartImmediately
     let dvrWindow = takeDoubleFlag("--dvr-window", from: &rest)
     let subsPick = takeStringFlag("--subs", from: &rest)
     let hostCalls = takeStringFlag("--host-calls", from: &rest).map { $0.split(separator: ",").map(String.init) } ?? []
@@ -611,7 +617,7 @@ if first == "play" {
         printUsage()
         exit(64)
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: playLiveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, pictureProbe: pictureProbe, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,

@@ -65,6 +65,13 @@ final class NativeAVPlayerHost {
     /// AE#440: spent once the join has either been started by hand or rolled on its own, so the override
     /// belongs to the join and every later hold in the session keeps AVPlayer's own stall policy.
     private var liveJoinImmediateStartSpent: Bool = false
+    /// AE#440: true while the buffer reading for this decision is in flight off the main actor. The
+    /// reading is async, so two hold edges arriving during it would otherwise each decide on their own
+    /// copy of a one-shot neither has spent yet.
+    private var liveJoinImmediateStartProbeInFlight: Bool = false
+    /// AE#440: keeps the "left the wait alone" line to one per load. It reports the depth that failed
+    /// the floor, which is the only way to tell a starved join from a rate evaluation after the fact.
+    private var liveJoinThinBufferLogged: Bool = false
     /// AE#287 bookkeeping, cleared with the item in `unloadCurrentItem`.
     private var prematureEndRecoveryAttempts: Int = 0
     private var lastPrematureEndRecoveryPlayhead: Double?
@@ -183,6 +190,11 @@ final class NativeAVPlayerHost {
     private var playIntent = false
     private var rateObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
+    /// AE#440: the waiting REASON changes without `timeControlStatus` changing. A live join goes
+    /// `waitingToPlay(EvaluatingBufferingRate)` -> `waitingToPlay(ToMinimizeStalls)` -> `playing`, and
+    /// only the second of those is the hold the join lever may cut short, so keying it off the status
+    /// observation alone leaves the decision to whether AVFoundation happens to republish the status.
+    private var waitingReasonObservation: NSKeyValueObservation?
     private var seekableObservation: NSKeyValueObservation?
     /// Diagnostic: isReadyForDisplay is the only signal for first-frame-on-screen; t+ stamps localize the audio-leads-black-video gap.
     private var layerReadyObservation: NSKeyValueObservation?
@@ -312,6 +324,8 @@ final class NativeAVPlayerHost {
         // so an override left armed from a live zap would meet the next VOD title's cold start.
         self.liveJoinStartsImmediately = isLive && liveJoinStartsImmediately
         self.liveJoinImmediateStartSpent = false
+        self.liveJoinImmediateStartProbeInFlight = false
+        self.liveJoinThinBufferLogged = false
         Self.nextSessionID += 1
         sessionID = Self.nextSessionID
         let sid = sessionID
@@ -497,6 +511,15 @@ final class NativeAVPlayerHost {
         }
 
         // timeControlStatus + reasonForWaitingToPlay diagnose "spinner forever" -- reason surfaces the exact stall cause.
+        // AE#440: the reason moves inside a single `waitingToPlayAtSpecifiedRate` stretch, so this is a
+        // separate edge from the one below. It carries no diagnostics and no state: the lever logs its
+        // own outcome, and everything else here keys on the status.
+        waitingReasonObservation = avPlayer.observe(\.reasonForWaitingToPlay, options: [.new]) { [weak self] player, _ in
+            guard let reason = player.reasonForWaitingToPlay?.rawValue else { return }
+            Task { @MainActor in
+                self?.startLiveJoinImmediatelyIfHolding(waitingReason: reason)
+            }
+        }
         timeControlObservation = avPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
             let status = player.timeControlStatus
             let statusStr: String
@@ -993,17 +1016,39 @@ final class NativeAVPlayerHost {
     ///   stalls is exactly the shape that resets rate to 0 and never resumes. That is the failure the
     ///   2026-05 `automaticallyWaitsToMinimizeStalling = false` experiment hit process-wide (35fa16d0),
     ///   and the reason this is a one-shot on a proven buffer rather than a policy on the player.
+    /// - `bufferedAheadSeconds`: how deep that proven buffer actually is. The flag above is the
+    ///   documented MINIMUM, not a measure of safety: one served fragment reads `false` exactly as a
+    ///   four-second cushion does. The device A/B that turned this default on sampled the real hold and
+    ///   found 3.7 to 4.9 s ahead of the playhead throughout, which is why starting on it cost nothing;
+    ///   behind the same `false` a genuinely starved join holds a fraction of a second, and starting
+    ///   there trades a still picture for an immediate stall. The depth is the axis that separates the
+    ///   two mechanisms, so it is the one the guard reads.
     nonisolated static func shouldStartLiveJoinImmediately(
         armed: Bool,
         alreadySpent: Bool,
         hostWantsToPlay: Bool,
         isWaitingToMinimizeStalls: Bool,
-        playbackBufferEmpty: Bool
+        playbackBufferEmpty: Bool,
+        bufferedAheadSeconds: Double
     ) -> Bool {
         guard armed, !alreadySpent, hostWantsToPlay else { return false }
         guard isWaitingToMinimizeStalls else { return false }
-        return !playbackBufferEmpty
+        guard !playbackBufferEmpty else { return false }
+        // NaN fails every comparison silently, and an unresolved item's currentTime() is NaN, so an
+        // absent reading has to be rejected rather than fall through the bound below.
+        guard bufferedAheadSeconds.isFinite else { return false }
+        return bufferedAheadSeconds >= minimumLiveJoinBufferAhead
     }
+
+    /// Seconds of contiguous buffer a live join must hold ahead of its playhead before the
+    /// stall-avoidance wait may be cut short.
+    ///
+    /// Chosen to separate the two mechanisms rather than to model a link: below one segment the cushion
+    /// is a fragment and the start is a coin flip, while the hold this exists for was measured at 3.7 s
+    /// and up on hardware, so the floor sits well under the case it must always admit and well over the
+    /// case it must never admit. A source delivered at 1x does not grow this figure after the start,
+    /// which is why AVPlayer's own estimate waits so long on a live join in the first place.
+    nonisolated static let minimumLiveJoinBufferAhead: Double = 1.5
 
     /// Spend the AE#440 one-shot if this transport status is the join holding on buffered media. Also
     /// spends it silently once the rate rolls on its own, so the override can never reach a mid-stream
@@ -1011,30 +1056,90 @@ final class NativeAVPlayerHost {
     /// dry should wait rather than spin at rate 1 over nothing.
     private func startLiveJoinImmediatelyIfHolding(waitingReason: String) {
         guard liveJoinStartsImmediately, !liveJoinImmediateStartSpent else { return }
-        if avPlayer.timeControlStatus == .playing {
+        if timeControlStatus == .playing {
             liveJoinImmediateStartSpent = true
             return
         }
-        let bufferEmpty = playerItem?.isPlaybackBufferEmpty ?? true
-        guard Self.shouldStartLiveJoinImmediately(
-            armed: liveJoinStartsImmediately,
-            alreadySpent: liveJoinImmediateStartSpent,
-            hostWantsToPlay: playIntent,
-            isWaitingToMinimizeStalls:
-                avPlayer.timeControlStatus == .waitingToPlayAtSpecifiedRate
-                && waitingReason == AVPlayer.WaitingReason.toMinimizeStalls.rawValue,
-            playbackBufferEmpty: bufferEmpty
-        ) else { return }
-        liveJoinImmediateStartSpent = true
-        // #436: `defaultRate` is where the session's speed lives; a resume window must not silently
-        // return a live join to 1.0 when the host is running at another rate.
-        let rate = avPlayer.defaultRate != 0 ? avPlayer.defaultRate : 1.0
-        EngineLog.emit(
-            "[NativeAVPlayerHost] #\(sessionID) AE#440 live join: cutting the stall-avoidance wait "
-            + "short at rate \(rate) (buffer non-empty)",
-            category: .engine
-        )
-        avPlayer.playImmediately(atRate: rate)
+        // The free guards first, so the reading below is only ever taken on a hold that could actually
+        // be cut short. `timeControlStatus` is the observer's mirror rather than a fresh player read:
+        // the edge that called this set it one line earlier.
+        guard playIntent,
+              timeControlStatus == .waitingToPlayAtSpecifiedRate,
+              waitingReason == AVPlayer.WaitingReason.toMinimizeStalls.rawValue,
+              !liveJoinImmediateStartProbeInFlight,
+              let item = playerItem
+        else { return }
+        liveJoinImmediateStartProbeInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.liveJoinImmediateStartProbeInFlight = false }
+            let reading = await Self.liveJoinBufferReading(item)
+            // AE#422: the reading is async, so the hold it described may be over. Decide on the state
+            // that exists now, not on the edge that asked.
+            guard !self.liveJoinImmediateStartSpent,
+                  self.playIntent,
+                  self.timeControlStatus == .waitingToPlayAtSpecifiedRate
+            else { return }
+            guard Self.shouldStartLiveJoinImmediately(
+                armed: self.liveJoinStartsImmediately,
+                alreadySpent: self.liveJoinImmediateStartSpent,
+                hostWantsToPlay: self.playIntent,
+                isWaitingToMinimizeStalls: true,
+                playbackBufferEmpty: reading.bufferEmpty,
+                bufferedAheadSeconds: reading.aheadSeconds
+            ) else {
+                // The cushion, not the decision, is what a later report needs: it separates a join
+                // waiting on AVPlayer's rate estimate from one genuinely starved at the edge.
+                if !self.liveJoinThinBufferLogged {
+                    self.liveJoinThinBufferLogged = true
+                    EngineLog.emit(
+                        "[NativeAVPlayerHost] #\(self.sessionID) AE#440 live join: leaving the "
+                        + "stall-avoidance wait alone (buffer ahead "
+                        + String(format: "%.2f", reading.aheadSeconds)
+                        + "s, empty=\(reading.bufferEmpty), floor "
+                        + String(format: "%.2f", Self.minimumLiveJoinBufferAhead) + "s)",
+                        category: .engine
+                    )
+                }
+                return
+            }
+            self.liveJoinImmediateStartSpent = true
+            // #436: `defaultRate` is where the session's speed lives; a resume window must not silently
+            // return a live join to 1.0 when the host is running at another rate.
+            let rate = self.avPlayer.defaultRate != 0 ? self.avPlayer.defaultRate : 1.0
+            EngineLog.emit(
+                "[NativeAVPlayerHost] #\(self.sessionID) AE#440 live join: cutting the stall-avoidance "
+                + "wait short at rate \(rate) (buffer ahead "
+                + String(format: "%.2f", reading.aheadSeconds) + "s)",
+                category: .engine
+            )
+            self.avPlayer.playImmediately(atRate: rate)
+        }
+    }
+
+    /// AE#440 + AE#422: both figures the live-join guard weighs, read once and off the main actor.
+    ///
+    /// This runs while AVPlayer is holding a presented frame, which on the starved half of the two
+    /// mechanisms is precisely the state where the media server is least likely to answer. A
+    /// synchronous `isPlaybackBufferEmpty` there is the shape AE#422 measured at 13.3 s of fully
+    /// blocked app, and the depth needs two more reads on top of it.
+    nonisolated static func liveJoinBufferReading(_ item: AVPlayerItem) async -> LiveJoinBufferReading {
+        await AVFoundationOffMain.read(item, on: Self.offMainReadQueue) { item in
+            let now = item.currentTime().seconds
+            let ranges = item.loadedTimeRanges.map { value -> (Double, Double) in
+                let r = value.timeRangeValue
+                return (r.start.seconds, (r.start + r.duration).seconds)
+            }
+            // Contiguous from the playhead, not the sum of every loaded range: an island past a gap
+            // cannot sustain a rate that has to cross the gap to reach it.
+            let ahead = NativeAVPlayerHost.contiguousBufferedEnd(ranges: ranges, now: now) - now
+            return LiveJoinBufferReading(bufferEmpty: item.isPlaybackBufferEmpty, aheadSeconds: ahead)
+        }
+    }
+
+    struct LiveJoinBufferReading: Sendable {
+        let bufferEmpty: Bool
+        let aheadSeconds: Double
     }
 
     func play() {
@@ -1328,6 +1433,8 @@ final class NativeAVPlayerHost {
         rateObservation = nil
         timeControlObservation?.invalidate()
         timeControlObservation = nil
+        waitingReasonObservation?.invalidate()
+        waitingReasonObservation = nil
         seekableObservation?.invalidate()
         seekableObservation = nil
         layerReadyObservation?.invalidate()

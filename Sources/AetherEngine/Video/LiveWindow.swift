@@ -9,14 +9,30 @@ struct LiveWindow: Equatable {
 
     init(windowSeconds: Double?) { self.windowSeconds = windowSeconds }
 
+    /// AE#441: the oldest position the segment cache actually holds and can play forward from, on the
+    /// same session axis as `edgeTime`. nil where no cache can be asked (the software live path, and
+    /// before the first segment is resident), which leaves the range exactly as it was.
+    ///
+    /// The window is a POLICY and this is the FACT, and they diverge for the whole first `window`
+    /// seconds of every session: a three-minute-old session with a 1800 s window advertised thirty
+    /// minutes of rewind, and a seek into the advertised-but-never-written region was accepted and
+    /// silently clamped.
+    private(set) var residentFloorSeconds: Double?
+
     mutating func noteEdge(_ t: Double) { edgeTime = Swift.max(edgeTime, t) }
     mutating func notePlayhead(_ t: Double) { playhead = t }
+    mutating func noteResidentFloor(_ t: Double?) { residentFloorSeconds = t }
 
     static let edgeTolerance: Double = 2.0
 
     var seekableRange: ClosedRange<Double>? {
         guard let w = windowSeconds else { return nil }
-        return Swift.max(0, edgeTime - w)...edgeTime
+        // The intersection of what the session is willing to keep and what it actually holds. The
+        // clamp against `edgeTime` is not defensive dressing: a floor read from the cache while the
+        // edge is still catching up can exceed it for a tick, and a reversed ClosedRange traps.
+        let policy = Swift.max(0, edgeTime - w)
+        let honest = Swift.max(policy, residentFloorSeconds ?? 0)
+        return Swift.min(honest, edgeTime)...edgeTime
     }
     func clamp(_ t: Double) -> Double {
         guard let r = seekableRange else { return edgeTime }

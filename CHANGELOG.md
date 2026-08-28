@@ -24,10 +24,20 @@ the public-API contract.
   on a thinner cushion (AE#440).
 - **`aetherctl play` prints a `PHASE` line on every `playbackPhase` edge**, and takes
   `--live-start-immediately`. The 1 Hz telemetry samples the phase, which cannot tell a start signal apart
-  from the roll.
+  from the roll. Its live telemetry also carries `edge=`, `behind=` and `range=` now, which previously
+  needed a patched copy of the CLI to sample at all.
 
 ### Fixed
 
+- **`seekableLiveRange` advertised a rewind depth the session had never written.** The lower bound was
+  `max(0, edgeTime - dvrWindowSeconds)`, pure window arithmetic that never consulted the segment cache, so
+  it over-promised by the session's join offset (measured: a session joined 181 s into a source advertised
+  a floor of 0.00, while a seek to 0.20 landed at 181.66) and again whenever retention kept less than the
+  window (measured: 24 s kept against a 30 s window). The bound is now the intersection of the window and
+  what the cache actually holds and can play forward from, and `seek(to:)` clamps to the same floor, so
+  the engine's own live resume clamp can no longer aim at a position that was never retained either. The
+  floor is a backward-contiguous walk from the newest resident segment, not the cache's lowest index: a
+  minimum is not proof of coverage. Software live sessions have no such cache and are unchanged (AE#441).
 - **`playbackPhase` reported `.playing` before anything moved.** `state` is transport intent and every
   autostart writes it the moment `play()` has been called; on a live join the rate can roll seconds later.
   The phase followed it, so the one observable documented as the single source of truth for what playback

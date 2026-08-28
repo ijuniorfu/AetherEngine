@@ -72,12 +72,26 @@ extension AetherEngine {
         }
     }
 
+    /// AE#441: the segment cache's oldest contiguously-playable position, lifted onto the session axis
+    /// the live surfaces speak. nil on every path with no such cache to ask (software live), which
+    /// leaves `seekableLiveRange` on window arithmetic exactly as before.
+    ///
+    /// Same axis conversion as `liveScrubThumbnail`, inverted: the segment table and its `startSeconds`
+    /// live on raw output, `seekableLiveRange` is output plus the seam shift.
+    func residentLiveFloorSessionSeconds() -> Double? {
+        guard let session = nativeVideoSession,
+              let outputFloor = session.residentFloorOutputSeconds() else { return nil }
+        return presentationAxis.sourceSeconds(forItemSeconds: outputFloor)
+            ?? (outputFloor + playlistShiftSeconds)
+    }
+
     /// Publish `liveEdgeTime`, `seekableLiveRange`, `isAtLiveEdge`, `behindLiveSeconds`. Path-agnostic; no-op when no live window is active.
     @MainActor
     func publishLiveWindow(edgeSessionTime: Double) {
         guard var w = liveWindow else { return }
         w.noteEdge(edgeSessionTime)
         w.notePlayhead(currentTime)
+        w.noteResidentFloor(residentLiveFloorSessionSeconds())
         liveWindow = w
         clock.liveEdgeTime = w.edgeTime
         clock.seekableLiveRange = w.seekableRange

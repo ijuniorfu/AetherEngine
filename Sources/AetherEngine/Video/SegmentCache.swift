@@ -495,6 +495,29 @@ final class SegmentCache: @unchecked Sendable {
         return k - 1
     }
 
+    /// AE#441: the mirror of `contiguousForwardFrontier`, walking DOWN. Smallest K such that every index
+    /// in `K ... topIdx` is resident, or `topIdx + 1` when `topIdx` itself is absent (nothing to walk).
+    ///
+    /// This, not `indexRange().0`, is the honest floor of a rewind: `min ... max` is not proof of
+    /// residency, because retained scrub bands leave interior holes (the same reason the segment-serve
+    /// path refuses to treat that range as coverage). A floor advertised below a hole promises a rewind
+    /// that cannot then play forward.
+    func contiguousBackwardFloor(from topIdx: Int) -> Int {
+        condition.lock()
+        defer { condition.unlock() }
+        var k = topIdx
+        while entries[k] != nil { k -= 1 }
+        return k + 1
+    }
+
+    /// AE#441: the newest resident index, which is where a backward floor walk starts. `highestStoredIndex`
+    /// is monotonic across prunes and would start the walk on a hole after the high end is pruned.
+    var highestResidentIndex: Int? {
+        condition.lock()
+        defer { condition.unlock() }
+        return entries.keys.max()
+    }
+
     /// Reset before triggering a restart; previous producer's highWater would keep producerPassedAndPruned
     /// hot on every fetch, cascading a single restart into a per-segment storm.
     func resetHighWaterForRestart() {

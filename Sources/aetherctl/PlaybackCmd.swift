@@ -520,6 +520,13 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
                           engine.bufferedPosition,
                           engine.duration)
         line += " rfd=\(engine.hasFirstFrameReadyForDisplay ? "y" : "n")"
+        // AE#441: the live rewind surfaces a host actually scales its strip on. Sampling them needed a
+        // patched copy of this CLI before, which is how an over-promising lower bound stayed unseen.
+        if engine.isLive {
+            line += String(format: " edge=%.2f behind=%.2f", engine.liveEdgeTime, engine.behindLiveSeconds)
+            line += " range=" + (engine.seekableLiveRange.map {
+                String(format: "%.2f...%.2f", $0.lowerBound, $0.upperBound) } ?? "nil")
+        }
         if let monitor, let end = monitor.lastEndPTS {
             // Decoded-audio lead over the master clock (source axis). Near-zero = renderer starving.
             line += String(format: " alead=%.2f abufs=%d", end - engine.sourceTime, monitor.bufferCount)

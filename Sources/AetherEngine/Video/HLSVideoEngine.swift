@@ -1994,6 +1994,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Live and VOD: reads already-produced SegmentCache bytes over the single playback
     /// connection, never opening a second one (#106). Returns nil if there is no provider
     /// or the file was evicted between lookup and read. `segmentIndex` enables extractor reuse.
+    /// AE#441: the oldest resident, contiguously-playable position in output seconds, or nil when the
+    /// session has no provider yet. The engine intersects this with the DVR window so the advertised
+    /// rewind range is what the cache actually holds.
+    func residentFloorOutputSeconds() -> Double? {
+        restartLock.lock()
+        let prov = provider
+        restartLock.unlock()
+        return prov?.residentFloorOutputSeconds()
+    }
+
     func scrubThumbnailSource(atSeconds seconds: Double) -> (data: Data, segmentIndex: Int)? {
         restartLock.lock()
         let prov = provider

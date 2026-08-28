@@ -217,7 +217,7 @@ Time lives on `player.clock`, a separate `ObservableObject`, so ~10 Hz ticks nev
 | `clock.$sourceTime` | source PTS of the displayed frame; render subtitle overlays against this |
 | `clock.$progress` | `currentTime / duration` |
 | `clock.$bufferedPosition` | source-axis position buffered ahead |
-| `clock.$liveEdgeTime`, `clock.$seekableLiveRange`, `clock.$behindLiveSeconds`, `clock.$isAtLiveEdge` | live-window surfaces |
+| `clock.$liveEdgeTime`, `clock.$seekableLiveRange`, `clock.$behindLiveSeconds`, `clock.$isAtLiveEdge` | live-window surfaces. `seekableLiveRange` is the intersection of the DVR window (policy) and what the segment cache actually holds and can play forward from (fact), so it is honest to scale a rewind strip on and `seek(to:)` clamps to the same floor (AE#441). The two diverge for the whole first `dvrWindowSeconds` of a session and again whenever retention evicts faster than the window slides. Software live sessions have no such cache and keep the arithmetic bound. |
 | `player.currentTime`, `sourceTime`, `progress`, `bufferedPosition`, `liveEdgeTime`, `seekableLiveRange`, `behindLiveSeconds`, `isAtLiveEdge` | non-published mirrors of the same values for one-shot reads |
 | `$duration` | seconds; a `LoadOptions.declaredDurationSeconds` outranks the container's |
 
@@ -345,6 +345,27 @@ AVPlayer reports as non-empty. It is the other half of the trade `.fastZap` alre
 begins on a thinner cushion, so a source that hiccups just after the join rebuffers where it would
 otherwise have started later and played through. Every later hold in the session keeps AVPlayer's own
 policy, so a mid-stream rebuffer is untouched.
+
+### The rewind depth a live session really has
+
+`seekableLiveRange` used to be `max(0, edgeTime - dvrWindowSeconds) ... edgeTime`, pure arithmetic that
+never asked the cache. Two regimes where that over-promises, both measured on the loopback harness:
+
+- **The session's own start.** A session that joins a source already 181 s into its timeline advertised a
+  floor of 0.00 for its whole run; a seek to 0.20 landed at 181.66, the first position ever written. The
+  over-promise is exactly the join offset, so it is small on a source whose timeline starts with the
+  session and large on one that does not.
+- **Retention shallower than the window.** With `dvrWindowSeconds: 30` on 1 s segments the cache kept
+  24 s, and the advertised bound claimed 30.
+
+The bound is now the intersection of the two, and `seek(to:)` clamps to it, so a target the range accepts
+is a target the seek reaches. The floor is a backward-contiguous walk from the newest resident segment
+rather than the cache's lowest index: a minimum index is not proof of coverage, and a rewind advertised
+below an interior hole cannot play forward.
+
+For "where did this seek actually land", the honest signal is `SeekEvent.landed(renderedTime:)` on
+`$seekEvents`. `await seek(to:)` returns no position, so a harness that records its own requested target
+reports an intention rather than an outcome.
 
 ## Picture, layers and PiP
 

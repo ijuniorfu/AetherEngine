@@ -612,6 +612,27 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return (idx, segs[idx].startSeconds, url)
     }
 
+    /// AE#441: the oldest position a rewind can actually land on and still play forward, in output
+    /// seconds, or nil when nothing is resident yet.
+    ///
+    /// The DVR window is a POLICY (how much the session is willing to keep); this is the FACT (how much
+    /// it currently holds). They diverge for the whole first `window` seconds of every session, and
+    /// again whenever the retention budget evicts faster than the window slides, so a rewind strip
+    /// scaled on the policy alone promises depth that was never written.
+    ///
+    /// Walks back from the newest resident segment rather than reading `indexRange().0`, because a
+    /// minimum index is not proof of contiguity: an interior hole would make everything below it
+    /// unplayable, and a stale band left by a previous producer sits below one.
+    func residentFloorOutputSeconds() -> Double? {
+        guard let top = cache.highestResidentIndex else { return nil }
+        let floor = cache.contiguousBackwardFloor(from: top)
+        stateLock.lock()
+        let segs = segments
+        stateLock.unlock()
+        guard floor >= 0, floor < segs.count else { return nil }
+        return segs[floor].startSeconds
+    }
+
     /// Non-blocking init.mp4 peek; the 30s blocking initSegment() is only for the HTTP server path.
     func peekInitSegment() -> Data? {
         cache.fetchInit(timeout: 0)

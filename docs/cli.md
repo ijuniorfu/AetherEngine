@@ -241,6 +241,26 @@ matches the shape and answers a different question, and only a second arm that a
 tell those two apart. Run both: the Foundation arm is now the control that proves the pool drains,
 and the POSIX arm is the one that measures the engine.
 
+**`--host-carry removeFirst|subdata` is the third arm, and it names a cause rather than measuring
+the engine.** Round 3's census on the reporter's device pinned his footprint to ONE `REALLOC`-tagged
+block growing on an exact x1.25 ladder, holding every byte the session had consumed. That factor is
+Foundation's: `Data` grows a large buffer by `newLength >> 2`, where `av_fast_realloc` adds a
+sixteenth and FFmpeg's AVIO dynamic buffer a half, so the block is a Swift `Data`. The one `Data`
+shape that grows like that while its `count` stays tiny is a parse carry consumed from the front
+with `removeFirst`, which only advances the slice's lower bound and leaves the backing store holding
+everything below it. `--host-carry removeFirst` puts exactly that carry on the harness's delivery
+path, so the tool that measures the engine at ratio 0.00 can also produce ratio 1.00 on demand;
+`--host-carry subdata` is the same carry re-based, i.e. the fix. Both arms print the tell every ten
+seconds:
+
+```
+  t=240s ... physFP=447MB srcMB=417.2 growthMBps=1.67 carryCount=112B carryStart=417.1MB
+```
+
+A carry whose `count` is under one TS packet while its slice's lower bound tracks the consumed
+stream is riding a backing allocation that large. `startIndex` is the cheapest probe there is for
+this defect, in any host, without Instruments.
+
 ## disc-inspect
 
 Walks a local DVD-Video or Blu-ray ISO at the filesystem layer (FFmpeg-free) and reports what `DiscReader.wrap` makes of it: the recognition verdict and the stages it went through (ISO9660 / UDF signatures, BDMV / VIDEO_TS contents, resolved extents), so a disc that fails to play is debuggable instead of surfacing a bare `INVALIDDATA`. It also prints the full selectable-title list with each title's duration and chapter offsets (the same titles + chapters the engine exposes via `discTitles` / `discChapters`). Exit 0 when the image is recognized as playable, else 1. `--dump` adds the verbose UDF volume structure under the `.demux` log.

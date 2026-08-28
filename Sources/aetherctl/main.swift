@@ -100,7 +100,7 @@ func printUsage() {
                          (#95: decode the loopback audio track to mono 48k WAV, print continuity stats;
                           --software runs a real session through the SW sink, exit 3 if it yields no audible PCM)
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] [--audio-index N] <file>
-      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] <file.ts>
+      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] [--host-carry none|removeFirst|subdata] <file.ts>
                          (AE#445: a host-owned live spool behind MediaSource.custom, paced at the mux rate,
                           never EOF, unknown size; prints physFP and its slope against that rate)
       aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
@@ -661,6 +661,14 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     // and measures the ENGINE; --foundation-reader restores the FileHandle arm, which allocates one
     // autoreleased Data per read and is now the control that proves the bridge pool drains it.
     let customFoundationReader = takeFlag("--foundation-reader", from: &rest)
+    // AE#445 round 3: a positive control for the reporter's own shape. removeFirst puts an
+    // ingest-side Data carry back on the delivery path (bounded count, unbounded backing store);
+    // subdata is the same carry re-based, i.e. the fix. Default none measures the engine alone.
+    let customHostCarry = takeStringFlag("--host-carry", from: &rest) ?? "none"
+    guard let customCarryTrim = HostCarryTrim(rawValue: customHostCarry) else {
+        print("ERROR: --host-carry expects none|removeFirst|subdata, got '\(customHostCarry)'")
+        exit(64)
+    }
     let reloadFlag = takeFlag("--reload", from: &rest)
     let switchAudioFlag = takeFlag("--switch-audio", from: &rest)
     let selectSubsFlag = takeFlag("--select-subs", from: &rest)
@@ -711,7 +719,8 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
             exit(runCustomLiveSpool(path: urlArg, seconds: secondsFlag ?? 720, rateKbps: customRateKbps,
                                     dvrWindow: customDvrWindow, reportsSize: customReportsSize,
                                     wraps: !customNoWrap, mallocCensus: customMallocCensus,
-                                    foundationReader: customFoundationReader))
+                                    foundationReader: customFoundationReader,
+                                    carryTrim: customCarryTrim))
         }
         exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag, reload: reloadFlag, switchAudio: switchAudioFlag, selectSubs: selectSubsFlag, extract: extractFlag, audioIndex: customAudioIndex))
     default:

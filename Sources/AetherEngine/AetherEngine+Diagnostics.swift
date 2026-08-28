@@ -17,10 +17,17 @@ extension AetherEngine {
     /// #220 turned out to be, so the counter is polled at `triggerPollHz` and the zone walk runs once
     /// it climbs `triggerThresholdMB` above its running high-water. Pass `triggerPollHz: 0` for the
     /// plain 30 s census with no watcher.
+    ///
+    /// `triggerCaptureCap` bounds how many of those walks are logged (`0` = uncapped). The default of
+    /// twelve keeps a runaway from turning the log into a slideshow, but a session that climbs at a
+    /// steady mux rate spends one capture per threshold climbed and reaches the cap minutes before
+    /// the kill (AE#445, where the decisive final step survived only in the 30 s grid). Lift it when
+    /// the shape being hunted is a steady climb rather than a single step.
     public nonisolated static func setLargeAllocationCensusEnabled(
         _ enabled: Bool,
         triggerThresholdMB: Int = 64,
-        triggerPollHz: Double = 8
+        triggerPollHz: Double = 8,
+        triggerCaptureCap: Int = 12   // MallocBlockCensus.defaultTriggerCaptureCap, spelled out because that type is internal
     ) {
         MallocBlockCensus.isEnabled = enabled
         // AE#445: the same switch, because they answer halves of one question. The malloc census
@@ -29,7 +36,8 @@ extension AetherEngine {
         VMRegionCensus.isEnabled = enabled
         if !enabled { VMRegionCensus.clearBaseline() }
         if enabled {
-            MallocBlockCensus.startTriggerWatch(thresholdMB: triggerThresholdMB, pollHz: triggerPollHz)
+            MallocBlockCensus.startTriggerWatch(thresholdMB: triggerThresholdMB, pollHz: triggerPollHz,
+                                                captureCap: triggerCaptureCap)
         } else {
             MallocBlockCensus.stopTriggerWatch()
         }

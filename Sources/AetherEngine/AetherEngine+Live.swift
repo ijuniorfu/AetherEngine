@@ -79,8 +79,19 @@ extension AetherEngine {
         guard let window = windowSeconds else {
             return behindLiveSeconds > liveOnlyResumeSnapSeconds ? .edgeSnap : .none
         }
-        guard behindLiveSeconds > (window - margin) else { return .none }
-        // AE#441: the lower bound is the cache's real floor now, so this lands on content that exists.
+        // AE#441 follow-up: the LANDING has read the cache's real floor since 6.52.0, but the TRIGGER
+        // was still `behind > window - margin`, pure window arithmetic. The two disagree in exactly the
+        // regime the retest confirmed on a real strip: retention short of the window (window 420 s,
+        // advertised depth ~405 s). A resume between the real depth and the window then found no clamp
+        // for a position the cache no longer held. Measure both from the same bound.
+        //
+        // The margin belongs to the sliding regime only. Before the window fills, the floor is the
+        // session's own start rather than an eviction frontier, so nothing is coming to take it and a
+        // margin there would only shove a resume near the start forward.
+        let floor = seekableLowerBound ?? Swift.max(0, edgeTime - window)
+        let playhead = edgeTime - behindLiveSeconds
+        let sliding = edgeTime > window
+        guard playhead < floor + (sliding ? margin : 0) else { return .none }
         return .seek(to: (seekableLowerBound ?? edgeTime) + margin)
     }
 

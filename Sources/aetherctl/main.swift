@@ -103,7 +103,7 @@ func printUsage() {
       aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] <file.ts>
                          (AE#445: a host-owned live spool behind MediaSource.custom, paced at the mux rate,
                           never EOF, unknown size; prints physFP and its slope against that rate)
-      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--gen-highbitrate-seed]
+      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
                      [--freeze-after N] [--rewind-before-freeze N] [--force-recovery-reload-at N]
       aetherctl dvr [--path native|sw|both] [--seconds N] [--dvr-window N]
       aetherctl dualsubs <file> --primary <streamIndex> --secondary <streamIndex> [--seek <seconds>]
@@ -472,6 +472,10 @@ if first == "live" {
     // AE#442: drive the stage-2 recovery reload at N seconds instead of waiting for a real item death,
     // so where a parked live session comes back from it is measurable in one run.
     let forceRecoveryReloadAt = takeDoubleFlag("--force-recovery-reload-at", from: &rest)
+    // AE#441 follow-up: --rewind-hold N parks the playhead N seconds behind the edge and HOLDS it there
+    // for the rest of the run, which is the regime that separates a floor doing its job from a window
+    // outrunning the reader. --freeze-after kills the source; --rewind-test samples five seconds.
+    let rewindHold = takeDoubleFlag("--rewind-hold", from: &rest)
     // --sliding: accepted but ignored; sliding is now unconditional for live sessions.
     _ = takeFlag("--sliding", from: &rest)
     rejectStrayFlags(rest, subcommand: "live")
@@ -483,7 +487,8 @@ if first == "live" {
                  discontinuityAt: discontinuityAt, realtime: realtime,
                  fastZap: fastZap, pacingPreroll: preroll,
                  freezeAfter: freezeAfter, rewindBeforeFreeze: rewindBeforeFreeze,
-                 forceRecoveryReloadAt: forceRecoveryReloadAt))
+                 forceRecoveryReloadAt: forceRecoveryReloadAt,
+                 rewindHold: rewindHold))
 }
 
 if first == "play" {

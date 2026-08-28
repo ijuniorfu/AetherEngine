@@ -2073,6 +2073,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return prov?.residentFloorOutputSeconds()
     }
 
+    /// AE#442: the sealed live TARGETDURATION, or nil before the first playlist build.
+    func sealedLiveTargetDurationSeconds() -> Int? {
+        restartLock.lock()
+        let prov = provider
+        restartLock.unlock()
+        return prov?.sealedLiveTargetDurationSeconds
+    }
+
     func scrubThumbnailSource(atSeconds seconds: Double) -> (data: Data, segmentIndex: Int)? {
         restartLock.lock()
         let prov = provider

@@ -1087,6 +1087,14 @@ public final class AetherEngine: ObservableObject {
         forceSoftwarePathForTesting = on
     }
 
+    /// TEST-ONLY. Drive the #93/#65 stage-2 recovery reload (item swapped in place under a session that
+    /// stays whole) on demand, so `aetherctl live --force-recovery-reload-at` can measure where a live
+    /// session comes back from it without having to starve a real consumer into item death first.
+    /// Not for app use; the real trigger is the recovery ladder.
+    public func forceStalledConsumerReloadForTesting() {
+        reloadStalledConsumerItem(position: currentTime, allowPausedConsumer: true)
+    }
+
     /// TEST-ONLY: throttle source IO to simulate a slow CDN/origin (kbit/s; 0 = unlimited). Read once by
     /// each `AVIOReader` at init, so set it before `load`/`start`. Used by `aetherctl --throttle-kbps` to
     /// starve the producer below real-time and provoke AVPlayer rebuffers (e.g. the #92 open-GOP repro).
@@ -1269,6 +1277,13 @@ public final class AetherEngine: ObservableObject {
     /// DVR/live window tracker. Non-nil for any live session. `windowSeconds` nil means DVR disabled.
     /// Updated by `publishLiveWindow` from both the native time tick and SW host edge callback.
     var liveWindow: LiveWindow?
+
+    /// AE#442: `behindLiveSeconds` from the last publish where the picture actually moved, and the
+    /// playhead that publish saw. A stall inflates the live value by its own duration, so at the moment
+    /// a recovery has to decide where to rejoin, only a sample taken while the clock was advancing can
+    /// still say whether the viewer was parked in the DVR window or sitting at the edge.
+    var liveBehindWhenLastAdvancing: Double = 0
+    var lastPublishedLivePlayhead: Double? = nil
 
     /// Current session URL. Used by reloadAtCurrentPosition and AetherEngine+FrameExtractor.
     var loadedURL: URL?
@@ -2119,9 +2134,23 @@ public final class AetherEngine: ObservableObject {
             frozenPosition: position, pendingSeekTarget: pendingRecoverySeekClockTarget,
             currentRendered: renderedPositionMirror.get())
         stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
+        // AE#442: this reload swaps the item under a session that stays whole, so a playhead parked
+        // in the DVR window is still resident content. Decided BEFORE the load, while the window and
+        // the pre-reload playhead still describe the item being replaced.
+        let rejoinPosition = LiveReloadPolicy.recoveryRejoinPosition(
+            isLive: isLive,
+            playhead: currentTime,
+            behindWhenLastAdvancing: liveBehindWhenLastAdvancing,
+            residentRange: liveWindow?.seekableRange,
+            targetDurationSeconds: liveTargetDurationSeconds)
+        let liveTarget: String = rejoinPosition.map {
+            "\(String(format: "%.2f", $0))s, the place it held "
+            + "(\(String(format: "%.1f", liveBehindWhenLastAdvancing))s behind live when the picture "
+            + "last moved, still resident)"
+        } ?? "the live edge (rejoin)"
         EngineLog.emit(
             "[AetherEngine] #65 nudge did not revive the consumer; reloading item at "
-            + (isLive ? "the live edge (rejoin)" : "\(String(format: "%.2f", anchor))s")
+            + (isLive ? liveTarget : "\(String(format: "%.2f", anchor))s")
             + Self.recoveryAnchorLogSuffix(
                 anchor: anchor, position: position,
                 pendingSeekTarget: pendingRecoverySeekClockTarget)
@@ -2136,6 +2165,15 @@ public final class AetherEngine: ObservableObject {
                   skipInitialSeek: LiveReloadPolicy.skipInitialSeek(isLive: isLive, isRejoin: true),
                   inPlaceSwap: true)
         host.play()
+        if let rejoinPosition {
+            // Stashed rather than seeked: the pre-readiness seek IS the wedge LiveReloadPolicy exists
+            // to avoid, and a live seek does not defer itself (`shouldDeferHostSeek` excludes live), so
+            // issuing one here would convert against a `seekableEnd` the fresh item has reset to 0 and
+            // land on 0. The #127 slot replays it once the item is ready, and the live seek expresses
+            // its target as a distance behind the edge, so it lands on the same content whatever axis
+            // the fresh item came up on.
+            pendingPreReadySeekSeconds = rejoinPosition
+        }
         if let ordinal = nativeSubtitleReapplyOrdinal {
             EngineLog.emit(
                 "[AetherEngine] #65 re-applying native subtitle ordinal=\(ordinal) after item reload",
@@ -5480,6 +5518,8 @@ public final class AetherEngine: ObservableObject {
         sourceStartSeconds = 0
         isLive = false
         liveWindow = nil
+        liveBehindWhenLastAdvancing = 0
+        lastPublishedLivePlayhead = nil
         clock.liveEdgeTime = 0
         clock.seekableLiveRange = nil
         clock.isAtLiveEdge = false

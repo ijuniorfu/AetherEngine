@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.52.0] - 2026-08-28
+
 ### Added
 
 - **`LoadOptions.liveJoinStartsImmediately` cuts AVPlayer's stall-avoidance hold short at a live join.**

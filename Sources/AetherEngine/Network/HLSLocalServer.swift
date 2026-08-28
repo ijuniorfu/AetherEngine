@@ -1262,13 +1262,16 @@ final class HLSLocalServer: @unchecked Sendable {
         for i in firstVisible..<count {
             maxDuration = max(maxDuration, provider.segmentDuration(at: i))
         }
-        var targetDuration = Int(ceil(max(1.0, maxDuration)))
-        if typeIsLive, let liveTarget = provider.liveTargetSegmentDuration {
-            targetDuration = max(targetDuration, Int(ceil(liveTarget * 1.5)))
-        }
-        if typeIsLive, let cadenceFloor = provider.liveTargetDurationFloorSeconds {
-            targetDuration = max(targetDuration, Int(ceil(cadenceFloor)))
-        }
+        // AE#447 follow-up: the SEALED value, the same one the video playlist carries. This rebuilt the
+        // derivation by hand instead, so it read the live cadence floor on every render and could hand a
+        // subtitle rendition a TARGETDURATION that grew mid-session. RFC 8216 forbids that in any Media
+        // Playlist, and AE#209 measured the cost on the video one: an item that reached readyToPlay,
+        // showed a first frame, and then sat at `waitingToPlay` at time zero for the rest of the session.
+        // A rendition is a Media Playlist like any other, and it is built from this provider's own
+        // segments, so the two values are the same number and may as well come from the same place.
+        let targetDuration = (typeIsLive || liveOutage)
+            ? provider.liveTargetDurationSeconds(maxSegmentDuration: maxDuration)
+            : Int(ceil(max(1.0, maxDuration)))
 
         var lines: [String] = []
         lines.append("#EXTM3U")

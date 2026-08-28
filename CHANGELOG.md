@@ -12,6 +12,37 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.54.0] - 2026-08-28
+
+### Fixed
+
+- **A live recovery that swaps the item in place keeps the place it held.** The stage-2 / `#65`
+  recovery reload replaces the `AVPlayerItem` under a session that stays whole: same
+  `HLSVideoEngine`, same segment cache, same served playlist. It nevertheless rejoined at the live
+  edge, because `LiveReloadPolicy` applied one rule to every live reload. That rule was written for
+  the pipeline rebuild, where `stopInternal` takes the cache with it and the pre-reload position does
+  not merely go stale, it stops existing. On this path the position is still resident content, and
+  since 6.52.0 the session can prove it. The recovery now rejoins at the playhead clamped into
+  `seekableLiveRange`, and keeps the edge rejoin wherever nothing can vouch for the position:
+  remote-HLS live, the software live path, and a viewer who was at the edge anyway. The distance that
+  decides is the last one sampled while the clock was actually moving, because a stall inflates
+  `behindLiveSeconds` by its own duration and would otherwise drag an edge viewer backwards by
+  however long their picture was frozen. Measured on the harness, a viewer 102 s inside an 1800 s
+  window when the source froze: the forward step drops from 100.99 s to 1.10 s, and the session no
+  longer dies a second time, because a rejoin at the edge of a source that has stopped delivering
+  starves straight back into the ladder it came from.
+- **A poll a dead source can never answer is no longer held.** A viewer parked inside the DVR window
+  stalled when the upstream froze, with every segment ahead of them already in the cache. AVPlayer
+  refreshes the playlist with a blocking reload and issues no segment requests while one is
+  outstanding, and an unsatisfiable hold runs 3 x TARGETDURATION before RFC 8216bis allows the 503.
+  The session now withdraws `CAN-BLOCK-RELOAD` as soon as the source misses its own cadence by more
+  than 1.5 x TARGETDURATION, which is AVPlayer's own patience for an unchanged live playlist, rather
+  than waiting for the no-cut watchdog at 35 s. This is the 5.x `liveProductionHalted` policy applied
+  one watchdog earlier, and it is latched for the same reason. A poll already in flight when the
+  source died wakes in one-second slices instead of riding out the whole bound. Measured: first
+  segment fetch back 9 s sooner, `playbackStalled` across the run 3 to 1, and the `-15410` that used
+  to end the starvation by accident does not occur at all.
+
 ## [6.53.0] - 2026-08-28
 
 ### Fixed

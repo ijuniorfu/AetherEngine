@@ -121,9 +121,11 @@ func runLive(
     fastZap: Bool = false,
     pacingPreroll: Double? = nil,
     freezeAfter: Double? = nil,
+    unfreezeAfter: Double? = nil,
     rewindBeforeFreeze: Double? = nil,
     forceRecoveryReloadAt: Double? = nil,
-    rewindHold: Double? = nil
+    rewindHold: Double? = nil,
+    blockingReload: Bool? = nil
 ) -> Int32 {
     // Relative timestamps make join latency (readyToPlay et al.) readable off the log (AE#195).
     let logEpoch = Date()
@@ -141,6 +143,7 @@ func runLive(
           (dvrWindow.map { " dvr-window=\($0)" } ?? " dvr-window=none (live-only floor)") +
           (dropAfter.map { " drop-after=\($0)s" } ?? "") +
           (freezeAfter.map { " freeze-after=\($0)s" } ?? "") +
+          (unfreezeAfter.map { " unfreeze-after=\($0)s" } ?? "") +
           (rewindBeforeFreeze.map { " rewind-before-freeze=\($0)s" } ?? "") +
           (forceRecoveryReloadAt.map { " force-recovery-reload-at=\($0)s" } ?? "") +
           (rewindHold.map { " rewind-hold=\($0)s" } ?? "") +
@@ -157,6 +160,7 @@ func runLive(
     }
     fixture.dropAfterSeconds = dropAfter
     fixture.freezeAfterSeconds = freezeAfter
+    fixture.unfreezeAfterSeconds = unfreezeAfter
     fixture.discontinuityAfterSeconds = discontinuityAt
     fixture.paced = realtime
     if realtime {
@@ -226,7 +230,8 @@ func runLive(
                                              dvrWindow: dvrWindow ?? 1800,
                                              freezeAt: freezeAt,
                                              rewindBehind: rewindBeforeFreeze ?? 300,
-                                             forceRecoveryReloadAt: forceRecoveryReloadAt)
+                                             forceRecoveryReloadAt: forceRecoveryReloadAt,
+                                             blockingReload: blockingReload)
             fixture.stop()
             CFRunLoopStop(CFRunLoopGetMain())
             return
@@ -605,9 +610,31 @@ private final class FreezeRecoveryCounters: @unchecked Sendable {
     private(set) var reopenAttempts = 0
     private(set) var fullReloads = 0
     private(set) var unsatisfiable = 0
+    private(set) var segmentFetches = 0
+    private(set) var lastSegmentFetched = -1
+    private(set) var playlistPolls = 0
+    private(set) var withdrewBlockingReload = false
+
+    /// AE#446: the whole question after a source freeze is whether the CONSUMER keeps asking for the
+    /// runway the cache already holds. Counted from the server's own arrival line, so a silent client
+    /// and an unanswered request are different numbers rather than the same stall.
+    func armPostFreeze() {
+        lock.lock(); defer { lock.unlock() }
+        segmentFetches = 0
+        lastSegmentFetched = -1
+        playlistPolls = 0
+    }
 
     func note(_ line: String) {
         lock.lock(); defer { lock.unlock() }
+        if line.contains("[HLSLocalServer] GET"), let r = line.range(of: "/seg"),
+           let dot = line[r.upperBound...].firstIndex(of: "."),
+           let idx = Int(line[r.upperBound..<dot]) {
+            segmentFetches += 1
+            lastSegmentFetched = max(lastSegmentFetched, idx)
+        }
+        if line.contains("[HLSLocalServer] GET"), line.contains("media.m3u8") { playlistPolls += 1 }
+        if line.contains("#446 source stopped delivering") { withdrewBlockingReload = true }
         if line.contains("item death (failedToPlayToEndTime)") { itemDeaths += 1 }
         if line.contains("nudge did not revive the consumer") {
             if line.contains("the place it held") { keptPlace += 1 } else { edgeRejoins += 1 }
@@ -628,7 +655,8 @@ private final class FreezeRecoveryCounters: @unchecked Sendable {
 @MainActor
 private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Double,
                             freezeAt: Double, rewindBehind: Double,
-                            forceRecoveryReloadAt: Double? = nil) async -> Int32 {
+                            forceRecoveryReloadAt: Double? = nil,
+                            blockingReload: Bool? = nil) async -> Int32 {
     let counters = FreezeRecoveryCounters()
     let prior = EngineLog.handler
     EngineLog.handler = { line in counters.note(line); prior?(line) }
@@ -644,6 +672,10 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
     var options = LoadOptions(isLive: true)
     options.suppressDisplayCriteria = true
     options.dvrWindowSeconds = dvrWindow
+    options.liveBlockingReload = blockingReload
+    if let blockingReload {
+        print("  blocking reload forced \(blockingReload ? "ON" : "OFF") for this leg")
+    }
     do {
         try await engine.load(url: url, options: options)
     } catch {
@@ -698,7 +730,9 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
             if behindAtFreeze == nil {
                 behindAtFreeze = edge - t
                 playheadAtFreeze = t
-                print(String(format: "  FREEZE: playhead=%.2fs edge=%.2fs behind=%.2fs", t, edge, edge - t))
+                counters.armPostFreeze()
+                print(String(format: "  FREEZE: playhead=%.2fs edge=%.2fs behind=%.2fs runway=%.2fs", t, edge, edge - t,
+                             (engine.seekableLiveRange?.upperBound ?? edge) - t))
             } else {
                 if firstPostFreezeT == nil { firstPostFreezeT = t }
                 maxForwardSnap = max(maxForwardSnap, t - prevT)
@@ -730,6 +764,9 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
     if let before = playheadBeforeForcedReload {
         print(String(format: "  forced recovery reload: playhead %.2fs before", before))
     }
+    print("  after the freeze: segment fetches=\(counters.segmentFetches) "
+          + "(last seg\(counters.lastSegmentFetched)) playlist polls=\(counters.playlistPolls) "
+          + "blocking-reload withdrawn=\(counters.withdrewBlockingReload)")
     print("  recovery lines: itemDeath=\(counters.itemDeaths) edgeRejoin=\(counters.edgeRejoins) "
           + "keptPlace=\(counters.keptPlace) "
           + "reopen=\(counters.reopenAttempts) fullReload=\(counters.fullReloads) "

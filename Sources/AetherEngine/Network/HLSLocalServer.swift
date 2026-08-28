@@ -97,6 +97,11 @@ protocol HLSSegmentProvider: AnyObject {
     /// Same rationale as the live gate - AVPlayer treats an empty first playlist as a broken asset.
     func waitForSequentialStartupSegments(timeout: TimeInterval) -> Bool
 
+    /// AE#446 round 2: the live source has stopped and the consumer still has resident segments ahead
+    /// of it, so the served window is a finite asset until the source comes back. See
+    /// `VideoSegmentProvider.liveOutageEndlist` for why nothing short of ENDLIST keeps AVPlayer fetching.
+    var liveOutageEndlist: Bool { get }
+
     /// Upper bound on how long a blocking reload may hold before the 503. Production providers derive
     /// it from the sealed TARGETDURATION (3 x TD, the HOLD-BACK depth) so a fastZap session (TD=2)
     /// times out in 6 s instead of 18 s — a hold that outlives AVPlayer's forward buffer guarantees
@@ -139,6 +144,7 @@ extension HLSSegmentProvider {
     func waitForLiveSegment(index: Int, timeout: TimeInterval) -> Bool { true }
     func waitForSequentialStartupSegments(timeout: TimeInterval) -> Bool { true }
     var liveBlockingReloadHoldSeconds: TimeInterval { 18.0 }
+    var liveOutageEndlist: Bool { false }
     func notePlaylistBuild() -> (visibleCount: Int, firstVisible: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int) {
         return (visibleCount: segmentCount, firstVisible: 0, refreshCounter: 0, endlistAdded: false, discontinuitySequence: 0)
     }
@@ -1246,7 +1252,11 @@ final class HLSLocalServer: @unchecked Sendable {
             return lines.joined(separator: "\n") + "\n"
         }
         let typeIsEvent = (provider.playlistType == .event && !snapshot.endlistAdded)
-        let typeIsLive = (provider.playlistType == .live && !snapshot.endlistAdded)
+        // AE#446 round 2: a rendition has to end with the video playlist it belongs to, or AVPlayer
+        // keeps reloading a live subtitle track beside a finished asset.
+        let liveOutage = (provider.playlistType == .live && !snapshot.endlistAdded
+                          && provider.liveOutageEndlist)
+        let typeIsLive = (provider.playlistType == .live && !snapshot.endlistAdded && !liveOutage)
 
         var maxDuration: Double = 0
         for i in firstVisible..<count {
@@ -1280,7 +1290,7 @@ final class HLSLocalServer: @unchecked Sendable {
             lines.append("#EXTINF:\(String(format: "%.3f", dur)),")
             lines.append("subs_\(ordinal)_\(i).vtt")
         }
-        if !typeIsLive && (snapshot.endlistAdded || !typeIsEvent) {
+        if !typeIsLive && (snapshot.endlistAdded || !typeIsEvent || liveOutage) {
             lines.append("#EXT-X-ENDLIST")
         }
         return lines.joined(separator: "\n") + "\n"
@@ -1309,8 +1319,14 @@ final class HLSLocalServer: @unchecked Sendable {
         let count = snapshot.visibleCount
         let firstVisible = min(snapshot.firstVisible, count)
         let typeIsEvent = (provider.playlistType == .event && !snapshot.endlistAdded)
+        // AE#446 round 2: a live source that has stopped delivering, with a consumer still holding
+        // resident segments ahead of it. The window is then a finite asset and is served as one:
+        // ENDLIST is the only thing measured to keep AVPlayer fetching a playlist whose tail has
+        // stopped moving (a changed byte does not, and neither does a changed MEDIA-SEQUENCE).
+        let liveOutage = (provider.playlistType == .live && !snapshot.endlistAdded
+                          && provider.liveOutageEndlist)
         // Sliding live: no PLAYLIST-TYPE tag and no ENDLIST (EVENT forbids removal; VOD implies finished asset).
-        let typeIsLive = (provider.playlistType == .live && !snapshot.endlistAdded)
+        let typeIsLive = (provider.playlistType == .live && !snapshot.endlistAdded && !liveOutage)
 
         // TARGETDURATION must be >= every EXTINF (HLS spec). For live it is also floored by ceil(1.5 x cut
         // target) (widens AVPlayer's unchanged-playlist patience, anti -12888: (1) empty first manifest,
@@ -1321,7 +1337,7 @@ final class HLSLocalServer: @unchecked Sendable {
         for i in firstVisible..<count {
             maxDuration = max(maxDuration, provider.segmentDuration(at: i))
         }
-        let targetDuration = typeIsLive
+        let targetDuration = (typeIsLive || liveOutage)
             ? provider.liveTargetDurationSeconds(maxSegmentDuration: maxDuration)
             : LiveEdgePolicy.targetDurationSeconds(
                 maxSegmentDuration: maxDuration,
@@ -1349,16 +1365,24 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         lines.append("#EXT-X-TARGETDURATION:\(targetDuration)")
         lines.append("#EXT-X-MEDIA-SEQUENCE:\(firstVisible)")
-        if typeIsLive {
+        if typeIsLive || liveOutage {
             // RFC 8216 §6.2.2: EXT-X-DISCONTINUITY-SEQUENCE must advance when discontinuity-tagged segments slide out of the window; omitting it shifts AVPlayer's discontinuity numbering one window after each program boundary.
             lines.append("#EXT-X-DISCONTINUITY-SEQUENCE:\(snapshot.discontinuitySequence)")
         }
         if typeIsLive {
-            // Refresh counter keeps consecutive polls distinct so AVPlayer's unchanged-playlist patience (-12888) doesn't fire on a quiet window.
+            // Refresh counter keeps consecutive polls byte-distinct, which is worth having against any
+            // cache in the path. It is NOT what keeps AVPlayer's unchanged-playlist patience (-12888)
+            // from firing, though it was added believing so: measured on the harness, two polls 4 s
+            // apart differing in this line alone still drew -12888 on every reload, because the
+            // unchanged test reads the parsed playlist and skips a tag AVPlayer does not know. The
+            // window is what it reads; see VideoSegmentProvider.stalledWindowFirstVisible (AE#446).
             lines.append("#EXT-X-SODALITE-REFRESH:\(snapshot.refreshCounter)")
         } else if typeIsEvent {
             lines.append("#EXT-X-PLAYLIST-TYPE:EVENT")
             lines.append("#EXT-X-SODALITE-REFRESH:\(snapshot.refreshCounter)")
+        } else if liveOutage {
+            // No PLAYLIST-TYPE: the session may still come back, and VOD is a claim about the asset
+            // rather than about this window. ENDLIST alone is what stops the reload loop.
         } else {
             // EXT-X-PLAYLIST-TYPE:VOD lets AVPlayer prune fetched segments past the buffer-behind window; without it RSS grows linearly with segment count for the whole playback.
             lines.append("#EXT-X-PLAYLIST-TYPE:VOD")
@@ -1399,8 +1423,9 @@ final class HLSLocalServer: @unchecked Sendable {
             lines.append("#EXTINF:\(String(format: "%.3f", dur)),")
             lines.append(segURI(i))
         }
-        // ENDLIST for VOD/completed EVENT; never for a sliding live playlist (AVPlayer must keep re-polling).
-        if !typeIsLive && (snapshot.endlistAdded || !typeIsEvent) {
+        // ENDLIST for VOD/completed EVENT, and for a live window whose source has stopped (AE#446);
+        // never for a sliding live playlist that is still gaining segments (AVPlayer must keep re-polling).
+        if !typeIsLive && (snapshot.endlistAdded || !typeIsEvent || liveOutage) {
             lines.append("#EXT-X-ENDLIST")
         }
         return lines.joined(separator: "\n") + "\n"

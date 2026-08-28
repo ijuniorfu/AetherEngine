@@ -234,7 +234,15 @@ extension AetherEngine {
             .store(in: &cancellables)
         didReachEnd
             .filter { $0 }
-            .sink { [weak self] _ in self?.state = .ended }
+            .sink { [weak self] _ in
+                guard let self else { return }
+                // AE#446: a live window served as a finished asset (its source stopped delivering while
+                // the viewer still had resident runway) reaches an end that is not the end of anything.
+                // `.ended` is terminal (#63/#164), so forwarding it here would turn a source hiccup into
+                // a dead session for the rest of the tune.
+                if self.handleLiveOutageWindowExhausted() { return }
+                self.state = .ended
+            }
             .store(in: &cancellables)
     }
 

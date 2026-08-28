@@ -1188,6 +1188,9 @@ public final class AetherEngine: ObservableObject {
 
     /// Loopback HLS-fMP4 engine. Non-nil between load and stop.
     var nativeVideoSession: HLSVideoEngine?
+    /// AE#446 round 2: polls for the source coming back after a window was closed with ENDLIST.
+    /// Cancelled on stop; see `handleLiveOutageWindowExhausted`.
+    var liveOutageResumeWatcher: Task<Void, Never>?
     /// Thread-safe starvation inputs for session-coupled FrameExtractor yield closures
     /// (#93 startup); written on load/stop and by the 1 Hz telemetry tick.
     let extractorYieldState = ExtractorYieldState()
@@ -2121,7 +2124,72 @@ public final class AetherEngine: ObservableObject {
             ?? "The video could not start (no playable tracks after the display handshake)."
     }
 
-    func reloadStalledConsumerItem(position: Double, allowPausedConsumer: Bool = false) {
+    /// AE#446 round 2: the viewer has played out a window that was closed with ENDLIST because its
+    /// source stopped delivering. Two ways forward and neither of them is `.ended`.
+    ///
+    /// If the source has cut again, the window is live once more, and the way to tell an item that has
+    /// seen an ENDLIST is a swap: it never reloads its playlist again. That swap is the same one #442
+    /// fixed, so it rejoins at the place the viewer held rather than at the edge.
+    ///
+    /// If the source is still down, the honest state is the one the viewer is already in, waiting, with
+    /// the picture on the last frame it had. A poll every few seconds is what turns the source coming
+    /// back into a resumed session; it stops with the session, and it is the only thing running,
+    /// because an item under an ENDLIST generates no events of its own.
+    ///
+    /// - Returns: true when this was such a session, i.e. the caller must not publish `.ended`.
+    @MainActor
+    @discardableResult
+    func handleLiveOutageWindowExhausted() -> Bool {
+        guard isLive, let session = nativeVideoSession, session.liveOutageEndlistActive else {
+            return false
+        }
+        if session.liveOutageProductionResumed {
+            // The place to come back to, decided BEFORE the swap. It cannot be left to
+            // `LiveReloadPolicy.recoveryRejoinPosition`, which reads how far behind live the item was:
+            // a window closed with ENDLIST is a finite asset whose seekable end IS the playhead, so that
+            // distance reads zero and the rejoin aims at the edge. Measured doing exactly that, and it
+            // discards the rewind the viewer just spent the whole outage keeping.
+            let heldPosition = currentTime
+            EngineLog.emit(
+                "[AetherEngine] #446 the window ran out and the source is delivering again; swapping "
+                + "the item so the session is live once more, at \(String(format: "%.2f", heldPosition))s, "
+                + "the place it held",
+                category: .engine)
+            session.clearLiveOutageEndlist()
+            reloadStalledConsumerItem(position: heldPosition, allowPausedConsumer: true,
+                                      liveRejoinOverride: heldPosition > 0 ? heldPosition : nil)
+            return true
+        }
+        guard liveOutageResumeWatcher == nil else { return true }
+        EngineLog.emit(
+            "[AetherEngine] #446 the window ran out with the source still down; holding the session "
+            + "live and watching for the source to cut again (this is not an end)",
+            category: .engine)
+        liveOutageResumeWatcher = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.liveOutageResumePollSeconds * 1_000_000_000))
+                guard let self, let session = self.nativeVideoSession,
+                      session.liveOutageEndlistActive else { return }
+                if session.liveOutageProductionResumed {
+                    self.liveOutageResumeWatcher = nil
+                    self.handleLiveOutageWindowExhausted()
+                    return
+                }
+            }
+        }
+        return true
+    }
+
+    /// AE#446 round 2: how often the outage watcher above asks whether the source is back. A source
+    /// that returns is not urgent to the frame, and the item is parked either way.
+    nonisolated static let liveOutageResumePollSeconds: Double = 3.0
+
+    /// - Parameter liveRejoinOverride: AE#446: where to rejoin when the caller knows the position and
+    ///   `LiveReloadPolicy.recoveryRejoinPosition` cannot. A window closed with ENDLIST is a finite asset
+    ///   whose seekable end IS the playhead, so the distance-behind-live that policy reads is zero and it
+    ///   would aim at the edge, discarding the rewind the viewer kept through the whole outage.
+    func reloadStalledConsumerItem(position: Double, allowPausedConsumer: Bool = false,
+                                   liveRejoinOverride: Double? = nil) {
         guard let host = nativeHost, let player = currentAVPlayer,
               let url = (player.currentItem?.asset as? AVURLAsset)?.url else { return }
         // Item death parks tcs at .paused; only that trigger may bypass the user-pause guard.
@@ -2142,7 +2210,7 @@ public final class AetherEngine: ObservableObject {
             playhead: currentTime,
             behindWhenLastAdvancing: liveBehindWhenLastAdvancing,
             residentRange: liveWindow?.seekableRange,
-            targetDurationSeconds: liveTargetDurationSeconds)
+            targetDurationSeconds: liveTargetDurationSeconds) ?? liveRejoinOverride
         let liveTarget: String = rejoinPosition.map {
             "\(String(format: "%.2f", $0))s, the place it held "
             + "(\(String(format: "%.1f", liveBehindWhenLastAdvancing))s behind live when the picture "
@@ -5328,6 +5396,9 @@ public final class AetherEngine: ObservableObject {
         // populated across the seam (issue #15). SW-path callers must release the preserved host themselves.
         memoryProbeTask?.cancel()
         memoryProbeTask = nil
+        // AE#446: the outage watcher belongs to the session whose window was closed with ENDLIST.
+        liveOutageResumeWatcher?.cancel()
+        liveOutageResumeWatcher = nil
         liveReloadWatchdogTask?.cancel()
         liveReloadWatchdogTask = nil
         // #95: stop the tap reader before the session (and its SegmentCache) goes away.

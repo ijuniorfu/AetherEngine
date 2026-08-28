@@ -12,6 +12,32 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.51.0] - 2026-08-28
+
+### Added
+
+- **The 1 Hz `[SWDiag]` line describes cadence, not only a frame count.** A capture of a visibly
+  juddering software-path session read healthy on every field it had: the panel was on the content
+  rate, `enq` held at 24, the parked FIFO was steady, and the display layer dropped nothing and
+  accumulated no delay. `enq` is a count per wall second taken in the DECODER callback, so an even
+  timeline, one with a doubled interval or a duplicate timestamp, and one where a frame never
+  reached the layer all read the same. Four fields separate them: `disp` counts frames actually
+  handed to the queue target, `lost` counts the ones that never got there (unschedulable timestamps,
+  sample buffers that would not build), `dpts` reports the shortest and longest gap between the
+  timestamps handed over, and `vLead` reports the video cushion at its lowest over the interval,
+  next to the audio cushion `aLead` has always carried. `parked` is now `parkedPkts`, because it
+  counts undecoded PACKETS and was read as a video queue depth.
+
+### Changed
+
+- **Software-path frames carry their duration.** The reorder buffer already holds the successor
+  when a frame goes out, so `CMSampleTimingInfo.duration` is exact and costs no extra latency. The
+  last frame of a stream keeps an invalid duration on purpose: at end of media that is the frame
+  that stays on screen.
+- **The `[applySubtitleEvent]` line names the open-ended PGS placeholder** instead of printing it as
+  a cue that ends 4294967.3 s after it starts. A PGS composition carries no end of its own; the
+  successor's trim closes it.
+
 ## [6.50.1] - 2026-08-27
 
 ### Fixed

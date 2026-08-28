@@ -64,6 +64,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// host-driven track switching via `AetherEngine.selectAudioTrack(index:)` reload.
     private let audioSourceStreamIndexOverride: Int32?
 
+    /// AE#443: whoever REPLACES one of these two mid-session owes the session the totals the outgoing
+    /// instance held (`retireDemuxer` / `retireProducer` below). They carry the session's byte and
+    /// restart counters, and a fresh instance starts them at zero.
     var demuxer: Demuxer?
     var cache: SegmentCache?   // internal for the teardown-partial witness test
     var producer: HLSSegmentProducer?
@@ -1873,7 +1876,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         public let audioBridgeFifoBytes: Int
         public let audioBridgeSwrBytes: Int
         public var audioBridgeTotalBytes: Int { audioBridgeFifoBytes + audioBridgeSwrBytes }
-        /// Cumulative bytes emitted by the MP4SegmentMuxer; muxer-leak attribution baseline.
+        /// Cumulative bytes emitted by the MP4SegmentMuxer; muxer-leak attribution baseline. Spans muxer
+        /// rotations and producer replacements (AE#443), or a session with a recovery in it would read
+        /// as a drop to near zero exactly where the leak question is interesting.
         public let muxerLifetimeFragmentBytes: Int
         public let muxerFragmentCuts: Int
         /// Active server connections; steady 1-3 = normal AVPlayer keep-alive; rising = CFNetwork leak.
@@ -1886,12 +1891,60 @@ public final class HLSVideoEngine: @unchecked Sendable {
         /// av_packet_alloc minus av_packet_free (PacketBalanceTracker). Steady low = balanced; growth = leak.
         public let packetsAlive: Int
         public let packetsTotalAllocs: Int
-        /// Producer restarts in the session (0 for non-restart sessions).
+        /// Producer restarts in the session (0 for non-restart sessions), across every producer the
+        /// session has had. Live sessions read 0 by construction: they replace the producer instead.
         public let producerRestartCount: Int
         /// Most recent audio-gate vs video-gate gap in source-clock ms; 0 until first audio gate.
         public let lastAVGapMs: Double
         /// Lifetime HTTP requests served (playlist + init + segment fetches).
         public let serverRequestCount: Int
+    }
+
+    // MARK: - Session-lifetime counters
+
+    /// Totals folded off the subsystems a recovery REPLACES.
+    ///
+    /// AE#443: every counter below used to be read straight off the live instance, so a live reopen
+    /// (fresh demuxer, fresh producer) restarted all of them from zero at exactly the moment a session
+    /// became worth measuring, and a telemetry line carried no sign that it had. The scope of a
+    /// session-lifetime number is the SESSION, which is this object; it cannot live on the parts the
+    /// session rebuilds under itself.
+    ///
+    /// Folded once a swap is FINAL (the live reopen puts its old demuxer back when the producer build
+    /// fails, and folding at the swap would then count one reader twice) and always after the successor
+    /// is installed, so the ordering can undercount for the microseconds in between but never double
+    /// count. The producer fold also stays off `restartLock`: its byte total is read through the
+    /// producer's own `stateLock`, while the demuxer's counter is a leaf.
+    private let retiredCounterLock = NSLock()
+    private var retiredDemuxerBytes: Int64 = 0
+    private var retiredMuxedBytes: Int = 0
+    private var retiredProducerRestarts: Int = 0
+
+    /// Fold a replaced producer's totals into the session's. Call once per outgoing instance, before
+    /// stopping it (`stop()` releases the muxer its byte total is read from).
+    func retireProducer(_ old: HLSSegmentProducer?) {
+        guard let old else { return }
+        let bytes = old.muxerLifetimeFragmentBytes
+        let restarts = old.restartCount
+        retiredCounterLock.lock()
+        retiredMuxedBytes &+= bytes
+        retiredProducerRestarts &+= restarts
+        retiredCounterLock.unlock()
+    }
+
+    /// Fold a replaced demuxer's fetched bytes into the session's. Call before closing it.
+    func retireDemuxer(_ old: Demuxer?) {
+        guard let old else { return }
+        let bytes = old.avioBytesFetched
+        retiredCounterLock.lock()
+        retiredDemuxerBytes &+= bytes
+        retiredCounterLock.unlock()
+    }
+
+    private func retiredTotals() -> (demuxerBytes: Int64, muxedBytes: Int, producerRestarts: Int) {
+        retiredCounterLock.lock()
+        defer { retiredCounterLock.unlock() }
+        return (retiredDemuxerBytes, retiredMuxedBytes, retiredProducerRestarts)
     }
 
     // MARK: - Live telemetry forwarders
@@ -1910,7 +1963,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return (producer, cache, server, demuxer, audioBridge)
     }
 
-    var demuxerBytesFetched: Int64 { subsystemSnapshot().demuxer?.avioBytesFetched ?? 0 }
+    /// Bytes this session pulled from the SOURCE, across every demuxer it has had (see
+    /// `retiredDemuxerBytes`). Not the same link as `LiveTelemetry.networkTransferredBytes`, which on
+    /// the native path counts what AVPlayer pulled from the loopback server.
+    var demuxerBytesFetched: Int64 {
+        (subsystemSnapshot().demuxer?.avioBytesFetched ?? 0) + retiredTotals().demuxerBytes
+    }
     var segmentCacheTotalBytes: Int { subsystemSnapshot().cache?.totalBytes ?? 0 }
     /// On-disk segment bytes (freshly stat-ed). Used by `aetherctl live --report-cache-bytes`.
     var segmentCacheDiskBytes: Int64 { subsystemSnapshot().cache?.diskBytes() ?? 0 }
@@ -1948,8 +2006,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let seg = segmentPlan[frontier]
         return max(0, (seg.startSeconds + seg.durationSeconds) - playlistSeconds)
     }
-    var producerRestartCount: Int { subsystemSnapshot().producer?.restartCount ?? 0 }
-    var muxedBytesLifetime: Int { subsystemSnapshot().producer?.muxerLifetimeFragmentBytes ?? 0 }
+    /// Producer restarts in this SESSION, across every producer it has had. A single producer restarts
+    /// at most once (it is built for one aim and replaced for the next), so before AE#443 this read as
+    /// a 0/1 flag on the current instance, and on live it read 0 always: the live paths replace the
+    /// producer rather than restarting one, and `performRestart` bails on the empty live segment plan.
+    var producerRestartCount: Int {
+        (subsystemSnapshot().producer?.restartCount ?? 0) + retiredTotals().producerRestarts
+    }
+    /// Muxed fragment bytes for the SESSION: across muxer rotations (folded inside the producer) and
+    /// across producer replacements (folded here). A leak baseline has to outlive both, or it reads as
+    /// a drop to zero on the one session that had a recovery in it.
+    var muxedBytesLifetime: Int {
+        (subsystemSnapshot().producer?.muxerLifetimeFragmentBytes ?? 0) + retiredTotals().muxedBytes
+    }
     var serverLifetimeBytesSent: Int { subsystemSnapshot().server?.lifetimeBytesSent ?? 0 }
     var serverRequestCount: Int { subsystemSnapshot().server?.requestCount ?? 0 }
 
@@ -2725,6 +2794,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         mainDemuxerSuspectDead = false
         restartLock.unlock()
 
+        // AE#443: off `restartLock`, and before `old.stop()` releases the muxer its byte total is read
+        // from.
+        retireProducer(old)
+
         let restartStart = DispatchTime.now()
         func msSince(_ t: DispatchTime) -> Double {
             Double(DispatchTime.now().uptimeNanoseconds - t.uptimeNanoseconds) / 1_000_000
@@ -2831,6 +2904,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // concurrent teardown can't race a resurrected demuxer into a torn-down session.
         if let freshDemuxer {
             demuxer = freshDemuxer
+            retireDemuxer(dem)   // AE#443: nothing puts this one back, so the swap is already final
             // #433: the network axis belongs to the reader that is SERVING. The aborted one owned the
             // `.reconnecting` the host is still reading, and its pump can outlive this swap, so it is
             // unwired here rather than left able to speak for a session it no longer feeds. The incoming

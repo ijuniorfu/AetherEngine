@@ -317,8 +317,16 @@ private func liveSmokeTest(url: URL, seconds playSeconds: Double,
             prevCurrentTime = ct
             prevEdgeTime = et
         }
-        print(String(format: "  state=%@ isLive=%@ t=%.2fs edge=%.2fs",
-                     "\(engine.state)", "\(engine.isLive)", engine.currentTime, engine.liveEdgeTime))
+        var tickLine = String(format: "  state=%@ isLive=%@ t=%.2fs edge=%.2fs",
+                              "\(engine.state)", "\(engine.isLive)", engine.currentTime, engine.liveEdgeTime)
+        // AE#443: the two session totals a live reopen used to reset. `--drop-after` drives exactly that
+        // recovery, so this is the run where they have to stay monotonic.
+        if let telemetry = engine.liveTelemetry {
+            tickLine += String(format: " origin=%.1fMB restarts=%d",
+                               Double(telemetry.demuxerBytesFetched) / 1_048_576,
+                               telemetry.producerRestartCount)
+        }
+        print(tickLine)
         // Print RSS sample every 30 s when --measure-rss is set.
         if measureRSS && (elapsed - lastRSSTick >= 30.0 || tick == ticks - 1) { // RSS sample every 30s
             let phys = physFootprintBytes()

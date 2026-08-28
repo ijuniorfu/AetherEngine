@@ -291,6 +291,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// RFC 8216 requires TARGETDURATION to stay constant for the lifetime of a media playlist.
     /// Guarded by stateLock and preserved across in-provider producer reopens.
     private var liveTargetDurationSeal = LiveTargetDurationSeal()
+    /// AE#446: wall time of the newest finalized live segment, and the latch that says the source
+    /// stopped delivering. See `liveDeliveryStalled`.
+    private var _lastLiveSegmentFinalizedAt: Date?
+    private var _liveDeliveryStalledLatched = false
     private var refreshCounter: Int = 0
     /// EXT-X-MEDIA-SEQUENCE first index; monotonically advancing, stays 0 for VOD.
     private var _liveFirstVisible: Int = 0
@@ -428,6 +432,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             durationSeconds: durationSeconds,
             discontinuous: discontinuous
         ))
+        _lastLiveSegmentFinalizedAt = Date()
         _liveRecentDurations.append(durationSeconds)
         if _liveRecentDurations.count > Self.liveRecentDurationSampleCount {
             _liveRecentDurations.removeFirst(_liveRecentDurations.count - Self.liveRecentDurationSampleCount)
@@ -1190,8 +1195,49 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     }
     var liveBlockingReloadEnabled: Bool {
         Self.resolveLiveBlockingReload(halted: liveProductionHalted,
+                                       deliveryStalled: liveDeliveryStalled,
                                        override: blockingReloadOverride,
                                        policy: liveCadencePolicy)
+    }
+
+    /// AE#446: has the source stopped delivering on its own cadence?
+    ///
+    /// A blocking reload that can never be satisfied is worse than no blocking reload at all. AVPlayer
+    /// issues no segment requests while one is outstanding (measured: a separate, idle connection sat
+    /// there the whole time), so the hold starves a client whose cache already holds every second in
+    /// front of it. `liveProductionHalted` catches this eventually, but only once the no-cut watchdog
+    /// has run, and the stall starts long before that.
+    ///
+    /// The threshold is 1.5 x TARGETDURATION because that is AVPlayer's own patience for an unchanged
+    /// live playlist (-12888): past it the client already considers the source late, so holding its
+    /// next poll can only cost it something. Latched, because a source that has missed its cadence once
+    /// is exactly the "cannot honor the contract" category the static switch exists for (#167), and
+    /// letting the advertisement return would flap CAN-BLOCK-RELOAD across every recovery.
+    var liveDeliveryStalled: Bool {
+        stateLock.lock()
+        if _liveDeliveryStalledLatched {
+            stateLock.unlock()
+            return true
+        }
+        guard isLive, let last = _lastLiveSegmentFinalizedAt,
+              let targetDuration = liveTargetDurationSeal.value else {
+            stateLock.unlock()
+            return false
+        }
+        let since = Date().timeIntervalSince(last)
+        guard since > 1.5 * Double(targetDuration) else {
+            stateLock.unlock()
+            return false
+        }
+        _liveDeliveryStalledLatched = true
+        stateLock.unlock()
+        EngineLog.emit(
+            "[HLSVideoEngine] #446 source stopped delivering (no segment finalized for "
+            + "\(String(format: "%.1f", since))s, TARGETDURATION \(targetDuration)s); withdrawing "
+            + "CAN-BLOCK-RELOAD so a held poll cannot starve a client the cache could still feed",
+            category: .session
+        )
+        return true
     }
 
     /// Blocking-reload hold bound: 3 x sealed TARGETDURATION (= the advertised HOLD-BACK depth).
@@ -1282,8 +1328,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// the observed-cadence policy decides for ingest sources; signal-less live (plain-url Jellyfin
     /// transcode) keeps the low-latency default. Pure so the precedence is unit-testable without a full
     /// provider (#167).
-    static func resolveLiveBlockingReload(halted: Bool = false, override: Bool?, policy: LiveCadencePolicy?) -> Bool {
-        if halted { return false }
+    static func resolveLiveBlockingReload(halted: Bool = false, deliveryStalled: Bool = false,
+                                          override: Bool?, policy: LiveCadencePolicy?) -> Bool {
+        // Both outrank an explicit override: a source that is not delivering cannot honor the contract
+        // however loudly the host asks for it.
+        if halted || deliveryStalled { return false }
         if let override { return override }
         if let policy { return policy.blockingReloadEnabled }
         return true
@@ -1461,14 +1510,24 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             let count = segments.count
             stateLock.unlock()
             if count > index { return true }
-            if !firstSegmentCondition.wait(until: deadline) {
-                stateLock.lock()
-                let final = segments.count
-                stateLock.unlock()
-                return final > index
+            // AE#446: wake in slices rather than parking for the whole bound. A source that stops
+            // delivering mid-hold has to be noticed here too, or the poll that was already in flight
+            // when it died still costs the client a full 3 x TARGETDURATION of not fetching anything.
+            let slice = min(deadline, Date().addingTimeInterval(Self.liveHoldRecheckSeconds))
+            if !firstSegmentCondition.wait(until: slice) {
+                if Date() >= deadline {
+                    stateLock.lock()
+                    let final = segments.count
+                    stateLock.unlock()
+                    return final > index
+                }
+                if liveDeliveryStalled { return false }
             }
         }
     }
+
+    /// AE#446: how often a blocking-reload hold re-asks whether the source is still alive.
+    static let liveHoldRecheckSeconds: TimeInterval = 1.0
     var masterCodecs: String? { codecsString }
     var masterSupplementalCodecs: String? { supplementalCodecsString }
     var masterResolution: (width: Int, height: Int)? {

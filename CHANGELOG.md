@@ -22,6 +22,13 @@ the public-API contract.
   buffer AVPlayer reports as non-empty; every later hold keeps AVPlayer's own policy, so a mid-stream
   rebuffer is untouched. Off by default: the trade is the one `.fastZap` already prices, playback starting
   on a thinner cushion (AE#440).
+- **`LoadOptions.clampsLiveResumeToWindow` hands live resume policy to the host.** `play()` moves a
+  behind-live playhead by itself (edge snap on a live-only source more than 45 s back, a landing above the
+  retained floor when a DVR window has slid past it). Both are recoveries from a position that no longer
+  exists, but they run inside `play()` and land before a host with its own live-pause semantics can
+  decide. Set `false` and `play()` moves nothing; the engine keeps publishing `behindLiveSeconds` and
+  `seekableLiveRange`, and `seekToLiveEdge()` performs the same recovery on request. Defaults to `true`,
+  today's behaviour, and the decision is now one pure function rather than two inline branches (AE#444).
 - **`aetherctl play` prints a `PHASE` line on every `playbackPhase` edge**, and takes
   `--live-start-immediately`. The 1 Hz telemetry samples the phase, which cannot tell a start signal apart
   from the roll. Its live telemetry also carries `edge=`, `behind=` and `range=` now, which previously

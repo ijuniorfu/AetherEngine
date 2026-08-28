@@ -47,28 +47,80 @@ extension AetherEngine {
         }
     }
 
-    /// After a long pause the sliding DVR window may have evicted the playhead. Clamp to DVR lower bound + 5 s margin, or for live-only (no DVR, 60 s server retention) snap to the edge when > 45 s behind.
+    /// How far behind a live-only session (no DVR window) must be on resume before the playhead counts as
+    /// evicted rather than merely behind. A live-only source retains seconds, not minutes.
+    nonisolated static let liveOnlyResumeSnapSeconds: Double = 45
+    /// Landing margin above the retained floor, so the resume does not start on the very segment the next
+    /// eviction takes.
+    nonisolated static let liveResumeClampMarginSeconds: Double = 5
+
+    /// What resuming a behind-live session should do to the playhead, as one pure decision (AE#444).
+    ///
+    /// Both non-`none` outcomes are recoveries from a position that no longer exists, not policy about
+    /// where a viewer should be: a live-only source retains seconds, and a DVR window that has slid past
+    /// the playhead has evicted it. `clampsToWindow == false` hands that judgement to the host, which is
+    /// the only place semantics like "a pause longer than 90 s re-tunes" can live.
+    enum LiveResumeAction: Equatable {
+        case none
+        /// Live-only: `seek(to:)` refuses targets without a DVR window, so this drives the host directly.
+        case edgeSnap
+        case seek(to: Double)
+    }
+
+    nonisolated static func liveResumeAction(
+        clampsToWindow: Bool,
+        windowSeconds: Double?,
+        behindLiveSeconds: Double,
+        seekableLowerBound: Double?,
+        edgeTime: Double
+    ) -> LiveResumeAction {
+        guard clampsToWindow else { return .none }
+        let margin = liveResumeClampMarginSeconds
+        guard let window = windowSeconds else {
+            return behindLiveSeconds > liveOnlyResumeSnapSeconds ? .edgeSnap : .none
+        }
+        guard behindLiveSeconds > (window - margin) else { return .none }
+        // AE#441: the lower bound is the cache's real floor now, so this lands on content that exists.
+        return .seek(to: (seekableLowerBound ?? edgeTime) + margin)
+    }
+
+    /// After a long pause the sliding DVR window may have evicted the playhead. Clamp to the retained
+    /// floor plus a margin, or for live-only (no DVR) snap to the edge when far enough behind.
     func clampLiveResumeIfBehindWindow() {
         guard isLive, let w = liveWindow else { return }
-        let margin: Double = 5
-        if let win = w.windowSeconds {
-            guard w.behindLiveSeconds > (win - margin) else { return }
-            let t = (w.seekableRange?.lowerBound ?? w.edgeTime) + margin
+        let action = Self.liveResumeAction(
+            clampsToWindow: loadedOptions.clampsLiveResumeToWindow,
+            windowSeconds: w.windowSeconds,
+            behindLiveSeconds: w.behindLiveSeconds,
+            seekableLowerBound: w.seekableRange?.lowerBound,
+            edgeTime: w.edgeTime
+        )
+        let behind = String(format: "%.1f", w.behindLiveSeconds)
+        let window = w.windowSeconds.map { String(format: "%.0f", $0) } ?? "live-only"
+        switch action {
+        case .none:
+            // AE#444: a resume the host owns says so. Silence here is indistinguishable from a resume
+            // that was never behind, and this option exists precisely so somebody else decides.
+            if !loadedOptions.clampsLiveResumeToWindow,
+               w.behindLiveSeconds > Self.liveOnlyResumeSnapSeconds {
+                EngineLog.emit(
+                    "[AetherEngine] live resume clamp deferred to host: behind=\(behind)s window=\(window)",
+                    category: .session
+                )
+            }
+        case .edgeSnap:
             EngineLog.emit(
-                "[AetherEngine] live resume clamp: behind=\(String(format: "%.1f", w.behindLiveSeconds))s "
-                + "window=\(String(format: "%.0f", win)) -> seek \(String(format: "%.1f", t))",
-                category: .session
-            )
-            Task { await self.seek(to: t) }
-        } else {
-            // Live-only: seek(to:) refuses targets without a DVR window; drive the host directly via seekToLiveEdge.
-            guard w.behindLiveSeconds > 45 else { return }
-            EngineLog.emit(
-                "[AetherEngine] live resume clamp: behind=\(String(format: "%.1f", w.behindLiveSeconds))s "
-                + "window=live-only -> edge snap",
+                "[AetherEngine] live resume clamp: behind=\(behind)s window=live-only -> edge snap",
                 category: .session
             )
             Task { await self.seekToLiveEdge() }
+        case .seek(let t):
+            EngineLog.emit(
+                "[AetherEngine] live resume clamp: behind=\(behind)s window=\(window) "
+                + "-> seek \(String(format: "%.1f", t))",
+                category: .session
+            )
+            Task { await self.seek(to: t) }
         }
     }
 

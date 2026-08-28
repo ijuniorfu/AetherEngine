@@ -363,6 +363,13 @@ is a target the seek reaches. The floor is a backward-contiguous walk from the n
 rather than the cache's lowest index: a minimum index is not proof of coverage, and a rewind advertised
 below an interior hole cannot play forward.
 
+Resuming a session that has fallen behind, `play()` recovers a playhead that no longer exists: it snaps a
+live-only source more than 45 s back to the edge, and lands a DVR session whose window has slid past the
+playhead just above the retained floor. Both are recoveries, not opinions about where a viewer should be,
+and both are silent. A host with live-pause semantics of its own (a long pause that re-tunes, say) sets
+`clampsLiveResumeToWindow: false`, after which `play()` moves nothing and `seekToLiveEdge()` performs the
+same recovery on request. The engine keeps reporting; the host decides.
+
 For "where did this seek actually land", the honest signal is `SeekEvent.landed(renderedTime:)` on
 `$seekEvents`. `await seek(to:)` returns no position, so a harness that records its own requested target
 reports an intention rather than an outcome.
@@ -423,6 +430,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `isLive` | false | Treat the source as live. Set it explicitly; duration-based auto-detection is too noisy. |
 | `dvrWindowSeconds` | nil | Timeshift window. nil means live-only and `seek` is a no-op. |
 | `liveJoinProfile` | `.standard` | A `LiveJoinProfile`. `.fastZap` collapses TARGETDURATION to the source GOP so an IPTV join costs seconds instead of a full holdback. |
+| `clampsLiveResumeToWindow` | true | Whether `play()` may move a behind-live playhead by itself (edge snap on a live-only source more than 45 s behind, or a landing above the retained floor when a DVR window has slid past it). `false` hands the whole decision to the host, which then also owns the eviction case. |
 | `liveJoinStartsImmediately` | false | Cuts AVPlayer's stall-avoidance wait short once at the live join, over a buffer that is already non-empty. The join tail no host can otherwise reach; see the live-join section. |
 | `liveBlockingReload` | nil (auto) | LL-HLS blocking-reload override for loopback live sessions. Auto derives eligibility from observed upstream cadence, which is what keeps a bursty relay off a `-15410` loop. |
 | `nativeRemoteHLS` | false | Hand a remote `master.m3u8` straight to AVPlayer: no demuxer probe, no loopback. Pair with `isLive: true`. |

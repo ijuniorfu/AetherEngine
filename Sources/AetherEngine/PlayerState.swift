@@ -286,6 +286,24 @@ public struct LoadOptions: Sendable, Equatable {
     /// started later and played through. Opt in for zapping UX.
     public var liveJoinStartsImmediately: Bool = false
 
+    /// Whether `play()` may move a behind-live playhead by itself. Default `true`, which is the historical
+    /// behaviour (AE#444).
+    ///
+    /// Resuming a live session that has fallen behind, the engine seeks: to the live edge when the source
+    /// has no DVR window and the playhead is more than 45 s back (a live-only source retains seconds, and
+    /// the position is simply gone), and to the bottom of `seekableLiveRange` plus a margin when a DVR
+    /// window has slid past the playhead. Both are recoveries from a position that no longer exists.
+    ///
+    /// A host with live-pause semantics of its own has its own answer to the same question, and the
+    /// implicit seek makes that answer unreachable: it runs inside `play()` and lands before the host can
+    /// decide. Set `false` and `play()` moves nothing. The engine still publishes `behindLiveSeconds`,
+    /// `seekableLiveRange` and `isAtLiveEdge`, and `seekToLiveEdge()` performs the same recovery on
+    /// request, so the policy moves to the host rather than disappearing.
+    ///
+    /// The trade is that nothing then rescues a playhead the window has evicted: resuming there plays
+    /// from wherever the source can still serve, so a host that turns this off owns the eviction case too.
+    public var clampsLiveResumeToWindow: Bool = true
+
     /// AVPlayer item from the remote URL directly (Jellyfin live `master.m3u8`): no demuxer probe, no loopback. AVPlayer manages live edge / reconnect. Pair with `isLive: true`. Default `false`.
     public var nativeRemoteHLS: Bool
 
@@ -460,6 +478,7 @@ public struct LoadOptions: Sendable, Equatable {
         liveBlockingReload: Bool? = nil,
         liveJoinProfile: LiveJoinProfile = .standard,
         liveJoinStartsImmediately: Bool = false,
+        clampsLiveResumeToWindow: Bool = true,
         nativeRemoteHLS: Bool = false,
         nativeRemoteHLSIngestFallback: Bool = true,
         preserveASSMarkup: Bool = false,
@@ -494,6 +513,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.liveBlockingReload = liveBlockingReload
         self.liveJoinProfile = liveJoinProfile
         self.liveJoinStartsImmediately = liveJoinStartsImmediately
+        self.clampsLiveResumeToWindow = clampsLiveResumeToWindow
         self.nativeRemoteHLS = nativeRemoteHLS
         self.nativeRemoteHLSIngestFallback = nativeRemoteHLSIngestFallback
         self.preserveASSMarkup = preserveASSMarkup

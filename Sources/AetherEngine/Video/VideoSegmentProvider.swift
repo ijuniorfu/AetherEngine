@@ -25,8 +25,17 @@ struct LiveWindowSizing {
     /// Smaller windows caused the 81 s spike stall (AVPlayer fell below MEDIA-SEQUENCE).
     static let minSafeSegments = 8
 
+    /// AE#443: the most segments a live playlist will ever list, however deep the window and however
+    /// cheap the segments. A PLAYLIST bound rather than a disk one (the retention budget below is the
+    /// disk bound): the whole visible window is rebuilt and re-served on every poll, and a live client
+    /// polls about once per target duration.
+    static let maxWindowSegments = 900
+
     let targetSegmentDurationSeconds: Double
     let dvrWindowSeconds: Double?
+    /// AE#443: the session's disk allowance (`HLSVideoEngine.sessionRetentionBudgetBytes`). 0 means
+    /// "not stated", which leaves the sizing purely time-based, as it was.
+    var retentionBudgetBytes: Int = 0
 
     /// Number of segments the playlist keeps visible (and the cache keeps
     /// resident). Clamped up to `minSafeSegments`.
@@ -37,11 +46,38 @@ struct LiveWindowSizing {
     /// and deferring evictBelow (the "sliding" window never slid). Callers that know the observed
     /// cadence (mean EXTINF of recent finalized segments) pass it so the window really holds
     /// `effectiveWindowSeconds` of content.
-    func windowSegmentCount(observedSegmentDurationSeconds: Double?) -> Int {
+    func windowSegmentCount(observedSegmentDurationSeconds: Double?,
+                            observedSegmentBytes: Int? = nil) -> Int {
+        let asked = requestedSegmentCount(observedSegmentDurationSeconds: observedSegmentDurationSeconds)
+        let affordable = Self.affordableSegments(retentionBudgetBytes: retentionBudgetBytes,
+                                                 observedSegmentBytes: observedSegmentBytes)
+        return max(Self.minSafeSegments, min(asked, affordable, Self.maxWindowSegments))
+    }
+
+    /// AE#443: the window in segments as ASKED for, before either bound. Only the log reads it, and it
+    /// has to: comparing the served count against a value that already carries the clamps would report
+    /// every clamped window as unclamped.
+    func requestedSegmentCount(observedSegmentDurationSeconds: Double?) -> Int {
         let effective = dvrWindowSeconds ?? Self.liveOnlyFloorSeconds
         let divisor = max(max(0.5, targetSegmentDurationSeconds), observedSegmentDurationSeconds ?? 0)
-        let raw = Int(ceil(effective / divisor))
-        return max(Self.minSafeSegments, raw)
+        return Int(ceil(effective / divisor))
+    }
+
+    /// AE#443: how many segments of the observed size the session's disk allowance holds.
+    ///
+    /// The window a host asks for is a promise in SECONDS and the disk is a fact in BYTES, and until
+    /// this clamp existed nothing made them meet: a 1800 s window at a 1 s cadence sized a 1800-segment
+    /// window that the producer's resident cap refused to hold, so the cache filled to the cap before
+    /// the window had slid once, and the pump parked against it for the rest of the session. A parked
+    /// live pump stops draining the origin, which on a single-connection source is not backpressure but
+    /// a slow kill. Sizing the window by what can actually be held means the window slides instead, at
+    /// the depth the disk really supports, and `seekableLiveRange` (AE#441 reads the cache) then
+    /// advertises that depth rather than the one that was asked for.
+    ///
+    /// `.max` when either side is unknown: an unmeasured segment size must not shrink a window.
+    static func affordableSegments(retentionBudgetBytes: Int, observedSegmentBytes: Int?) -> Int {
+        guard retentionBudgetBytes > 0, let bytes = observedSegmentBytes, bytes > 0 else { return .max }
+        return retentionBudgetBytes / bytes
     }
 
     var windowSegmentCount: Int { windowSegmentCount(observedSegmentDurationSeconds: nil) }
@@ -304,6 +340,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// divisor of `LiveWindowSizing.windowSegmentCount(observedSegmentDurationSeconds:)`.
     /// Guarded by stateLock.
     private var _liveRecentDurations: [Double] = []
+    /// AE#443: the window-clamp line is a statement about the session, so it is made once.
+    private var _loggedLiveWindowClamp = false
     private static let liveRecentDurationSampleCount = 20
     /// One-shot latch for `noteWindowSlideRelativeToConsumer`. Guarded by stateLock.
     private var _liveConsumerOutsideWindowLatched = false
@@ -516,6 +554,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// VOD: returns full count so AVPlayer sees a complete asset (EVENT experiment that reported
     /// visibleHighWater+1 made AVPlayer think the asset was 2:13 and stop there).
     func notePlaylistBuild() -> (visibleCount: Int, firstVisible: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int) {
+        // AE#443: read the cache's own measure of a segment BEFORE taking stateLock. The cache has its
+        // own lock, and nesting it inside this one would invert the ordering `evictBelow`'s async hop
+        // below exists to avoid.
+        let observedBytes = cache.meanEntryBytes
         stateLock.lock()
         defer { stateLock.unlock() }
         refreshCounter += 1
@@ -523,7 +565,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             let total = segments.count
             let observedMean = _liveRecentDurations.isEmpty
                 ? nil : _liveRecentDurations.reduce(0, +) / Double(_liveRecentDurations.count)
-            let window = liveWindowSizing.windowSegmentCount(observedSegmentDurationSeconds: observedMean)
+            let window = liveWindowSizing.windowSegmentCount(observedSegmentDurationSeconds: observedMean,
+                                                             observedSegmentBytes: observedBytes)
+            noteLiveWindowClampLocked(window: window, observedSegmentBytes: observedBytes,
+                                      observedSegmentDurationSeconds: observedMean)
             // highWater is the last produced index (total - 1). Keep the
             // last `window` segments visible: firstVisible = highWater -
             // window + 1 = total - window. Until at least `window`
@@ -583,6 +628,59 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             category: .session
         )
     }
+
+    /// AE#443: says once that the window a host asked for is deeper than the disk can hold.
+    ///
+    /// Silent otherwise. The clamp is not a failure, it is the window becoming a fact, and a host that
+    /// wants to know what it really got reads `seekableLiveRange` (AE#441), which measures the same
+    /// cache. Must be called with stateLock held.
+    private func noteLiveWindowClampLocked(window: Int, observedSegmentBytes: Int?,
+                                           observedSegmentDurationSeconds: Double?) {
+        guard !_loggedLiveWindowClamp else { return }
+        let asked = liveWindowSizing.requestedSegmentCount(
+            observedSegmentDurationSeconds: observedSegmentDurationSeconds)
+        guard window < asked else { return }
+        _loggedLiveWindowClamp = true
+        let cadence = max(max(0.5, liveWindowSizing.targetSegmentDurationSeconds),
+                          observedSegmentDurationSeconds ?? 0)
+        let affordable = LiveWindowSizing.affordableSegments(
+            retentionBudgetBytes: liveWindowSizing.retentionBudgetBytes,
+            observedSegmentBytes: observedSegmentBytes)
+        let bound = affordable <= LiveWindowSizing.maxWindowSegments
+            ? "\(liveWindowSizing.retentionBudgetBytes / (1 << 20)) MiB of retention holds "
+              + "\(affordable) segments of \((observedSegmentBytes ?? 0) / 1024) KiB"
+            : "a live playlist is rebuilt and re-served on every poll, so it is capped at "
+              + "\(LiveWindowSizing.maxWindowSegments) entries"
+        EngineLog.emit(
+            "[HLSVideoEngine] #443 live window served at \(window) segments "
+            + "(~\(Int(Double(window) * cadence))s) of the \(asked) asked for "
+            + "(~\(Int(Double(asked) * cadence))s): \(bound). The window slides here instead of the "
+            + "producer parking against a resident cap it cannot pass",
+            category: .session
+        )
+    }
+
+    /// AE#443: the resident segment count the producer's runaway park must stay ABOVE.
+    ///
+    /// The park exists for a consumer that stopped polling entirely: with no playlist build there is no
+    /// `evictBelow`, so nothing bounds the cache. It must never be the thing that bounds a LIVE window,
+    /// because its enforcement is a sleeping read thread, and a live pump that stops reading stops
+    /// draining the origin. Measured before this fix on the loopback fixture, an edge session with no
+    /// seek at all: a 1800 s window at a 1 s cadence parked at resident=180 after 180 s and never
+    /// released, the edge froze, and the ladder then reported the SOURCE as starved.
+    func liveResidentParkCap() -> Int {
+        stateLock.lock()
+        let observedMean = _liveRecentDurations.isEmpty
+            ? nil : _liveRecentDurations.reduce(0, +) / Double(_liveRecentDurations.count)
+        stateLock.unlock()
+        let window = liveWindowSizing.windowSegmentCount(observedSegmentDurationSeconds: observedMean,
+                                                         observedSegmentBytes: cache.meanEntryBytes)
+        return window + Self.liveResidentParkSlackSegments
+    }
+
+    /// Segments that can sit between the pump and the playlist build that would evict them, so the park
+    /// is reached by a consumer that stopped polling and never by one that is merely a poll behind.
+    static let liveResidentParkSlackSegments = 24
 
     var firstVisibleSegmentIndex: Int {
         guard isLive else { return 0 }

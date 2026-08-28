@@ -539,6 +539,16 @@ final class SegmentCache: @unchecked Sendable {
         return _totalBytes
     }
 
+    /// AE#443: mean on-disk size of a resident segment, which is what turns a window in seconds into a
+    /// window in bytes (`LiveWindowSizing.affordableSegments`). nil while nothing is resident, so an
+    /// empty cache states that it cannot answer rather than answering zero.
+    var meanEntryBytes: Int? {
+        condition.lock()
+        defer { condition.unlock() }
+        guard !entries.isEmpty, _totalBytes > 0 else { return nil }
+        return Int(_totalBytes) / entries.count
+    }
+
     /// On-disk bytes at or above the consumer's current target: what the producer's race-ahead owns
     /// (#207). Everything behind the playhead is either the small backward window or budget-evictable
     /// extras, so this is the only footprint an opt-in whole-source window grows without bound.

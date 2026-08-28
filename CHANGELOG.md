@@ -23,6 +23,30 @@ the public-API contract.
 
 ### Fixed
 
+- **A live DVR window deeper than 180 segments froze its own edge, and then killed the source behind
+  it (AE#443).** The window is sized in seconds from what a host asks for; the producer refused to hold
+  more than a fixed count of segments. The playlist does not start sliding until the window's worth of
+  segments exists, so for any deeper window the cache filled to that count first and the pump parked
+  against it for the rest of the session, at exactly 180 x the segment duration. Reproduced on the
+  loopback fixture with no seek and no remote server: park at 179 s on a 1 s cadence, the edge frozen
+  from that second, then the 503 blocking reloads, the item death and the rejoin ladder the reporter
+  had been reading as a dead origin for three campaigns. The park is also what stopped his origin: a
+  parked pump is not reading, the reader's runway fills at mux rate (measured 0 to 16 MiB across the
+  park), and then a single-connection live source backs up and dies. The window is now sized by what
+  the session can actually hold, the retention budget over the observed segment size under a playlist
+  ceiling, so it slides at its own depth and `seekableLiveRange` advertises the depth that exists. The
+  resident cap is a backstop above the window instead of a bound below it.
+
+- **`rx` survives an item swap (AE#443).** Summing the access log's entries fixed the fall inside one
+  item; an `AVPlayerItem`'s log holds only its own entries, so the #93 stage-2 recovery replaced the
+  counter along with the item (measured by the reporter: 1229.1 MB, absent, 34.3 MB). A departing
+  item's totals are folded into the session's at the swap, and the gap between two items reports the
+  total so far rather than nothing.
+
+- **The stall ladder no longer reports a pump this engine is holding as a starved source (AE#443).**
+  "No segment finalized" has two causes that point in opposite directions, and only one of them is
+  about the origin.
+
 - **The join lever now reads how deep the buffer is, not merely that it is non-empty (AE#440).**
   `isPlaybackBufferEmpty` is the precondition `AVPlayer.h` documents, not a measure of safety: a single
   served fragment reads `false` exactly as a four-second cushion does. Sampling the real hold on hardware

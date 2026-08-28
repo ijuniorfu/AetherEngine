@@ -1630,7 +1630,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
             sequentialAppendPlaylist: sequentialOrigin && !isLiveSession,
             liveWindowSizing: LiveWindowSizing(
                 targetSegmentDurationSeconds: liveCutTargetSeconds,
-                dvrWindowSeconds: dvrWindowSeconds
+                dvrWindowSeconds: dvrWindowSeconds,
+                // AE#443: the window is a promise in seconds and the disk is a fact in bytes. Handing
+                // the sizing the budget is what lets the two meet, instead of the producer meeting a
+                // resident cap it can never pass.
+                retentionBudgetBytes: retentionBudgetBytes
             ),
             allowsBoundedDegradedStart: liveJoinProfile == .fastZap,
             blockingReloadOverride: blockingReloadOverride,
@@ -1675,6 +1679,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
                                         durationSeconds: durationSeconds,
                                         discontinuous: discontinuous)
             }
+            // AE#443: the runaway park has to sit above the window this session actually serves, or it
+            // bounds the window instead of backstopping it, and its enforcement (a sleeping read
+            // thread) stops the origin from being drained.
+            prod.liveResidentCapProvider = { [weak prov] in prov?.liveResidentParkCap() ?? 0 }
         } else if sequentialOrigin {
             prod.onSequentialSegmentFinalized = { [weak prov] index, durationSeconds in
                 prov?.appendSequentialSegmentDuration(index: index, durationSeconds: durationSeconds)
@@ -2674,6 +2682,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
         restartLock.lock()
         defer { restartLock.unlock() }
         return provider.map { $0.liveContinuationPoint().nextIndex }
+    }
+
+    /// AE#443: is the live pump held in its runaway headroom park?
+    ///
+    /// nil when there is no local producer, for the same reason as the count above: absence is not a
+    /// "no". A parked pump finalizes nothing and drains no origin, so a ladder that reads only the
+    /// finalized count sees a starved source and says so, which is what sent the reporter of #443 to
+    /// his server logs three times.
+    var liveProducerParkedSnapshot: Bool? {
+        subsystemSnapshot().producer?.isLiveHeadroomParked
     }
 
     /// #178: called by the engine when a NEW user seek is dispatched. A recovery re-anchor still

@@ -1265,10 +1265,19 @@ extension AetherEngine {
                                                   segmentsAtStall: segmentsAtStall,
                                                   segmentsNow: segmentsNow) {
                         let seg = segmentsNow.map(String.init) ?? "?"
+                        // AE#443: "nothing finalized" has two causes and they point in opposite
+                        // directions. A starved producer is waiting on its origin; a PARKED one is
+                        // being held by this engine and is not even reading, so naming the source
+                        // sends the reader to the wrong logs (it sent the reporter of #443 to his
+                        // server three times).
+                        let parked = self.nativeVideoSession?.liveProducerParkedSnapshot == true
                         EngineLog.emit(
                             "[AetherEngine] #65 stage-2 skipped: no segment finalized since the "
-                            + "stall (producer still at seg\(seg)); the producer is starved, not "
-                            + "the consumer; publishing liveSourceReset to host",
+                            + "stall (producer still at seg\(seg)); the producer is "
+                            + (parked ? "PARKED by this engine (live headroom cap), not starved by "
+                                      + "its origin; see the HLSSegmentProducer park line"
+                                      : "starved, not the consumer")
+                            + "; publishing liveSourceReset to host",
                             category: .engine)
                         self.liveSourceReset.send()
                         return

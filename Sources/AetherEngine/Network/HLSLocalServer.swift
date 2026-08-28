@@ -657,7 +657,10 @@ final class HLSLocalServer: @unchecked Sendable {
         let normalizedPath = (routePath == "/audio.m3u8") ? "/media.m3u8" : routePath
 
         // #50 diag: promoted to .info so the host mirror names the failing path without a verbose build. Revert once #50 is root-caused.
-        EngineLog.emit("[HLSLocalServer] \(firstLine)", category: .hlsServer)
+        // AE#446: the fd is what says whether a blocking-reload hold is parking the connection the
+        // next segment request needs. Same fd on both, and the segment could not be read until the
+        // hold returned; different fds, and the client chose not to fetch.
+        EngineLog.emit("[HLSLocalServer] \(firstLine) fd=\(fd)", category: .hlsServer)
         // #227 diag: name each distinct client once, so an AirPlay session shows whether the receiver fetches
         // for itself (its own LAN address appears) or the sender pulls everything (only 127.0.0.1 / own IP).
         if let peer = Self.peerAddress(of: fd) {

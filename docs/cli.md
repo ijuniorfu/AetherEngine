@@ -92,6 +92,11 @@ external track by language) shows the `subs_N.m3u8` and `subs_N_0.vtt` fetches a
 that `cues=0` and "no cues arrived" are CORRECT there, because AVPlayer renders a rendition itself and the
 overlay pipeline stays empty (same as AE#154).
 
+`play` prints a `PHASE <phase> t+Ns` line on every `playbackPhase` edge, stamped from the load call on
+the same clock as `FIRSTFRAME`. The 1 Hz tick samples the phase, which is far too coarse to tell a start
+signal apart from the moment the rate rolls; a healthy native join is exactly two edges, `loading` at the
+load and `playing` at the roll (AE#440).
+
 `--subs <codec-or-lang>` matches against the track's libavcodec name or language and logs every overlay cue and cue trim as it lands. `--host-calls` replays host post-load behavior against the fresh session: `play`, `extractor` (`makeFrameExtractor`), `setrate` (`setRate(1.0)`), `ratehold` (set 1.5, pause at tick 3, resume at tick 5, then read the rate back off the transport itself: the #436 drill, and it fails the run if the resume came back at 1.0), `reloadlive` (reload the URL on the live path when the probe flags it live, the AetherPlayer Open URL flow), `seekback` (rewind 20 s into the DVR window at t=15, return to the live edge at t=30), and `overlapseek` (the #292 seek-window drills below); this is how the pre-arming `setRate` wedge was isolated.
 
 `--seek-every N` seeks once every N ticks past tick 10, walking `--seek-pattern <abs,abs,...>` if one is given (a short backward hop otherwise), and `--seek-count K` stops after K seeks so a run can be a BURST and then play. Both halves are needed for anything about what a seek sequence leaves behind: the burst puts the store in the state under test, and only the playing half shows what the overlay carries through it. That pairing is what made AE#362's second mechanism reproducible (a hole between a restarted pump and the island the previous run left ahead of it, decoded across and then never re-read).
@@ -101,6 +106,16 @@ overlay pipeline stays empty (same as AE#154).
 `--live-ingest` loads the URL through `HLSLiveIngestReader` as a custom source, which is the shape a host uses for a live channel it ingests and re-serves itself (Sodalite's direct live path). Pair it with `--live`. It reaches the reader DIRECTLY, which is what a repro of the reader itself needs; since AE#363 plain `--live` also ends up there, but by way of the engine's own route (the raw live path detects the playlist and hands it to the ingest), so use `--live-ingest` when the reader is the subject and plain `--live` when the routing is. `hlslive` only serves local `.ts` files. AE#359 (the master's SUBTITLES renditions were parsed away) survived precisely because this path had no harness; `--live-ingest --subs <lang>` reproduces and verifies it in 40 s against a public broadcaster URL.
 
 `--fast-zap` sets `LoadOptions.liveJoinProfile = .fastZap` for the load. `live` has carried the flag for its own raw-TS fixture since AE#195, but that fixture has no upstream playlist, and the served `#EXT-X-TARGETDURATION` is floored by the UPSTREAM's observed arrival cadence (`LiveCadencePolicy`), which is what sizes the holdback the first serve waits for. So fastZap against an origin of one's own, the shape a downstream player actually ships, could not be driven from here at all. Measured on the same 1 s-GOP seed, `--preroll 0 --realtime`: raw TS with no playlist serves at 1.325 s on TARGETDURATION 1 (holdback 3 s, full cushion), the same content behind an `hlsfixture` origin cutting 2 s segments serves on TARGETDURATION **2** (holdback 6 s) although the engine re-cut it at 1 s. Pair it with `--live`, and read the first-serve line (AE#374) rather than a first-frame stopwatch.
+
+`--live-start-immediately` sets `LoadOptions.liveJoinStartsImmediately`, which cuts AVPlayer's
+stall-avoidance hold short once at the live join (AE#440). **The hold it addresses does not reproduce on
+this harness**, and that is itself the finding: measured on 6 window geometries against the raw-TS fixture
+at `--realtime --preroll 0` (shallow window under the holdback, window exactly at it, and a deep window
+from `--preroll 6/12/30`), the gap between `layer.isReadyForDisplay=true` and `timeControlStatus=playing`
+stayed between 10 and 60 ms every time, against 1.5 to 2.8 s reported on an Apple TV 4K over the same
+shape.
+Loopback answers at memory speed, so AVPlayer's buffering-rate evaluation concludes at once. The flag is
+here to drive the engine end of a device A/B, not to prove anything from a Mac.
 
 `--header "Name: Value"` (repeatable) fills `LoadOptions.httpHeaders` and, on `--live-ingest`, the reader's own fetches. Origins that enforce a per-request `User-Agent` / `Referer` / `Authorization` (tokenized IPTV, STB profiles) could not be driven from the CLI at all before AE#363; pair it with `hlsfixture --require-header` below to have both ends of the contract in one run.
 

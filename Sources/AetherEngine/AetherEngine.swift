@@ -116,6 +116,19 @@ public final class AetherEngine: ObservableObject {
     /// regex-matching `EngineLog`.
     @Published public internal(set) var playbackPhase: PlaybackPhase = .idle
 
+    /// AE#440: whether this load's transport has actually rolled once. Feeds `playbackPhase`.
+    ///
+    /// `state` is intent: every autostart writes `.playing` the moment it has called `play()`, and on
+    /// the AVPlayer paths the rate can take seconds after that to roll (a live join holding to minimize
+    /// stalls presents a first frame and then stands still). Until this is true, `playbackPhase` reports
+    /// `.loading` rather than `.playing`, so a host keying chrome on the phase drops its spinner on
+    /// motion instead of on intent. Latched by the transport-status sinks on the first real `.playing`;
+    /// the paths that publish no transport status set it when their host is wired, so nothing about them
+    /// changes. Reset with the session.
+    var hasTransportRolled = false {
+        didSet { recomputePlaybackPhase() }
+    }
+
     /// Reader source-fetch axis feeding `playbackPhase`. Updated off the demux thread via
     /// `setReaderNetworkPhase`. `didSet` keeps `playbackPhase` in sync (#85).
     private var readerStall: ReaderNetworkPhase = .flowing {
@@ -128,7 +141,8 @@ public final class AetherEngine: ObservableObject {
         let next = PlaybackPhase.derive(state: state,
                                         isBuffering: isBuffering,
                                         isSeeking: isSeeking,
-                                        stall: readerStall)
+                                        stall: readerStall,
+                                        transportHasRolled: hasTransportRolled)
         if playbackPhase != next { playbackPhase = next }
     }
 
@@ -5328,6 +5342,10 @@ public final class AetherEngine: ObservableObject {
         isSessionReady = false
         // #315: session-scoped for the same reason, and the host mirrors are being cut here.
         hasFirstFrameReadyForDisplay = false
+        // AE#440: so does "this session has moved once". A reused native host carries the outgoing
+        // item's rate across the swap, and crediting the next load with it would publish `.playing`
+        // over the new source's whole join.
+        hasTransportRolled = false
         sessionPublishesVideoDisplaySignal = false
         pendingPreReadySeekSeconds = nil
 

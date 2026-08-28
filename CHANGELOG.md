@@ -10,7 +10,31 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`LoadOptions.liveJoinStartsImmediately` cuts AVPlayer's stall-avoidance hold short at a live join.**
+  Past the first serve AVPlayer can present the first frame and then hold it perfectly still while it
+  decides whether its cushion will sustain playback (`AVPlayerWaitingToMinimizeStallsReason`). Against a
+  source delivered at 1x that cushion is bought in wall-clock time, and nothing on the item shortens it:
+  a host measured 1.5 to 2.8 s of bit-static picture on 9 of 11 consecutive tunes on an Apple TV 4K, HDMI
+  capture confirming the freeze, with `preferredForwardBufferDuration` measured inert. Set, the first such
+  hold of a live session is cut short with `playImmediately(atRate:)`, once per load and only over a
+  buffer AVPlayer reports as non-empty; every later hold keeps AVPlayer's own policy, so a mid-stream
+  rebuffer is untouched. Off by default: the trade is the one `.fastZap` already prices, playback starting
+  on a thinner cushion (AE#440).
+- **`aetherctl play` prints a `PHASE` line on every `playbackPhase` edge**, and takes
+  `--live-start-immediately`. The 1 Hz telemetry samples the phase, which cannot tell a start signal apart
+  from the roll.
+
+### Fixed
+
+- **`playbackPhase` reported `.playing` before anything moved.** `state` is transport intent and every
+  autostart writes it the moment `play()` has been called; on a live join the rate can roll seconds later.
+  The phase followed it, so the one observable documented as the single source of truth for what playback
+  is doing published `.playing` (and, from AVPlayer's pre-play status arriving afterwards, a millisecond
+  of `.paused`) over a picture that was standing still. It now reports `.loading` until the transport has
+  rolled once in the load, and turns `.playing` on the roll itself. `state` is unchanged; a host that
+  needs motion rather than intent should observe `$playbackPhase` (AE#440).
 
 ## [6.51.0] - 2026-08-28
 

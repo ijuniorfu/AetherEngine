@@ -124,7 +124,8 @@ extension PlaybackPhase {
     static func derive(state: PlaybackState,
                        isBuffering: Bool,
                        isSeeking: Bool,
-                       stall: ReaderNetworkPhase) -> PlaybackPhase {
+                       stall: ReaderNetworkPhase,
+                       transportHasRolled: Bool) -> PlaybackPhase {
         switch state {
         case .error(let message): return .error(message)
         case .ended:              return .ended
@@ -137,6 +138,13 @@ extension PlaybackPhase {
             case .flowing:      break
             }
             if isSeeking { return .seeking }
+            // AE#440: `state` is transport INTENT, and every autostart writes it before AVPlayer has
+            // rolled anything. On a live join that gap is seconds wide, so a phase of `.playing` there
+            // describes a picture that is standing still. Until the transport has moved once, the
+            // session is still starting, which is what `.loading` already means; `.rebuffering` is
+            // reserved for an underrun after playback existed. A paused mount stays `.paused`: it is
+            // honestly not playing rather than still arriving.
+            if !transportHasRolled, state != .paused { return .loading }
             if isBuffering { return .rebuffering }
             return state == .paused ? .paused : .playing
         }
@@ -254,6 +262,29 @@ public struct LoadOptions: Sendable, Equatable {
     /// lean-back viewing. Ignored for `nativeRemoteHLS` and VOD. Default `.standard`
     /// (AetherEngine#195/#208).
     public var liveJoinProfile: LiveJoinProfile = .standard
+
+    /// Cut AVPlayer's stall-avoidance wait short at the live join, once it is holding on media it has
+    /// already buffered. Live sessions on the AVPlayer-backed paths only. Default `false` (AE#440).
+    ///
+    /// A live join can present its first frame and then hold it still. AVPlayer decides for itself how
+    /// much cushion it wants before letting the rate roll (`AVPlayerWaitingToMinimizeStallsReason`), and
+    /// against a source delivered at 1x that cushion can only be bought in wall-clock time. Measured by a
+    /// host on an Apple TV 4K over 11 consecutive tunes of a raw MPEG-TS channel: 1.5 to 2.8 s of
+    /// bit-static picture on 9 of them, with the engine's clock advancing and `state` already `.playing`
+    /// throughout. Nothing set on the item shortens it (`preferredForwardBufferDuration` measured inert),
+    /// because the wait is a rate evaluation and not a buffer target.
+    ///
+    /// Set, the first such hold of a session is cut short with `playImmediately(atRate:)`, which starts on
+    /// the media already buffered. It fires at most once per load, only while the item's buffer is
+    /// non-empty (`AVPlayer.h`: over an empty buffer that call behaves as a stall instead, which is the
+    /// shape that leaves rate parked at 0), and never for the `EvaluatingBufferingRate` reason, which is
+    /// the brief monitoring period Apple documents as not worth showing a spinner for. Every later hold in
+    /// the session keeps AVPlayer's own policy, so a mid-stream rebuffer is untouched.
+    ///
+    /// The trade is the one `.fastZap` already prices, from the other end: playback starts on a thinner
+    /// cushion, so a source that hiccups right after the join rebuffers where it would otherwise have
+    /// started later and played through. Opt in for zapping UX.
+    public var liveJoinStartsImmediately: Bool = false
 
     /// AVPlayer item from the remote URL directly (Jellyfin live `master.m3u8`): no demuxer probe, no loopback. AVPlayer manages live edge / reconnect. Pair with `isLive: true`. Default `false`.
     public var nativeRemoteHLS: Bool
@@ -428,6 +459,7 @@ public struct LoadOptions: Sendable, Equatable {
         dvrWindowSeconds: Double? = nil,
         liveBlockingReload: Bool? = nil,
         liveJoinProfile: LiveJoinProfile = .standard,
+        liveJoinStartsImmediately: Bool = false,
         nativeRemoteHLS: Bool = false,
         nativeRemoteHLSIngestFallback: Bool = true,
         preserveASSMarkup: Bool = false,
@@ -461,6 +493,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.dvrWindowSeconds = dvrWindowSeconds
         self.liveBlockingReload = liveBlockingReload
         self.liveJoinProfile = liveJoinProfile
+        self.liveJoinStartsImmediately = liveJoinStartsImmediately
         self.nativeRemoteHLS = nativeRemoteHLS
         self.nativeRemoteHLSIngestFallback = nativeRemoteHLSIngestFallback
         self.preserveASSMarkup = preserveASSMarkup

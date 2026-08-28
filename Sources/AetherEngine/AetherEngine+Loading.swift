@@ -392,11 +392,17 @@ extension AetherEngine {
                     // Hold .loading through startup (hasStartedPlaying gate on the host side).
                     if self.state != .playing { self.state = .loading }
                 case .paused:
-                    // Only an explicit user pause; ignore transient pre-roll paused at load.
-                    if self.state == .playing { self.state = .paused }
+                    // Only an explicit user pause; ignore transient pre-roll paused at load. AE#440: the
+                    // pre-play reading is delivered AFTER the autostart has written .playing, so before
+                    // the first roll a .paused is the outgoing value rather than anyone's intent.
+                    if self.hasTransportRolled, self.state == .playing { self.state = .paused }
                 @unknown default:
                     break
                 }
+                // AE#440: the rate is rolling, which is what `playbackPhase` reports as `.playing`.
+                // Last, so this load's `state` and `isBuffering` writes are already in and the phase
+                // recomputes once, onto the roll.
+                if status == .playing { self.hasTransportRolled = true }
             }
             .store(in: &nativeCancellables)
 
@@ -431,7 +437,10 @@ extension AetherEngine {
                   // origin that stops answering; it does not cover one that answers everything while
                   // AVFoundation builds no track, where nothing terminal is ever published.
                   readinessDeadline: RemoteHLSReadinessDeadline.defaultBudgetSeconds,
-                  isLive: options.isLive)
+                  isLive: options.isLive,
+                  // AE#440: the same join tail exists where AVPlayer owns the buffer; the engine only
+                  // owns the moment it is told to stop waiting.
+                  liveJoinStartsImmediately: options.liveJoinStartsImmediately)
 
         // AE#154: surface the item's legible AVMediaSelectionGroup as `subtitleTracks` so hosts with
         // their own picker see the external WebVTT renditions AVPlayer renders on this bypass.
@@ -1142,10 +1151,24 @@ extension AetherEngine {
                 // isBuffering only once playback has started (not during initial load spin-up).
                 let startedPlaying = self.state == .playing || self.state == .paused
                 self.isBuffering = startedPlaying && status == .waitingToPlayAtSpecifiedRate
+                // AE#440: the rate is rolling. The autostart wrote `state = .playing` before AVPlayer had
+                // moved anything, and on a live join AVPlayer can hold a presented first frame still for
+                // seconds past that, so `playbackPhase` reports `.loading` until this latches.
+                //
+                // After the `isBuffering` write and before the `startedPlaying` guard, and both halves of
+                // that placement are load-bearing: latching first would recompute the phase against the
+                // hold's stale `isBuffering` and publish one tick of `.rebuffering` on the way to
+                // `.playing`, and latching after the guard would strand the axis (with it the phase) on a
+                // roll that arrives while `state` is still `.loading`.
+                if status == .playing { self.hasTransportRolled = true }
                 guard startedPlaying else { return }
                 switch status {
                 case .paused:
-                    if self.state != .paused { self.state = .paused }
+                    // AE#440: AVPlayer's pre-play .paused reading reaches this sink after the autostart
+                    // has already declared .playing, so latching it before the first roll published a
+                    // millisecond of `.paused` on every native start. Before the transport has moved
+                    // once, a .paused is the status the item was mounted with, not a pause.
+                    if self.hasTransportRolled, self.state != .paused { self.state = .paused }
                 case .playing, .waitingToPlayAtSpecifiedRate:
                     if self.state != .playing { self.state = .playing }
                 @unknown default:
@@ -1365,7 +1388,9 @@ extension AetherEngine {
                   skipInitialSeek: LiveReloadPolicy.skipInitialSeek(
                       isLive: isLive, isRejoin: liveRejoin),
                   inPlaceSwap: inPlaceHandover,
-                  isLive: isLive)
+                  isLive: isLive,
+                  // AE#440: the join tail, opt-in. The host itself gates this on `isLive`.
+                  liveJoinStartsImmediately: loadedOptions.liveJoinStartsImmediately)
         forceNativeLegibleDeselectedUntilHostSelects()
     }
 
@@ -1519,6 +1544,10 @@ extension AetherEngine {
                 self?.clock.sourceTime = value
             }
             .store(in: &softwareCancellables)
+        // AE#440: this path publishes no transport status to latch a roll from, and all of its
+        // transport flows through the engine's own play()/pause(), so `state` IS its motion signal.
+        // Crediting the roll here keeps `playbackPhase` on the software path exactly as it was.
+        hasTransportRolled = true
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
@@ -1591,6 +1620,9 @@ extension AetherEngine {
                 self.clock.bufferedPosition = value
             }
             .store(in: &audioCancellables)
+        // AE#440: no AVPlayer transport status is reconciled on this path, so `state` is its motion
+        // signal. Credited with the host, which leaves `playbackPhase` here exactly as it was.
+        hasTransportRolled = true
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
@@ -1667,6 +1699,9 @@ extension AetherEngine {
                 self.clock.sourceTime = value
             }
             .store(in: &audioNativeCancellables)
+        // AE#440: no AVPlayer transport status is reconciled on this path, so `state` is its motion
+        // signal. Credited with the host, which leaves `playbackPhase` here exactly as it was.
+        hasTransportRolled = true
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,

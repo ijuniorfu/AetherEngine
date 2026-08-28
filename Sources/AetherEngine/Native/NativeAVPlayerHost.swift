@@ -60,6 +60,11 @@ final class NativeAVPlayerHost {
     /// Set per load; gates the AE#287 premature-end recovery, which only makes sense for a fixed-length
     /// presentation. A live session has no advertised end to fall short of.
     private var isLiveSession: Bool = false
+    /// AE#440: set per load from `LoadOptions.liveJoinStartsImmediately`. Arms the one-shot below.
+    private var liveJoinStartsImmediately: Bool = false
+    /// AE#440: spent once the join has either been started by hand or rolled on its own, so the override
+    /// belongs to the join and every later hold in the session keeps AVPlayer's own stall policy.
+    private var liveJoinImmediateStartSpent: Bool = false
     /// AE#287 bookkeeping, cleared with the item in `unloadCurrentItem`.
     private var prematureEndRecoveryAttempts: Int = 0
     private var lastPrematureEndRecoveryPlayhead: Double?
@@ -296,13 +301,17 @@ final class NativeAVPlayerHost {
     /// after an in-PiP recovery reload) and the pause bounces transport for nothing. The swap
     /// keeps transport intent, clocks and the old item alive until replaceCurrentItem hands
     /// AVPlayer the fresh one.
-    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false, httpHeaders: [String: String] = [:], armIngestFallback: Bool = false, readinessDeadline: Double? = nil, isLive: Bool = false) {
+    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false, httpHeaders: [String: String] = [:], armIngestFallback: Bool = false, readinessDeadline: Double? = nil, isLive: Bool = false, liveJoinStartsImmediately: Bool = false) {
         unloadCurrentItem(inPlaceSwap: inPlaceSwap)
 
         self.surfaceEndFailures = surfaceEndFailures
         self.ingestFallbackArmed = armIngestFallback
         self.readinessDeadlineSeconds = readinessDeadline
         self.isLiveSession = isLive
+        // AE#440: per load, and only ever armed for a live session. The player is reused across loads,
+        // so an override left armed from a live zap would meet the next VOD title's cold start.
+        self.liveJoinStartsImmediately = isLive && liveJoinStartsImmediately
+        self.liveJoinImmediateStartSpent = false
         Self.nextSessionID += 1
         sessionID = Self.nextSessionID
         let sid = sessionID
@@ -505,6 +514,7 @@ final class NativeAVPlayerHost {
                 // AE#287: swallow the pause AVPlayer takes while a premature-end recovery re-seeks.
                 if status == .paused, self.prematureEndRecoveryInFlight { return }
                 self.timeControlStatus = status
+                self.startLiveJoinImmediatelyIfHolding(waitingReason: reason)
                 // First .playing: re-sample route after 2.5s settle -- AVKit only negotiates HDMI format on playback start (issue #24).
                 if status == .playing { self.hasEverPlayed = true }
                 if status == .playing, !self.didSampleSettledRoute {
@@ -960,6 +970,71 @@ final class NativeAVPlayerHost {
             if hi > lo { total += hi - lo }
         }
         return covered ? total : 0
+    }
+
+    /// AE#440: whether to cut AVPlayer's stall-avoidance wait short right now.
+    ///
+    /// The wait this answers is the join tail a host cannot otherwise reach. AVPlayer presents the first
+    /// frame, publishes `.waitingToPlayAtSpecifiedRate` with `AVPlayerWaitingToMinimizeStallsReason`, and
+    /// holds that frame still while it decides whether the cushion it has will sustain playback. Against
+    /// a live source delivered at 1x, that cushion is bought in wall-clock time and nothing on the item
+    /// shortens it.
+    ///
+    /// Four guards, each of which is a way this would otherwise be the wrong call:
+    /// - `armed`: opt-in per load, and never on a VOD session, whose start has no such deadline.
+    /// - `hostWantsToPlay`: a host that paused during the join asked for a still picture. Overriding into
+    ///   motion there would resurrect a session the host put down.
+    /// - `isWaitingToMinimizeStalls`: NOT the `EvaluatingBufferingRate` reason, which `AVPlayer.h`
+    ///   describes as a brief monitoring period and explicitly tells clients not to show waiting UI for.
+    ///   Firing there would preempt an evaluation that was about to start playback on its own.
+    /// - `playbackBufferEmpty`: the documented precondition. Over a non-empty buffer `playImmediately`
+    ///   starts on the media already there; over an empty one `AVPlayer.h` says it "will act as if the
+    ///   buffer became empty during playback", and a stall while the player is not waiting to minimize
+    ///   stalls is exactly the shape that resets rate to 0 and never resumes. That is the failure the
+    ///   2026-05 `automaticallyWaitsToMinimizeStalling = false` experiment hit process-wide (35fa16d0),
+    ///   and the reason this is a one-shot on a proven buffer rather than a policy on the player.
+    nonisolated static func shouldStartLiveJoinImmediately(
+        armed: Bool,
+        alreadySpent: Bool,
+        hostWantsToPlay: Bool,
+        isWaitingToMinimizeStalls: Bool,
+        playbackBufferEmpty: Bool
+    ) -> Bool {
+        guard armed, !alreadySpent, hostWantsToPlay else { return false }
+        guard isWaitingToMinimizeStalls else { return false }
+        return !playbackBufferEmpty
+    }
+
+    /// Spend the AE#440 one-shot if this transport status is the join holding on buffered media. Also
+    /// spends it silently once the rate rolls on its own, so the override can never reach a mid-stream
+    /// rebuffer: past the join, AVPlayer's stall policy is the right one and a live channel that runs
+    /// dry should wait rather than spin at rate 1 over nothing.
+    private func startLiveJoinImmediatelyIfHolding(waitingReason: String) {
+        guard liveJoinStartsImmediately, !liveJoinImmediateStartSpent else { return }
+        if avPlayer.timeControlStatus == .playing {
+            liveJoinImmediateStartSpent = true
+            return
+        }
+        let bufferEmpty = playerItem?.isPlaybackBufferEmpty ?? true
+        guard Self.shouldStartLiveJoinImmediately(
+            armed: liveJoinStartsImmediately,
+            alreadySpent: liveJoinImmediateStartSpent,
+            hostWantsToPlay: playIntent,
+            isWaitingToMinimizeStalls:
+                avPlayer.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                && waitingReason == AVPlayer.WaitingReason.toMinimizeStalls.rawValue,
+            playbackBufferEmpty: bufferEmpty
+        ) else { return }
+        liveJoinImmediateStartSpent = true
+        // #436: `defaultRate` is where the session's speed lives; a resume window must not silently
+        // return a live join to 1.0 when the host is running at another rate.
+        let rate = avPlayer.defaultRate != 0 ? avPlayer.defaultRate : 1.0
+        EngineLog.emit(
+            "[NativeAVPlayerHost] #\(sessionID) AE#440 live join: cutting the stall-avoidance wait "
+            + "short at rate \(rate) (buffer non-empty)",
+            category: .engine
+        )
+        avPlayer.playImmediately(atRate: rate)
     }
 
     func play() {

@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.55.0] - 2026-08-28
+
 ### Changed
 
 - **A live join no longer holds its first frame still while AVPlayer second-guesses the cushion it
@@ -46,6 +50,53 @@ the public-API contract.
 - **The stall ladder no longer reports a pump this engine is holding as a starved source (AE#443).**
   "No segment finalized" has two causes that point in opposite directions, and only one of them is
   about the origin.
+
+- **A live resume clamp is measured from the bound it lands on (AE#441).** Since 6.52.0 the clamp lands
+  on the honest floor, the DVR window intersected with what the cache actually holds, but it still
+  TRIGGERED on window arithmetic. Where retention runs short of the window for a session's whole life
+  (the reporting strip: a 420 s window advertising ~405 s of depth), a resume between the real depth and
+  the window therefore got no clamp at all, for a position the cache no longer held. Both ends read the
+  same bound now. The margin applies only once the window is sliding: before it fills, the floor is the
+  session's own start rather than an eviction frontier, and a margin there would only shove a resume near
+  the start forward.
+
+- **Eviction stops at the consumer's next fetch, so a segment cannot be unlinked while it is being served
+  (AE#441).** `live window slid past the consumer` read the LAST fetch when the cost of a slide is decided
+  by the NEXT one: the consumer walks indices forward, so everything below the declared target is already
+  in AVPlayer's buffer and a viewer parked at the floor sits one segment below `firstVisible` for part of
+  every slide with nothing lost. Chasing the four benign lines in the AE#441 retest turned up why that
+  tolerance is not cosmetic. At exactly that off-by-one, eviction unlinked the segment currently being
+  served, and a serve holds a URL rather than a file handle, so the gap is a 404 for an index the playlist
+  offered when it was asked for. Eviction now stops at the fetch point, which is the bound `evictBelow`
+  already documented for itself, and never trails `firstVisible` by more than that one segment, so a
+  consumer that stopped fetching cannot pin retention behind it.
+
+- **A live window whose source has stopped delivering is served as the finite asset it is (AE#446).** A
+  live playlist whose tail stops moving stops being fetched: AVPlayer reloads it, finds it unchanged
+  (-12888), and after a handful of those it stops polling AND stops requesting segments, including ones
+  it has never downloaded that the playlist still lists and that are resident on disk. Measured with a
+  viewer 147 s inside the window and the source frozen: six more segments at playback rate, then silence
+  with 115 s of runway sitting on disk, and a self-directed rejoin at edge-minus-HOLD-BACK when the
+  playlist finally moved again (forward step 117.76 s). While the source is not delivering and the viewer
+  still has resident segments ahead, the window is now served with an ENDLIST, same numbering, every
+  segment still listed, which carries the whole runway (166.75 s of playback, no item deaths, no -12888)
+  where the sliding-window form managed 24 s. Two cheaper answers, a byte-distinct refresh tag and a
+  clock-driven MEDIA-SEQUENCE slide, were built, measured and discarded, and are documented as dead ends:
+  what AVPlayer watches is the tail. A source that comes back is picked up by an item swap, which is the
+  AE#442 one and therefore keeps the place, and `didPlayToEndTime` at the end of such a window is not
+  forwarded as `.ended`.
+
+- **A host reader's autoreleased objects no longer strand for the length of a live session (AE#445).**
+  `HLSSegmentProducer` pumps on a bare `Thread`, which has no autorelease pool of its own, and FFmpeg's
+  read callback reaches the host's `IOReader` from inside that loop. Anything Foundation hands a custom
+  reader back at +0 (an `NSData` out of `FileHandle`, for instance) was therefore held until the session
+  ended, which on a live source that never EOFs is unbounded by construction. The engine had paid for this
+  twice already and fixed it one reader down both times; the pool now sits at `CustomIOReaderBridge`, the
+  single door every custom reader comes through, around read, seek, the size and seekability probes and
+  cancel. Measured on the new `aetherctl customio --live` harness at a 0.95 MB/s mux rate: 0.95 MB/s of
+  retention before, 0.00 after. A reader that preads into the buffer the bridge hands it allocates nothing
+  per read and was never affected by this: that arm is the harness default now and measures flat (ratio
+  -0.03 over 541 s, 0.00 with a 300 s DVR window) across 900 MB of source.
 
 - **The join lever now reads how deep the buffer is, not merely that it is non-empty (AE#440).**
   `isPlaybackBufferEmpty` is the precondition `AVPlayer.h` documents, not a measure of safety: a single

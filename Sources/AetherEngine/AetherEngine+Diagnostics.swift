@@ -23,6 +23,11 @@ extension AetherEngine {
         triggerPollHz: Double = 8
     ) {
         MallocBlockCensus.isEnabled = enabled
+        // AE#445: the same switch, because they answer halves of one question. The malloc census
+        // covers the heap; the region census covers everything phys_footprint counts that malloc
+        // never sees, which is where three rounds of that issue ran out of instrument.
+        VMRegionCensus.isEnabled = enabled
+        if !enabled { VMRegionCensus.clearBaseline() }
         if enabled {
             MallocBlockCensus.startTriggerWatch(thresholdMB: triggerThresholdMB, pollHz: triggerPollHz)
         } else {
@@ -171,6 +176,11 @@ extension AetherEngine {
                     // 30 s cadence never sampled.
                     + MallocBlockCensus.probeFragment()
                     + (MallocBlockCensus.isEnabled ? "peakMB=\(MallocBlockCensus.peakSizeInUseMB) " : "")
+                    // AE#445: which VM region the footprint grew in, by tag and by delta against
+                    // the first tick. `physFP` rising while every bucket above it is flat is the
+                    // state this issue kept ending in, and it means the growth is somewhere none of
+                    // them look, not that there is nothing to find.
+                    + VMRegionCensus.probeFragment()
                     + "avioFetchedMB=\(avioMB) "
                     // #243: only the disc pull path fills this, and only then is it printed. On a
                     // remote ISO every reader fork pulls through HTTPDiscIOReader, which

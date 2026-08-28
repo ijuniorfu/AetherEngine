@@ -20,9 +20,19 @@ import AetherEngine
 ///  - **Seekable by logical offset.** `SEEK_SET`/`SEEK_CUR` succeed inside the delivered span,
 ///    which is what makes `CustomIOReaderBridge.isSeekable` true. A forward-only reader takes a
 ///    different route through the engine and would answer a different question.
+///
+/// **The reader allocates nothing per read, and that is the point.** AE#445 round 1 measured this
+/// harness with a `FileHandle.readData` reader, which strands one autoreleased `Data` per read on
+/// the pump thread. It reproduced the reporter's signature exactly (retention ratio 1.00) and the
+/// pool fix flattened it, but the reporter's own adapter reads with `pread` into the engine's
+/// buffer and allocates nothing, so that run measured the HARNESS rather than his case. The default
+/// arm is therefore the allocation-free one: what it measures is the engine. `--foundation-reader`
+/// restores the allocating arm, which is now a control for the pool rather than the subject.
 final class PacedLiveSpoolIOReader: IOReader, @unchecked Sendable {
     private let path: String
-    private let handle: FileHandle
+    /// Foundation arm only. The POSIX arm reads through `fd` and never builds an object.
+    private let handle: FileHandle?
+    private let fd: Int32
     private let fileSize: Int64
     private let rateBytesPerSecond: Double
     private let reportsSize: Bool
@@ -38,15 +48,35 @@ final class PacedLiveSpoolIOReader: IOReader, @unchecked Sendable {
     /// Lifetime bytes handed to the engine, for the harness's own throughput line.
     private(set) var bytesRead: Int64 = 0
 
-    init(path: String, rateKbps: Int, reportsSize: Bool, wraps: Bool) throws {
+    /// AE#445: the furthest the engine ever reached BACK from the live edge, in bytes, and how many
+    /// seeks it took. A live host's ring has to keep everything the engine might still ask for, so
+    /// this is the figure that sizes it. Bounded means a ring can be bounded; growing with the
+    /// session means the host is being asked to keep the whole stream, which is a retention defect
+    /// on the engine's side of the seam even though it shows up in the host's footprint.
+    private(set) var maxLookbackBytes: Int64 = 0
+    private(set) var seekCount: Int = 0
+
+    init(path: String, rateKbps: Int, reportsSize: Bool, wraps: Bool,
+         foundationRead: Bool = false) throws {
         self.path = path
         let attrs = try FileManager.default.attributesOfItem(atPath: path)
         self.fileSize = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        guard let h = FileHandle(forReadingAtPath: path) else {
-            throw NSError(domain: "aetherctl", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "cannot open \(path)"])
+        if foundationRead {
+            guard let h = FileHandle(forReadingAtPath: path) else {
+                throw NSError(domain: "aetherctl", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "cannot open \(path)"])
+            }
+            self.handle = h
+            self.fd = -1
+        } else {
+            let descriptor = open(path, O_RDONLY)
+            guard descriptor >= 0 else {
+                throw NSError(domain: "aetherctl", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "cannot open \(path)"])
+            }
+            self.handle = nil
+            self.fd = descriptor
         }
-        self.handle = h
         self.rateBytesPerSecond = Double(rateKbps) * 1000.0 / 8.0
         self.reportsSize = reportsSize
         self.wraps = wraps
@@ -74,17 +104,31 @@ final class PacedLiveSpoolIOReader: IOReader, @unchecked Sendable {
                 let n = min(want, Int(min(available, Int64(want))))
                 let offset = wraps ? position % fileSize : position
                 let contiguous = Int(min(Int64(n), fileSize - offset))
-                handle.seek(toFileOffset: UInt64(offset))
-                let chunk = handle.readData(ofLength: contiguous)
-                if chunk.isEmpty {
-                    lock.unlock()
-                    return 0  // genuine EOF: non-wrapping spool ran out of file
+                let got: Int
+                if let handle {
+                    handle.seek(toFileOffset: UInt64(offset))
+                    let chunk = handle.readData(ofLength: contiguous)
+                    if chunk.isEmpty {
+                        lock.unlock()
+                        return 0  // genuine EOF: non-wrapping spool ran out of file
+                    }
+                    chunk.copyBytes(to: buffer, count: chunk.count)
+                    got = chunk.count
+                } else {
+                    // The reporter's hot path: pread straight into the engine's buffer. No object is
+                    // created, so no pool can drain anything, and whatever this arm retains is the
+                    // engine's own.
+                    got = pread(fd, buffer, contiguous, off_t(offset))
+                    if got == 0 {
+                        lock.unlock()
+                        return 0  // genuine EOF: non-wrapping spool ran out of file
+                    }
+                    if got < 0 { lock.unlock(); return -1 }
                 }
-                chunk.copyBytes(to: buffer, count: chunk.count)
-                position += Int64(chunk.count)
-                bytesRead += Int64(chunk.count)
+                position += Int64(got)
+                bytesRead += Int64(got)
                 lock.unlock()
-                return Int32(chunk.count)
+                return Int32(got)
             }
             if !wraps && position >= fileSize { lock.unlock(); return 0 }
             lock.unlock()
@@ -107,6 +151,8 @@ final class PacedLiveSpoolIOReader: IOReader, @unchecked Sendable {
         case 2: return -1                               // no end to seek to on a live spool
         default: return -1
         }
+        seekCount += 1
+        maxLookbackBytes = max(maxLookbackBytes, released - position)
         return position
     }
 
@@ -118,13 +164,15 @@ final class PacedLiveSpoolIOReader: IOReader, @unchecked Sendable {
     /// side reader. Same pacing, same edge.
     func makeIndependentReader() -> IOReader? {
         try? PacedLiveSpoolIOReader(path: path, rateKbps: Int(rateBytesPerSecond * 8.0 / 1000.0),
-                                    reportsSize: reportsSize, wraps: wraps)
+                                    reportsSize: reportsSize, wraps: wraps,
+                                    foundationRead: handle != nil)
     }
 
     var discImageProbeEnabled: Bool { false }
 
     func close() {
-        try? handle.close()
+        try? handle?.close()
+        if fd >= 0 { Darwin.close(fd) }
     }
 }
 
@@ -135,18 +183,21 @@ final class PacedLiveSpoolIOReader: IOReader, @unchecked Sendable {
 /// defect states itself as MB/s against the source's own mux rate rather than as a shape in a
 /// graph. macOS has no jetsam, so the run cannot be killed here: the slope IS the finding.
 func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow: Double?,
-                        reportsSize: Bool, wraps: Bool, mallocCensus: Bool) -> Int32 {
+                        reportsSize: Bool, wraps: Bool, mallocCensus: Bool,
+                        foundationReader: Bool = false) -> Int32 {
     EngineLog.handler = { print($0) }
     if mallocCensus {
         AetherEngine.setLargeAllocationCensusEnabled(true, triggerThresholdMB: 32, triggerPollHz: 8)
     }
     print("aetherctl customio --live: \(path) (rate=\(rateKbps) kbit/s seconds=\(seconds) "
           + "dvrWindow=\(dvrWindow.map { String($0) } ?? "nil") size=\(reportsSize ? "reported" : "unknown") "
-          + "wrap=\(wraps) census=\(mallocCensus))")
+          + "wrap=\(wraps) census=\(mallocCensus) "
+          + "reader=\(foundationReader ? "foundation" : "posix"))")
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
         box.value = await customLiveSpoolRun(path: path, seconds: seconds, rateKbps: rateKbps,
-                                             dvrWindow: dvrWindow, reportsSize: reportsSize, wraps: wraps)
+                                             dvrWindow: dvrWindow, reportsSize: reportsSize, wraps: wraps,
+                                             foundationReader: foundationReader)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -155,11 +206,12 @@ func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow:
 
 @MainActor
 private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dvrWindow: Double?,
-                                reportsSize: Bool, wraps: Bool) async -> Int32 {
+                                reportsSize: Bool, wraps: Bool, foundationReader: Bool) async -> Int32 {
     let reader: PacedLiveSpoolIOReader
     do {
         reader = try PacedLiveSpoolIOReader(path: path, rateKbps: rateKbps,
-                                            reportsSize: reportsSize, wraps: wraps)
+                                            reportsSize: reportsSize, wraps: wraps,
+                                            foundationRead: foundationReader)
     } catch {
         print("VERDICT: reader init failed: \(error.localizedDescription)")
         return 1
@@ -213,6 +265,10 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
     }
 
     let srcMBps = Double(rateKbps) * 1000.0 / 8.0 / 1_048_576.0
+    let lookbackMB = Double(reader.maxLookbackBytes) / 1_048_576.0
+    print(String(format: "LOOKBACK: %d seeks, deepest reach-back %.1f MB behind the live edge "
+                 + "(%.0f s of source at this rate)",
+                 reader.seekCount, lookbackMB, lookbackMB / srcMBps))
     if let f = firstSample, let l = lastSample, l.t - f.t > 30 {
         let growth = Double(l.footprint - f.footprint) / (l.t - f.t)
         print(String(format: "VERDICT: physFP %d -> %d MB over %.0fs = %.2f MB/s "

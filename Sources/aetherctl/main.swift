@@ -100,7 +100,7 @@ func printUsage() {
                          (#95: decode the loopback audio track to mono 48k WAV, print continuity stats;
                           --software runs a real session through the SW sink, exit 3 if it yields no audible PCM)
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] [--audio-index N] <file>
-      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] <file.ts>
+      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] <file.ts>
                          (AE#445: a host-owned live spool behind MediaSource.custom, paced at the mux rate,
                           never EOF, unknown size; prints physFP and its slope against that rate)
       aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
@@ -646,6 +646,11 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     let customReportsSize = takeFlag("--report-size", from: &rest)
     let customNoWrap = takeFlag("--no-wrap", from: &rest)
     let customMallocCensus = takeFlag("--malloc-census", from: &rest)
+    // AE#445 round 2: the reader arm is the measurement's subject, so it is a flag rather than a
+    // fixed choice. Default reads with pread and allocates nothing, which is the reporter's shape
+    // and measures the ENGINE; --foundation-reader restores the FileHandle arm, which allocates one
+    // autoreleased Data per read and is now the control that proves the bridge pool drains it.
+    let customFoundationReader = takeFlag("--foundation-reader", from: &rest)
     let reloadFlag = takeFlag("--reload", from: &rest)
     let switchAudioFlag = takeFlag("--switch-audio", from: &rest)
     let selectSubsFlag = takeFlag("--select-subs", from: &rest)
@@ -695,7 +700,8 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
         if customLive {
             exit(runCustomLiveSpool(path: urlArg, seconds: secondsFlag ?? 720, rateKbps: customRateKbps,
                                     dvrWindow: customDvrWindow, reportsSize: customReportsSize,
-                                    wraps: !customNoWrap, mallocCensus: customMallocCensus))
+                                    wraps: !customNoWrap, mallocCensus: customMallocCensus,
+                                    foundationReader: customFoundationReader))
         }
         exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag, reload: reloadFlag, switchAudio: switchAudioFlag, selectSubs: selectSubsFlag, extract: extractFlag, audioIndex: customAudioIndex))
     default:

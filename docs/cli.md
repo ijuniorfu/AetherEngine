@@ -228,6 +228,19 @@ is the whole measurement, and before AE#445 the custom-source live shape had no 
 defect it found (host reader callbacks ran on the pump's undrained thread) was reachable by every
 custom reader and visible to none of the engine's own buckets.
 
+**Which reader arm is running decides what the ratio is about.** The default arm reads with `pread`
+straight into the engine's buffer and allocates nothing, so whatever it retains is the ENGINE's.
+`--foundation-reader` swaps in a `FileHandle.readData` arm, which strands one autoreleased `Data`
+per read on any thread that never drains a pool, so what it retains is the HOST's.
+
+That distinction was learned the expensive way. AE#445 round 1 shipped only the Foundation arm and
+measured ratio 1.00 before the bridge pool and 0.00 after, which reads like the reporter's defect
+reproduced and fixed. It was not: his adapter `pread`s and allocates nothing, so the run had
+reproduced the harness's own retention with his signature. A harness that brings the cause with it
+matches the shape and answers a different question, and only a second arm that allocates nothing can
+tell those two apart. Run both: the Foundation arm is now the control that proves the pool drains,
+and the POSIX arm is the one that measures the engine.
+
 ## disc-inspect
 
 Walks a local DVD-Video or Blu-ray ISO at the filesystem layer (FFmpeg-free) and reports what `DiscReader.wrap` makes of it: the recognition verdict and the stages it went through (ISO9660 / UDF signatures, BDMV / VIDEO_TS contents, resolved extents), so a disc that fails to play is debuggable instead of surfacing a bare `INVALIDDATA`. It also prints the full selectable-title list with each title's duration and chapter offsets (the same titles + chapters the engine exposes via `discTitles` / `discChapters`). Exit 0 when the image is recognized as playable, else 1. `--dump` adds the verbose UDF volume structure under the `.demux` log.

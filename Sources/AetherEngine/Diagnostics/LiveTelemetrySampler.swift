@@ -247,22 +247,31 @@ final class LiveTelemetrySampler {
             accumulatedFrameDelaySeconds = nil
             avSyncGapMs = engine.lastAVGapMs  // HLSSegmentProducer audio-gate-open vs video-gate-open (native path only)
             if let player = engine.currentAVPlayer, let item = player.currentItem {
-                let readings = await readNativeOffMain(player: player, item: item)
+                var readings = await readNativeOffMain(player: player, item: item)
                 // stop() may have cancelled this tick, or a reload seam may have swapped the
                 // player/item, while the read was in flight; publishing now would leak a stale
                 // snapshot and yield-gate tick into the current session.
                 guard !Task.isCancelled,
                       engine.currentAVPlayer === player,
                       player.currentItem === item else { return }
+                // AE#443: the read above covers this item; the host carries what the items before it
+                // transferred. Read after the guard, so the two halves describe the same swap state.
+                readings.networkTransferredBytes = Self.foldRetired(
+                    readings.networkTransferredBytes, retired: engine.nativeHost?.retiredItemTransferredBytes ?? 0)
+                readings.droppedFrameCount = Self.foldRetired(
+                    readings.droppedFrameCount, retired: engine.nativeHost?.retiredItemDroppedFrames ?? 0)
+                readings.droppedFramesLifetimeSum = readings.droppedFrameCount ?? 0
                 nativeReadings = readings
                 droppedFrameCount = readings.droppedFrameCount
                 networkThroughputMbps = readings.networkThroughputMbps
                 networkTransferredBytes = readings.networkTransferredBytes
                 forwardBufferSeconds = readings.forwardBufferSeconds
             } else {
-                droppedFrameCount = nil
+                // AE#443: an item swap has a gap where the host holds no current item, and reporting
+                // nothing through it reads as "the counter is gone" rather than "nothing new since".
+                droppedFrameCount = Self.foldRetired(nil, retired: engine.nativeHost?.retiredItemDroppedFrames ?? 0)
                 networkThroughputMbps = nil
-                networkTransferredBytes = nil
+                networkTransferredBytes = Self.foldRetired(nil, retired: engine.nativeHost?.retiredItemTransferredBytes ?? 0)
                 forwardBufferSeconds = nil
             }
 
@@ -457,6 +466,15 @@ final class LiveTelemetrySampler {
     nonisolated static func sessionTotal<T: BinaryInteger>(perEntry values: [T]) -> T? {
         let known = values.filter { $0 >= 0 }
         return known.isEmpty ? nil : known.reduce(0, +)
+    }
+
+    /// AE#443: adds what the session's retired items carried to what the current one reports.
+    ///
+    /// nil + nothing retired stays nil, because "this path cannot report it" is not zero. nil with a
+    /// retired total is the swap gap, and the honest reading there is the total so far, not silence.
+    nonisolated static func foldRetired<T: BinaryInteger>(_ current: T?, retired: T) -> T? {
+        guard let current else { return retired > 0 ? retired : nil }
+        return current + retired
     }
 
     /// The real batch, run on `readQueue`: one accessLog() shared by the snapshot fields and the

@@ -44,4 +44,35 @@ struct Issue443SessionCounterTests {
     func measuredZero() {
         #expect(LiveTelemetrySampler.sessionTotal(perEntry: [0, 0]) == 0)
     }
+
+    // MARK: - Round 2: the same scope error one layer further out
+
+    /// The reporter's 6.53.0 re-run: summing the entries fixed the fall inside one item, and the
+    /// number still restarted when the #93 stage-2 recovery replaced the ITEM under a session that
+    /// never stopped (1229.1 MB, the field absent for the swap, then 34.3 MB). An item's access log
+    /// holds only its own entries, so the host has to carry what the retired ones transferred.
+    @Test("a swapped item's total carries into the session's")
+    func foldsRetiredItems() {
+        #expect(LiveTelemetrySampler.foldRetired(Int64(34_300_000), retired: 1_229_100_000)
+                == 1_263_400_000)
+    }
+
+    @Test("the swap gap reports the total so far rather than nothing")
+    func gapReportsRetiredTotal() {
+        // Between the two items there is no current item to read, and publishing nil there is what
+        // made the field vanish from the tick line mid-session.
+        #expect(LiveTelemetrySampler.foldRetired(nil, retired: Int64(1_229_100_000)) == 1_229_100_000)
+    }
+
+    @Test("nothing measurable and nothing retired stays nil")
+    func nilStaysNilBeforeAnySwap() {
+        // A path that cannot report the field at all must not start reading as a measured zero just
+        // because the fold exists.
+        #expect(LiveTelemetrySampler.foldRetired(nil, retired: Int64(0)) == nil)
+    }
+
+    @Test("a measured zero on a fresh item still adds to what came before")
+    func freshItemZeroKeepsTheTotal() {
+        #expect(LiveTelemetrySampler.foldRetired(Int64(0), retired: 1_229_100_000) == 1_229_100_000)
+    }
 }

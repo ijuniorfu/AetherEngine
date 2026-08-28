@@ -72,6 +72,22 @@ final class NativeAVPlayerHost {
     /// AE#440: keeps the "left the wait alone" line to one per load. It reports the depth that failed
     /// the floor, which is the only way to tell a starved join from a rate evaluation after the fact.
     private var liveJoinThinBufferLogged: Bool = false
+    /// AE#443: what the items this host has already retired transferred, so `rx` keeps describing the
+    /// SESSION across an item swap the session survives.
+    ///
+    /// Summing an item's access-log entries fixed the fall inside one item; an item's log holds only
+    /// its own entries, so the number still restarted from zero the moment the #93 stage-2 recovery
+    /// replaced the item under a session that never stopped. Measured by the reporter on 6.53.0:
+    /// 1229.1 MB, the field absent for the swap, then 34.3 MB. Same scope error as the two before it,
+    /// one layer further out.
+    ///
+    /// Folded at the swap rather than at the unload: the in-place handover deliberately keeps the old
+    /// item playing until `replaceCurrentItem`, and folding earlier would let a tick read the outgoing
+    /// item AND the fold and count it twice. At the swap, the sampler's own
+    /// `player.currentItem === item` guard covers the race.
+    private(set) var retiredItemTransferredBytes: Int64 = 0
+    private(set) var retiredItemDroppedFrames: Int = 0
+
     /// AE#287 bookkeeping, cleared with the item in `unloadCurrentItem`.
     private var prematureEndRecoveryAttempts: Int = 0
     private var lastPrematureEndRecoveryPlayhead: Double?
@@ -676,6 +692,9 @@ final class NativeAVPlayerHost {
             }
         }
 
+        // AE#443: the outgoing item takes its access log with it. Only reachable on an in-place
+        // swap; the plain teardown already dropped the item and cleared these totals with it.
+        if let outgoing = avPlayer.currentItem { retireItemCounters(outgoing) }
         avPlayer.replaceCurrentItem(with: item)
 
         // Explicitly load each key separately: AVPlayerItem(asset:)+KVO was observed stuck in .unknown (build-123), and separate awaits let DrHurt's "1 success, 3 failures" pattern identify which key -1008 hits.
@@ -1422,6 +1441,19 @@ final class NativeAVPlayerHost {
 
     // MARK: - Internal
 
+    /// AE#443: folds a departing item's access-log totals into the session's.
+    ///
+    /// Both fields are per-entry totals and the entries belong to the item, so nothing here survives
+    /// the swap on its own. `sessionTotal` skips entries that report a field as unavailable, which is
+    /// why a nil is a zero contribution rather than a reason to drop the fold.
+    private func retireItemCounters(_ item: AVPlayerItem) {
+        guard let events = item.accessLog()?.events else { return }
+        retiredItemTransferredBytes &+= LiveTelemetrySampler.sessionTotal(
+            perEntry: events.map(\.numberOfBytesTransferred)) ?? 0
+        retiredItemDroppedFrames &+= LiveTelemetrySampler.sessionTotal(
+            perEntry: events.map(\.numberOfDroppedVideoFrames)) ?? 0
+    }
+
     private func unloadCurrentItem(inPlaceSwap: Bool = false) {
         if let to = timeObserver {
             avPlayer.removeTimeObserver(to)
@@ -1490,6 +1522,9 @@ final class NativeAVPlayerHost {
         avPlayer.replaceCurrentItem(with: nil)
         playerItem = nil
         isReady = false
+        // AE#443: a fresh load is a fresh session, so the retired items' bytes go with the old one.
+        retiredItemTransferredBytes = 0
+        retiredItemDroppedFrames = 0
         currentTime = 0
         renderedTime = 0
         duration = 0

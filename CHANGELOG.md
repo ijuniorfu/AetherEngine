@@ -10,7 +10,36 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **A live join no longer holds its first frame still while AVPlayer second-guesses the cushion it
+  already has: `LoadOptions.liveJoinStartsImmediately` now defaults to `true` (AE#440).** The device A/B
+  the opt-in was waiting for ran on 6.53.0: two runs of ten channel changes on the reporting stack, press
+  to moving picture fell from 6.4 / 6.5 / 7.2 s to 4.3 / 4.8 / 5.1 / 5.6 s, press to first PICTURE was
+  unchanged at 3.4 to 3.9 s in both arms, and stalls and dropped frames stayed at zero in both. What it
+  removes is exactly the frozen tail. Cold joins, where the tuner spin-up is inside the first byte, were
+  identical in both arms, the guards keeping the lever out of the starved case. Hosts that want
+  AVPlayer's own policy for the join set the option `false`.
+
+### Fixed
+
+- **The join lever now reads how deep the buffer is, not merely that it is non-empty (AE#440).**
+  `isPlaybackBufferEmpty` is the precondition `AVPlayer.h` documents, not a measure of safety: a single
+  served fragment reads `false` exactly as a four-second cushion does. Sampling the real hold on hardware
+  found 3.7 to 4.9 s ahead of the playhead throughout, which is why cutting it short cost nothing there;
+  behind the same flag a genuinely starved join holds a fraction of a second, and starting there trades a
+  still picture for an immediate stall. The lever now also requires 1.5 s of contiguous buffer ahead of
+  the playhead, an island past a gap not counting, and says so once per load when the floor is not met.
+- **The lever is evaluated when the waiting REASON changes, not only when the transport status does
+  (AE#440).** A live join runs `waitingToPlay(EvaluatingBufferingRate)` -> `waitingToPlay(ToMinimizeStalls)`
+  -> `playing`, and only the middle stretch is the hold that may be cut short. Since both waiting states
+  are the same `timeControlStatus`, whether the lever ever saw its own case rested on AVFoundation
+  happening to republish an unchanged status. `reasonForWaitingToPlay` is now observed in its own right.
+- **The readings behind that decision are taken off the main actor (AE#422 applied to AE#440).** The
+  guard runs while AVPlayer holds a presented frame, which on the starved half of the two mechanisms is
+  exactly the state where the media server is least likely to answer, and it was reading
+  `isPlaybackBufferEmpty` synchronously on the main actor. All three figures are now one batched
+  off-main read, and the decision is re-checked against the state that exists after it returns.
 
 ## [6.54.0] - 2026-08-28
 

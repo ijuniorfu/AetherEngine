@@ -107,15 +107,18 @@ load and `playing` at the roll (AE#440).
 
 `--fast-zap` sets `LoadOptions.liveJoinProfile = .fastZap` for the load. `live` has carried the flag for its own raw-TS fixture since AE#195, but that fixture has no upstream playlist, and the served `#EXT-X-TARGETDURATION` is floored by the UPSTREAM's observed arrival cadence (`LiveCadencePolicy`), which is what sizes the holdback the first serve waits for. So fastZap against an origin of one's own, the shape a downstream player actually ships, could not be driven from here at all. Measured on the same 1 s-GOP seed, `--preroll 0 --realtime`: raw TS with no playlist serves at 1.325 s on TARGETDURATION 1 (holdback 3 s, full cushion), the same content behind an `hlsfixture` origin cutting 2 s segments serves on TARGETDURATION **2** (holdback 6 s) although the engine re-cut it at 1 s. Pair it with `--live`, and read the first-serve line (AE#374) rather than a first-frame stopwatch.
 
-`--live-start-immediately` sets `LoadOptions.liveJoinStartsImmediately`, which cuts AVPlayer's
-stall-avoidance hold short once at the live join (AE#440). **The hold it addresses does not reproduce on
-this harness**, and that is itself the finding: measured on 6 window geometries against the raw-TS fixture
+`--live-start-immediately` / `--no-live-start-immediately` set `LoadOptions.liveJoinStartsImmediately`,
+which cuts AVPlayer's stall-avoidance hold short once at the live join (AE#440). It is **on by default**
+since 6.55.0, so `--no-live-start-immediately` is the flag that drives the control arm now; the positive
+one is still accepted. **The hold it addresses does not reproduce on this harness**, and that is itself the finding: measured on 6 window geometries against the raw-TS fixture
 at `--realtime --preroll 0` (shallow window under the holdback, window exactly at it, and a deep window
 from `--preroll 6/12/30`), the gap between `layer.isReadyForDisplay=true` and `timeControlStatus=playing`
 stayed between 10 and 60 ms every time, against 1.5 to 2.8 s reported on an Apple TV 4K over the same
 shape.
 Loopback answers at memory speed, so AVPlayer's buffering-rate evaluation concludes at once. The flag is
-here to drive the engine end of a device A/B, not to prove anything from a Mac.
+here to drive the engine end of a device A/B, not to prove anything from a Mac. That A/B has since run
+(AE#440, on 6.53.0) and is what turned the default on; see the live-join section of `api.md` for its
+numbers.
 
 `--header "Name: Value"` (repeatable) fills `LoadOptions.httpHeaders` and, on `--live-ingest`, the reader's own fetches. Origins that enforce a per-request `User-Agent` / `Referer` / `Authorization` (tokenized IPTV, STB profiles) could not be driven from the CLI at all before AE#363; pair it with `hlsfixture --require-header` below to have both ends of the contract in one run.
 

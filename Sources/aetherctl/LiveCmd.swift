@@ -122,7 +122,8 @@ func runLive(
     pacingPreroll: Double? = nil,
     freezeAfter: Double? = nil,
     rewindBeforeFreeze: Double? = nil,
-    forceRecoveryReloadAt: Double? = nil
+    forceRecoveryReloadAt: Double? = nil,
+    rewindHold: Double? = nil
 ) -> Int32 {
     // Relative timestamps make join latency (readyToPlay et al.) readable off the log (AE#195).
     let logEpoch = Date()
@@ -142,6 +143,7 @@ func runLive(
           (freezeAfter.map { " freeze-after=\($0)s" } ?? "") +
           (rewindBeforeFreeze.map { " rewind-before-freeze=\($0)s" } ?? "") +
           (forceRecoveryReloadAt.map { " force-recovery-reload-at=\($0)s" } ?? "") +
+          (rewindHold.map { " rewind-hold=\($0)s" } ?? "") +
           (discontinuityAt.map { " discontinuity-at=\($0)s" } ?? "") +
           (measureRSS ? " measure-rss=true" : "") +
           (reportCacheBytes ? " report-cache-bytes=true" : ""))
@@ -207,6 +209,14 @@ func runLive(
         if reloadTest {
             box.value = await liveReloadTest(url: liveURL, seconds: playSeconds,
                                              dvrWindow: dvrWindow ?? 600)
+            fixture.stop()
+            CFRunLoopStop(CFRunLoopGetMain())
+            return
+        }
+        if let behind = rewindHold {
+            box.value = await liveRewindHoldTest(url: liveURL, seconds: playSeconds,
+                                                 dvrWindow: dvrWindow ?? 60,
+                                                 rewindBehind: behind)
             fixture.stop()
             CFRunLoopStop(CFRunLoopGetMain())
             return
@@ -735,4 +745,109 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
     print(String(format: "VERDICT: live-freeze position held (largest step %.2fs, advanced %.2fs after the freeze)",
                  maxForwardSnap, advanceAfterFreeze))
     return 0
+}
+
+/// AE#441 follow-up: park the playhead just above the resident floor and HOLD there, which is the one
+/// live regime the harness could not drive (`--freeze-after` kills the source, `--rewind-test` samples
+/// five seconds). The retest reported the advertised `lowerBound` sitting a few seconds ABOVE the
+/// rendered playhead for minutes on end while playback stayed clean, and asked whether that inversion
+/// is the bound doing its job or the bound outrunning the reader.
+///
+/// The two are separable, and only one of them is a defect. `residentFloorOutputSeconds()` walks what
+/// is on DISK; `notePlayhead` records what is RENDERED, and everything between them was already handed
+/// to AVPlayer through the segment-serve path. The malign version is the window overtaking the
+/// consumer's FETCH point, which `noteWindowSlideRelativeToConsumer` already names and latches. So this
+/// leg samples the inversion and counts that line.
+@MainActor
+private func liveRewindHoldTest(url: URL, seconds playSeconds: Double, dvrWindow: Double,
+                                rewindBehind: Double) async -> Int32 {
+    let slides = SlideCounter()
+    let prior = EngineLog.handler
+    EngineLog.handler = { line in slides.note(line); prior?(line) }
+    defer { EngineLog.handler = prior }
+
+    let engine: AetherEngine
+    do {
+        engine = try AetherEngine()
+    } catch {
+        print("VERDICT: live-rewind-hold FAIL: engine init error: \(error.localizedDescription)")
+        return 1
+    }
+
+    var options = LoadOptions(isLive: true)
+    options.suppressDisplayCriteria = true
+    options.dvrWindowSeconds = dvrWindow
+    do {
+        try await engine.load(url: url, options: options)
+    } catch {
+        print("VERDICT: live-rewind-hold FAIL: load error: \(error.localizedDescription)")
+        engine.stop()
+        return 1
+    }
+
+    // Fill the window before rewinding: parking just above the floor only means anything once the
+    // floor is retention rather than the session's own start.
+    let fillFor = min(max(10.0, dvrWindow * 0.6), playSeconds * 0.4)
+    print(String(format: "  FILL: %.0fs before the rewind (window=%.0fs)", fillFor, dvrWindow))
+    let startTime = Date()
+    while Date().timeIntervalSince(startTime) < fillFor {
+        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
+
+    let target = max(0, engine.liveEdgeTime - rewindBehind)
+    print(String(format: "  REWIND: edge=%.2fs target=%.2fs (%.0fs behind)",
+                 engine.liveEdgeTime, target, rewindBehind))
+    await engine.seek(to: target)
+    print(String(format: "  REWIND: landed t=%.2fs behind=%.2fs range=%@",
+                 engine.currentTime, engine.liveEdgeTime - engine.currentTime,
+                 engine.seekableLiveRange.map { String(format: "%.2f...%.2f", $0.lowerBound, $0.upperBound) } ?? "nil"))
+
+    var maxInversion: Double = 0
+    var invertedTicks = 0
+    var stalledTicks = 0
+    var prevT = engine.currentTime
+    let holdTicks = max(1, Int(playSeconds - fillFor))
+    for _ in 0..<holdTicks {
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        let t = engine.currentTime
+        let edge = engine.liveEdgeTime
+        let range = engine.seekableLiveRange
+        let floor = range?.lowerBound ?? 0
+        let inversion = floor - t
+        if inversion > 0.05 { invertedTicks += 1; maxInversion = max(maxInversion, inversion) }
+        if t <= prevT + 0.05 { stalledTicks += 1 }
+        prevT = t
+        print(String(format: "  t=%.2fs edge=%.2fs behind=%.2fs floor=%.2fs floor-t=%+.2fs buffered=%.2fs",
+                     t, edge, max(0, edge - t), floor, inversion, engine.bufferedPosition))
+    }
+
+    let finalState = engine.state
+    engine.stop()
+    EngineLog.handler = prior
+
+    print("")
+    print("=== AE#441 REWIND-HOLD LEG ===")
+    print(String(format: "  ticks with floor above the playhead: %d/%d (max %.2fs)",
+                 invertedTicks, holdTicks, maxInversion))
+    print(String(format: "  ticks where the clock did not advance: %d/%d", stalledTicks, holdTicks))
+    print("  'live window slid past the consumer': \(slides.count)")
+    print("  final state: \(finalState)")
+
+    // The inversion alone is not the defect; the window passing the consumer's FETCH point is.
+    if slides.count > 0 {
+        print("VERDICT: live-rewind-hold WINDOW PASSED THE CONSUMER (\(slides.count) latched line(s))")
+        return 1
+    }
+    print(String(format: "VERDICT: live-rewind-hold reader stayed above the floor "
+                 + "(max inversion %.2fs, %d stalled tick(s))", maxInversion, stalledTicks))
+    return 0
+}
+
+private final class SlideCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var count = 0
+    func note(_ line: String) {
+        lock.lock(); defer { lock.unlock() }
+        if line.contains("live window slid past the consumer") { count += 1 }
+    }
 }

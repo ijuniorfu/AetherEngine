@@ -230,6 +230,7 @@ func runLive(
                                              dvrWindow: dvrWindow ?? 1800,
                                              freezeAt: freezeAt,
                                              rewindBehind: rewindBeforeFreeze ?? 300,
+                                             expectsRecovery: unfreezeAfter != nil,
                                              forceRecoveryReloadAt: forceRecoveryReloadAt,
                                              blockingReload: blockingReload)
             fixture.stop()
@@ -614,6 +615,53 @@ private final class FreezeRecoveryCounters: @unchecked Sendable {
     private(set) var lastSegmentFetched = -1
     private(set) var playlistPolls = 0
     private(set) var withdrewBlockingReload = false
+    /// AE#446 round 3: the axis-free half of the verdict. A forward step in seconds cannot separate a
+    /// lost position from a source discontinuity the session correctly folded (a reconnect that
+    /// restarts the seed loop leaves a seam, and the playhead legitimately steps by it). Which
+    /// SEGMENTS the consumer fetched is a statement about content, and it survives any axis.
+    private(set) var fetchedBeforeSwap: Set<Int> = []
+    private(set) var fetchedAfterSwap: Set<Int> = []
+    private(set) var segmentDuration: Double = 0
+    /// AE#446 round 3: the engine gave the source read up and handed the session to the host. That is
+    /// the honest end of a long outage, so a run with no rejoin means two different things depending
+    /// on WHEN it happened: after the runway ran out it is the documented ceiling, and while the
+    /// closed window was still feeding the consumer it is the defect this round fixed.
+    private(set) var handedToHost = false
+    private(set) var handedWhileRunwayPlaying = false
+    private var runwayEnded = false
+    private var didSwap = false
+
+    /// AE#446 round 3: segments the window listed, that the consumer had not reached, and that the
+    /// rejoin then jumped over. nil when no rejoin happened.
+    ///
+    /// Measured against the LOWEST index fetched after the swap, not the highest. A fresh item probes
+    /// its own live edge before the stashed seek lands (one fetch, tens of segments up), so the
+    /// highest index says where the playlist ends rather than where the viewer resumed, and counting
+    /// the holes below it invents a skip out of a run that ended.
+    var segmentsSkippedAcrossSwap: Int? {
+        lock.lock(); defer { lock.unlock() }
+        guard let last = fetchedBeforeSwap.max(), let resume = fetchedAfterSwap.min() else {
+            return nil
+        }
+        return Swift.max(0, resume - (last + 1))
+    }
+
+    /// AE#446 round 3: how far BELOW the place it held the rejoin re-entered, in segments, against
+    /// what a landing is entitled to re-fetch.
+    ///
+    /// A re-fetch is not a re-watch: AVPlayer buffers backward around any landing, by a fixed 6 to 8 s
+    /// of content whatever the segment size, so the allowance is that lookback rounded up to whole
+    /// segments plus the one the landing sits in, and it has to be computed from the cut size rather
+    /// than fixed in seconds. Three 5 s segments below a landing is that buffering; ten 1.3 s segments
+    /// is a viewer watching the same minute twice.
+    var rejoinBacktrack: (segments: Int, allowance: Int, seconds: Double)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let last = fetchedBeforeSwap.max(), let resume = fetchedAfterSwap.min(),
+              segmentDuration > 0 else { return nil }
+        let depth = Swift.max(0, (last + 1) - resume)
+        let allowance = Int((8.0 / segmentDuration).rounded(.up)) + 1
+        return (depth, allowance, Double(depth) * segmentDuration)
+    }
 
     /// AE#446: the whole question after a source freeze is whether the CONSUMER keeps asking for the
     /// runway the cache already holds. Counted from the server's own arrival line, so a silent client
@@ -632,6 +680,22 @@ private final class FreezeRecoveryCounters: @unchecked Sendable {
            let idx = Int(line[r.upperBound..<dot]) {
             segmentFetches += 1
             lastSegmentFetched = max(lastSegmentFetched, idx)
+            if didSwap { fetchedAfterSwap.insert(idx) } else { fetchedBeforeSwap.insert(idx) }
+        }
+        // The swap is the moment the session goes back to being live; everything fetched from here on
+        // is the rejoin's choice of where to come back.
+        if line.contains("#446 the window ran out and the source is delivering again")
+            || line.contains("nudge did not revive the consumer") { didSwap = true }
+        if line.contains("#446 the window ran out") { runwayEnded = true }
+        if line.contains("requesting host retune") || line.contains("publishing liveSourceReset") {
+            handedToHost = true
+            if !runwayEnded { handedWhileRunwayPlaying = true }
+        }
+        // The cut size the run is actually producing, so a backtrack can be stated in seconds
+        // rather than in segments (a segment count means nothing without it).
+        if line.contains("finalized:"), let r = line.range(of: "dur="),
+           let d = Double(line[r.upperBound...].prefix(while: { $0.isNumber || $0 == "." })), d > 0 {
+            segmentDuration = d
         }
         if line.contains("[HLSLocalServer] GET"), line.contains("media.m3u8") { playlistPolls += 1 }
         if line.contains("#446 source stopped delivering") { withdrewBlockingReload = true }
@@ -655,6 +719,7 @@ private final class FreezeRecoveryCounters: @unchecked Sendable {
 @MainActor
 private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Double,
                             freezeAt: Double, rewindBehind: Double,
+                            expectsRecovery: Bool = false,
                             forceRecoveryReloadAt: Double? = nil,
                             blockingReload: Bool? = nil) async -> Int32 {
     let counters = FreezeRecoveryCounters()
@@ -767,16 +832,68 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
     print("  after the freeze: segment fetches=\(counters.segmentFetches) "
           + "(last seg\(counters.lastSegmentFetched)) playlist polls=\(counters.playlistPolls) "
           + "blocking-reload withdrawn=\(counters.withdrewBlockingReload)")
+    let skipped = counters.segmentsSkippedAcrossSwap
+    let backtrack = counters.rejoinBacktrack
+    if let last = counters.fetchedBeforeSwap.max(), !counters.fetchedAfterSwap.isEmpty {
+        print("  across the swap: consumed through seg\(last), resumed into seg"
+              + counters.fetchedAfterSwap.sorted().map(String.init).prefix(4).joined(separator: ",")
+              + ", never fetched \(skipped ?? 0) segment(s) in between"
+              + (backtrack.map {
+                    String(format: ", re-fetched %d segment(s) below it (%.1fs, lookback allows %d)",
+                           $0.segments, $0.seconds, $0.allowance)
+                 } ?? ""))
+    }
     print("  recovery lines: itemDeath=\(counters.itemDeaths) edgeRejoin=\(counters.edgeRejoins) "
           + "keptPlace=\(counters.keptPlace) "
           + "reopen=\(counters.reopenAttempts) fullReload=\(counters.fullReloads) "
           + "unsatisfiable503=\(counters.unsatisfiable)")
     print("  final state: \(finalState)")
 
-    // A snap is the reported defect: the playhead leaves its parked position for the edge in one step.
-    let snapped = maxForwardSnap > 30.0
-    if snapped {
-        print(String(format: "VERDICT: live-freeze POSITION LOST (forward step %.2fs)", maxForwardSnap))
+    // The reported defect, in the terms the content is in: segments the window listed, that the
+    // consumer had not reached, and that the rejoin then jumped over. A forward step in seconds is
+    // printed alongside but does not decide: a fixture reconnect that restarts its seed loop leaves a
+    // real source seam, and a playhead legitimately steps by it without skipping a single segment.
+    // AE#446 round 3: a source that comes back and is never noticed is the failure this leg could
+    // not see. It read as healthy on every seconds-based number (the playhead had not moved, so it
+    // had not moved WRONG) while the session sat on its last frame for the rest of the run, because
+    // the no-cut watchdog had abandoned the read the recovery was waiting on 35 s in.
+    if expectsRecovery, counters.fetchedAfterSwap.isEmpty {
+        if counters.handedWhileRunwayPlaying {
+            print("VERDICT: live-freeze NO REJOIN (the source read was given up while the closed "
+                  + "window was still feeding the consumer, so the source coming back was never "
+                  + "seen; final state \(finalState))")
+            return 1
+        }
+        if counters.handedToHost {
+            // The ceiling, not a defect: the outage outlived the runway and the hold budget, so the
+            // engine handed the session over. aetherctl subscribes no retune, which is why the run
+            // ends here rather than on a fresh tune.
+            print("VERDICT: live-freeze handed to the host after the runway ran out "
+                  + "(no in-CLI retune handler; final state \(finalState))")
+            return 0
+        }
+        print("VERDICT: live-freeze NO REJOIN (the source delivered again and the session never "
+              + "went live; final state \(finalState))")
+        return 1
+    }
+    if let skipped, skipped > 0 {
+        print("VERDICT: live-freeze POSITION LOST (\(skipped) segment(s) skipped across the rejoin)")
+        return 1
+    }
+    // The other direction, and the one a seconds-only verdict reads as healthy: the rejoin lands
+    // BELOW the place it held and the viewer re-watches. Bounded by what AVPlayer buffers backward
+    // around any landing, which is content and therefore scales with the cut size.
+    if let backtrack, backtrack.segments > backtrack.allowance {
+        print(String(format: "VERDICT: live-freeze POSITION LOST (re-entered %d segments / %.1fs of "
+                     + "already-played content, past the %d the landing's lookback explains)",
+                     backtrack.segments, backtrack.seconds, backtrack.allowance))
+        return 1
+    }
+    // No swap in the run at all (no thaw, or the runway outlived it): fall back to the step, which is
+    // all there is to read when nothing rejoined.
+    if counters.fetchedAfterSwap.isEmpty, maxForwardSnap > 30.0 {
+        print(String(format: "VERDICT: live-freeze POSITION LOST (forward step %.2fs, no rejoin in this run)",
+                     maxForwardSnap))
         return 1
     }
     print(String(format: "VERDICT: live-freeze position held (largest step %.2fs, advanced %.2fs after the freeze)",

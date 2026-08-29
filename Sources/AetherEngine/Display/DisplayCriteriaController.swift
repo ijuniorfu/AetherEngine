@@ -334,15 +334,28 @@ final class DisplayCriteriaController {
         case exact(panelRate: Double)
         /// The panel is running an exact integer multiple of the requested rate. Every frame lands on a
         /// whole number of refreshes, which is the mode tvOS itself picks for sub-50 content (a 25.000
-        /// request measured on a panel held at 50.002 Hz, #449), so nothing is wrong with it. It is
-        /// deliberately *not* treated as settled: unlike an exact match it cannot rule out a switch to the
-        /// requested rate still being in flight, because both cadences satisfy the request.
+        /// request measured on a panel held at 50.002 Hz, #449), so nothing is wrong with it.
+        ///
+        /// Unlike an exact match this reading cannot rule out a switch to the requested rate still being
+        /// in flight, because both cadences satisfy the request. It settles only after `panelMultipleDwellMs`
+        /// of holding it unbroken; see `rateOnlySwitchIsSettled`.
         case multiple(panelRate: Double, factor: Int)
         /// Measured, and neither. A switch may still be running, or the panel ignored the criteria.
         case different(panelRate: Double)
         /// No fresh display-link tick, or no rate was requested. The panel is not presenting frames, which
         /// is exactly what a blanked mid-handshake panel looks like from here.
         case unmeasured
+
+        /// Whether two readings describe the same panel state. Deliberately not `==`: the per-tick figure
+        /// moves in the fourth decimal, so comparing the hertz would restart the dwell on nearly every
+        /// tick and no run could ever complete.
+        func describesSameStateAs(_ other: PanelRateRelation) -> Bool {
+            switch (self, other) {
+            case (.exact, .exact), (.different, .different), (.unmeasured, .unmeasured): true
+            case (.multiple(_, let a), .multiple(_, let b)): a == b
+            default: false
+            }
+        }
 
         var logDescription: String {
             switch self {
@@ -395,11 +408,59 @@ final class DisplayCriteriaController {
     /// not cover either, is a range transition started elsewhere (a preceding `reset()`, a sole-writer
     /// host) that is still running under a rate the panel never had to change: real switches on this
     /// hardware measure 2.8 s, so the cap was already releasing ~800 ms into them.
+    /// Round 2 (#449) adds the integer multiple, and it has to be earned rather than read once, which is
+    /// the whole difference between the two cases.
+    ///
+    /// An exact match settles on sight because the requested state and the observed state are the same,
+    /// so a pending switch, if there is one, is a switch to what is already on screen. A multiple cannot
+    /// argue that: a 25.000 request is satisfied by the 50.002 Hz the panel already runs AND by a 25 Hz
+    /// mode it might still be switching to. What separates them is time. A real switch on this hardware
+    /// takes ~2.8 s and blanks the panel while it runs, so a display link that keeps delivering ticks at
+    /// an unbroken cadence is a panel that is presenting, not one mid-handshake. `panelMultipleDwellMs`
+    /// of that is the evidence, and any tick that reads a different cadence or none at all restarts it.
+    ///
+    /// What this does NOT claim is that no switch will begin later. Nothing here could: the 2 s cap never
+    /// covered that either, since a 2.8 s switch outlives it and the gate was already releasing ~800 ms
+    /// into one. The choice is between releasing into a hypothetical blank and holding a frame still for
+    /// two seconds on every 25 fps join, which the reporter measured at 2.05 s and 2.02 s of visibly
+    /// frozen picture on a panel that was demonstrably presenting throughout. The `mode check (native)`
+    /// line a few seconds later is the witness for the residue: it reads the panel again, so a switch
+    /// that did arrive late is visible in the same capture rather than assumed away.
     nonisolated static func rateOnlySwitchIsSettled(attribution: CriteriaAttribution,
-                                                    relation: PanelRateRelation) -> Bool {
+                                                    relation: PanelRateRelation,
+                                                    heldForMs: Int) -> Bool {
         guard attribution == .engineRateOnly else { return false }
-        if case .exact = relation { return true }
-        return false
+        switch relation {
+        case .exact: return true
+        case .multiple: return heldForMs >= panelMultipleDwellMs
+        case .different, .unmeasured: return false
+        }
+    }
+
+    /// How long the panel must hold an integer multiple of the requested rate before that reading is
+    /// allowed to settle a rate-only write (#449).
+    ///
+    /// Six Stage 2 polls, and more than seven frame intervals at the slowest mode tvOS switches to
+    /// (23.976 Hz, 41.7 ms), so a blank cannot hide inside it. Against the 2 s cap it returns 85% of the
+    /// wait; against a switch that begins after it, nothing was protecting that case anyway.
+    nonisolated static let panelMultipleDwellMs = 300
+
+    /// An unbroken run of the same panel reading, in Stage 2 milliseconds.
+    struct PanelCadenceRun: Equatable {
+        let relation: PanelRateRelation
+        let startedAtMs: Int
+
+        func heldMs(atMs: Int) -> Int { max(0, atMs - startedAtMs) }
+    }
+
+    /// Carry a run forward, or start a new one where the reading changed. A panel that blanks mid-dwell
+    /// reads `.unmeasured` for those ticks, which is a different state and therefore a new run: that is
+    /// the case the dwell exists to catch.
+    nonisolated static func extendCadenceRun(_ run: PanelCadenceRun?,
+                                             relation: PanelRateRelation,
+                                             nowMs: Int) -> PanelCadenceRun {
+        if let run, run.relation.describesSameStateAs(relation) { return run }
+        return PanelCadenceRun(relation: relation, startedAtMs: nowMs)
     }
 
     /// How stale a display-link tick may be and still describe the panel's current cadence (#449). Three
@@ -755,20 +816,32 @@ final class DisplayCriteriaController {
                                      totalMs: Self.elapsedMs(since: entry),
                                      startBeforeGateMs: preGateStartMs, switchMs: switchMs)
         }
+        // #449 round 2: the unbroken run of the same panel reading, so a cadence that only settles a
+        // multiple after a dwell can be asked how long it has actually held it.
+        var cadenceRun: PanelCadenceRun?
         while !Self.isBudgetSpent(elapsedMs: Self.elapsedMs(since: stage2Entry), budgetMs: capMs) {
             try? await Task.sleep(for: .milliseconds(50))
+            let stage2Ms = Self.elapsedMs(since: stage2Entry)
+            let relation = panelRelation()
+            let run = Self.extendCadenceRun(cadenceRun, relation: relation, nowMs: stage2Ms)
+            cadenceRun = run
+            let heldMs = run.heldMs(atMs: stage2Ms)
             if observation.hasNewEnd(since: gateSnapshot) {
-                EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()), \(panelRelation().logDescription))", category: .engine)
+                EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()), \(relation.logDescription))", category: .engine)
                 return
             }
             // #449: the panel is measurably running the rate this rate-only write asked for, so the switch
             // the notifications never finish reporting has nothing left to do. Named with the cap it did
-            // not spend, because that is the number the fix has to be verified against.
-            let relation = panelRelation()
+            // not spend, because that is the number the fix has to be verified against, and with the dwell
+            // where one was required, because a multiple settles on having HELD the reading.
             if Self.rateOnlySwitchIsSettled(
                 attribution: Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR),
-                relation: relation) {
-                EngineLog.emit("[DisplayCriteria] rate-only criteria already satisfied (\(timing()), \(relation.logDescription); released \(capMs - Self.elapsedMs(since: stage2Entry))ms before the \(capMs)ms cap)", category: .engine)
+                relation: relation, heldForMs: heldMs) {
+                let dwell: String = {
+                    guard case .multiple = relation else { return "" }
+                    return ", held unbroken for \(heldMs)ms"
+                }()
+                EngineLog.emit("[DisplayCriteria] rate-only criteria already satisfied (\(timing()), \(relation.logDescription)\(dwell); released \(capMs - Self.elapsedMs(since: stage2Entry))ms before the \(capMs)ms cap)", category: .engine)
                 return
             }
             // Only meaningful when this load recorded no start: the headroom rises with the transition, so
@@ -812,8 +885,9 @@ final class DisplayCriteriaController {
         switch Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR) {
         case .engineRateOnly:
             // #449: the cadence is the part that says whether this was a switch in flight or a write the
-            // panel had nothing to do about. `.multiple` and `.different` both land here on purpose; only
-            // an exact match can rule out a pending switch, since a multiple satisfies the request too.
+            // panel had nothing to do about. Reaching here on a `.multiple` means the reading never held
+            // for `panelMultipleDwellMs` unbroken, so the panel kept changing what it reported or stopped
+            // reporting; a `.different` reading is a panel in neither mode.
             EngineLog.emit("[DisplayCriteria] proceed after cap (\(timing()); engine rate-only criteria, switch never reported end, panel may still be mid-switch; \(capRelation.logDescription); EDR headroom \(headroom))", category: .engine)
         case .engineHDR:
             // "Unobservable DV panel" was the blanket reading here, but a panel that was already in HDR

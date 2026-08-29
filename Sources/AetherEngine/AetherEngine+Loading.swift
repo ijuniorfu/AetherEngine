@@ -709,6 +709,13 @@ extension AetherEngine {
                     + "avBufAhead=\(String(format: "%.2f", avBufAhead))s",
                     category: .session
                 )
+                // AE#418 round 3: a fetch is not a placement. The composition assumed AVPlayer's
+                // timeline was carrying the last axis this side published; the item's own loaded
+                // ranges say whether it was. Live rebases the whole timeline at a program boundary
+                // and nothing older comes back on screen, so it composes nothing and checks nothing.
+                if !self.isLive {
+                    self.verifyPlacementAgainstLoadedRanges(session: session)
+                }
             }
         }
         session.onSeekStateChanged = { [weak self] inFlight, playlistTime in

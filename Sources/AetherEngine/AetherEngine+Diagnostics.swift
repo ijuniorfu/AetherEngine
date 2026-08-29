@@ -66,6 +66,47 @@ extension AetherEngine {
         }
     }
 
+    /// AE#418: the item's loaded ranges on the item axis. Where AVPlayer HOLDS what it fetched is the
+    /// only on-device account of where it placed a segment, and the axis is a statement about exactly
+    /// that. Off-main for the same reason as the buffer probe (AE#422).
+    func avPlayerLoadedRanges() async -> [(Double, Double)] {
+        guard let avPlayer = currentAVPlayer, let item = avPlayer.currentItem else { return [] }
+        return await AVFoundationOffMain.read(item, on: NativeAVPlayerHost.offMainReadQueue) { item in
+            item.loadedTimeRanges.map { value in
+                let r = value.timeRangeValue
+                return (r.start.seconds, (r.start + r.duration).seconds)
+            }
+        }
+    }
+
+    /// AE#418 round 3: check a just-published VOD axis against AVPlayer's own account of the placement
+    /// it describes, and let the session correct it when the base it composed onto was never carried.
+    ///
+    /// Polled rather than awaited on an edge, because the publish happens when the segment is FETCHED
+    /// and the ranges only move once AVPlayer has taken the bytes. Bounded on both ends: it gives up
+    /// after `placementVerificationAttempts` reads, and it reads nothing at all once the playhead sits
+    /// inside a range (one answer is all this needs). Late is worse than never here, which is why the
+    /// window is short: eviction eventually trims a range's start away from the placement it began at.
+    static let placementVerificationAttempts = 6
+    static let placementVerificationIntervalMS = 250
+
+    func verifyPlacementAgainstLoadedRanges(session: HLSVideoEngine) {
+        placementVerificationTask?.cancel()
+        placementVerificationTask = Task { @MainActor [weak self, weak session] in
+            for _ in 0..<Self.placementVerificationAttempts {
+                try? await Task.sleep(for: .milliseconds(Self.placementVerificationIntervalMS))
+                guard !Task.isCancelled, let self, let session else { return }
+                let ranges = await self.avPlayerLoadedRanges()
+                guard !Task.isCancelled else { return }
+                let clock = self.nativeClockSeconds
+                guard let start = HLSVideoEngine.placementRangeStart(ranges: ranges, itemClock: clock)
+                else { continue }
+                session.reconcileAxisWithObservedPlacement(observedItemStart: start, itemClock: clock)
+                return
+            }
+        }
+    }
+
     // MARK: - Memory diagnostic
 
     /// Cancel any prior probe, then emit one EngineLog line every 30 s under `.engine`. Line shape is documented on `memoryProbeTask`.

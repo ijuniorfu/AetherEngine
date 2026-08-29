@@ -1276,6 +1276,11 @@ public final class AetherEngine: ObservableObject {
     /// Cancelled in stopInternal so it can never outlive its session.
     var liveReloadWatchdogTask: Task<Void, Never>?
 
+    /// AE#418 round 3: bounded read of the item's loaded ranges after a VOD axis seam, which is where
+    /// AVPlayer says it holds the bytes that seam describes. One at a time, newest wins, cancelled in
+    /// stopInternal: it exists only to check the axis just published, so an older check is stale.
+    var placementVerificationTask: Task<Void, Never>?
+
     /// 1 Hz live-telemetry sampler. Lifecycle mirrors memoryProbeTask. Holds a weak engine reference
     /// so the retained task can't keep self alive past teardown.
     var liveTelemetrySampler: LiveTelemetrySampler?
@@ -5461,6 +5466,8 @@ public final class AetherEngine: ObservableObject {
         // populated across the seam (issue #15). SW-path callers must release the preserved host themselves.
         memoryProbeTask?.cancel()
         memoryProbeTask = nil
+        placementVerificationTask?.cancel()
+        placementVerificationTask = nil
         // AE#446: the outage watcher belongs to the session whose window was closed with ENDLIST.
         liveOutageResumeWatcher?.cancel()
         liveOutageResumeWatcher = nil

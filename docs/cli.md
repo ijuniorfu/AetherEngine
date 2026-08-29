@@ -145,6 +145,15 @@ AE#418: AVPlayer presents a segment at the position the PLAYLIST gives it, not a
 carries, and then plays continuously from there, so a gate that opened below its boundary shifts the
 whole run by the re-aim (`axisErr=-13.583` on a 13.583 s re-aim, constant for the run).
 
+Round 3 added a second oracle, and this one works on a device with no capture card:
+`AVPlayerItem.loadedTimeRanges`. The range holding the playhead begins where AVPlayer PLACED that
+run, so `advertised - rangeStart` is the axis it composed onto, measured rather than assumed. The
+engine reads it after every VOD seam and says what it found, `#418 segN placement confirmed` or
+`#418 segN placed on base Xs, not Ys`, the second of which is a placement this side counted that
+AVPlayer discarded (a fetch during a seek burst, which is a fetch and not a placement). Against the
+picture probe the two oracles agree exactly: a resume predicting a seam at `52.000` reads
+`loaded [52.000-64.958]`, and a far seek predicting `21.000` reads `[21.000-38.622]`.
+
 `--start-position S` starts at a resume anchor, the same one `serve` takes. `--sw` forces the software path for a source that would route native, which is how a native-only fixture exercises the SW pipeline.
 
 `--malloc-census` turns on the large-allocation census (`AetherEngine.setLargeAllocationCensusEnabled`) for the run, for tracing a footprint that grows where the segment budget says it should not. Besides the 30 s sample it arms a jump trigger, which exists because the 30 s memprobe cannot catch a failure that completes inside one sample (every kill on #220 was that shape): a counter polled at `--census-hz N` runs the zone walk once it climbs `--census-threshold-mb N` above its running high-water. Both flags are inert without `--malloc-census`.

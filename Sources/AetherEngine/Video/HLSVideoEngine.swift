@@ -2305,6 +2305,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // #35/#93 cold-startup: suspend the wedge detector until the first frame lands (pre-roll of a
         // slow high-bitrate DV master must not be misread as a wedge). Threaded onto every producer.
         prod.hasStartedRenderingProvider = hasStartedRenderingProvider
+        // AE#446 round 3: the no-cut watchdog's starvation exit tears down the read a closed window
+        // is waiting on. Threaded onto every producer like the guards above, so a reopen does not
+        // leave the exit unguarded while the consumer is still walking the runway.
+        prod.outageRunwayProvider = { [weak self] in
+            self?.provider?.outageRunwayAheadOfConsumer ?? false
+        }
         prod.closedCaptionObserver = closedCaptionObserverForSession   // #77
         prod.a53CaptionObserver = a53CaptionObserverForSession   // #131
         // #260: resolved per frame, so installing an observer mid-session reaches this producer too.

@@ -343,6 +343,17 @@ final class LiveFixture: @unchecked Sendable {
         let startLoopIndex = max(wallDerived, highWaterLoopIndex + 1)
         stateLock.unlock()
         var loopIndex: Int64 = startLoopIndex
+        // AE#446 round 3: say this out loud, because it reaches the engine as a real source jump and
+        // costs a reader an hour otherwise. A connection always starts at PACKET 0 of a loop, so a
+        // client that reconnects while the previous connection was parked mid-loop (which is what
+        // --freeze-after arranges) skips the rest of that loop. Measured: 28.8 s on the bundled seed,
+        // 49.1 s reported on a 93 s capture, both landing in the engine's live timeline rebase.
+        if startLoopIndex > 0, loopPeriodTicks > 0 {
+            print("[LiveFixture] serving from loop \(startLoopIndex) of a "
+                  + String(format: "%.2f", Double(loopPeriodTicks) / 90_000.0)
+                  + "s seed; a connection starts at a loop boundary, so a reconnect mid-loop skips "
+                  + "the remainder and the engine sees a source discontinuity")
+        }
 
         // One-shot discontinuity: armed by a timer so it fires on schedule even while serve() is blocked in send().
         stateLock.lock()

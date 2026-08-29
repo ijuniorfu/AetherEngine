@@ -18,6 +18,8 @@ protocol HLSSegmentProvider: AnyObject {
     func mediaSegment(at index: Int, onSlow: (@Sendable () -> Void)?) -> Data?
 
     /// Optional file URL for disk-backed segments (cache adopt path). Server streams file -> socket bypassing Foundation Data; sendfile(2) was tried but SIGSYS'd on tvOS sandbox.
+    /// Must name a file that exists: the server stats and opens it afterwards, and a URL whose file
+    /// has gone is answered with an error response rather than the bytes the bookkeeping promised.
     func mediaSegmentURL(at index: Int) -> URL?
 
     var segmentCount: Int { get }
@@ -830,7 +832,8 @@ final class HLSLocalServer: @unchecked Sendable {
                     if let url = provider?.mediaSegmentURL(at: index) {
                         return send200File(fd: fd, path: normalizedPath,
                                             fileURL: url,
-                                            contentType: "video/mp4")
+                                            contentType: "video/mp4",
+                                            segmentIndex: index)
                     }
                     // #93 round 3: a serve outliving the provider's slow threshold (wedge-window
                     // restart, 25-50 s worst case) emits response headers NOW as a chunked
@@ -965,11 +968,23 @@ final class HLSLocalServer: @unchecked Sendable {
         return writeAll(fd: fd, data: data, path: path)
     }
 
-    private func send200File(fd: Int32, path: String, fileURL: URL, contentType: String) -> Bool {
+    private func send200File(fd: Int32, path: String, fileURL: URL, contentType: String,
+                             segmentIndex: Int? = nil) -> Bool {
         let fsAttrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
         let fileSize = (fsAttrs?[.size] as? Int) ?? 0
         if fileSize == 0 {
-            return send404(fd: fd, path: path, reason: "file \(fileURL.lastPathComponent) missing or empty")
+            let reason = "file \(fileURL.lastPathComponent) missing or empty"
+            // #50 / AE#451: the in-range-is-never-404 rule belongs to the index, not to the path
+            // that answers it. A cache entry can outlive its file (a sibling session's stale-dir
+            // sweep, the OS reclaiming tmp), and a 404 on an in-range VOD segment is terminal for
+            // AVPlayer, where a 503 lets the producer make it again.
+            if let segmentIndex,
+               Self.classifySegmentResponse(index: segmentIndex,
+                                            segmentCount: provider?.segmentCount ?? -1,
+                                            hasData: false) == .retryLater {
+                return send503(fd: fd, path: path, reason: reason)
+            }
+            return send404(fd: fd, path: path, reason: reason)
         }
 
         let headerData = Self.responseHeader(status: "200 OK", contentLength: fileSize, contentType: contentType)

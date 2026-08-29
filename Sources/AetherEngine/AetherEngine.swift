@@ -676,6 +676,19 @@ public final class AetherEngine: ObservableObject {
         var origin: SeekOrigin
     }
     var pendingPreReadySeek: PendingPreReadySeek?
+    /// AE#446 round 4: what separates the CURRENT item's own timeline from the session's, in seconds.
+    ///
+    /// AVPlayer places a live playlist's content by the PLAYLIST, so an item's zero is the first
+    /// segment its playlist listed when it loaded, not the producer's first segment. The two coincide
+    /// for the item a session starts with and stop coinciding for any item attached after the window
+    /// has slid, which an in-place swap does routinely. Measured rather than assumed; see
+    /// `measureLiveItemAxisOffset`. 0 on every path where the question does not arise.
+    var liveItemAxisOffsetSeconds: Double = 0
+    /// The item generation `liveItemAxisOffsetSeconds` was measured for.
+    var liveItemAxisOffsetGeneration: Int = -1
+    /// AE#446 round 4: bounded audit after a rejoin swap. See `auditLiveRejoinPlacement`.
+    var liveRejoinAuditUntil: Date?
+    var liveRejoinAuditLastEmit: Date?
     /// AE#158: set by load() when the running item must survive until the new master attaches (PiP
     /// next-episode handover); consumed and reset by the loopback host.load callsite (inPlaceSwap).
     var pendingInPlaceItemHandover = false
@@ -2186,6 +2199,8 @@ public final class AetherEngine: ObservableObject {
                 + "the place it held",
                 category: .engine)
             session.clearLiveOutageEndlist()
+            liveRejoinAuditUntil = Date().addingTimeInterval(20)
+            liveRejoinAuditLastEmit = nil
             reloadStalledConsumerItem(position: heldPosition, allowPausedConsumer: true,
                                       liveRejoinOverride: heldPosition > 0 ? heldPosition : nil)
             return true
@@ -4100,7 +4115,8 @@ public final class AetherEngine: ObservableObject {
                                      axis: presentationAxis,
                                      origin: origin,
                                      residentRange: origin == .liveRejoin
-                                        ? residentLiveRangeSessionSeconds() : nil)
+                                        ? residentLiveRangeSessionSeconds() : nil,
+                                     itemAxisOffset: liveItemAxisOffsetSeconds)
               }
             : nil
         let target: Double = isLive
@@ -5577,6 +5593,8 @@ public final class AetherEngine: ObservableObject {
         hasTransportRolled = false
         sessionPublishesVideoDisplaySignal = false
         pendingPreReadySeek = nil
+        liveItemAxisOffsetSeconds = 0
+        liveItemAxisOffsetGeneration = -1
 
         // Shut down cache-backed scrub-thumbnail FrameExtractors with the session.
         let scrubThumbs = scrubThumbnailExtractors

@@ -148,6 +148,75 @@ extension AetherEngine {
             ?? (outputFloor + playlistShiftSeconds)
     }
 
+    /// AE#446 round 4: measure how far the current item's own timeline sits below the session's.
+    ///
+    /// A live item's zero is the first segment ITS playlist listed. The producer's window floor and
+    /// the item's own floor slide together, because one rule sizes both (`LiveWindowSizing` is the
+    /// single source of truth for the playlist's first visible segment and the cache's eviction), so
+    /// their difference is the offset and it holds still while both ends move. Measured on the harness
+    /// across twelve seconds of sliding: 50.00 s at every sample, while the item's floor walked from
+    /// 0.00 to 15.00 and the producer's from 51.40 to 66.40.
+    ///
+    /// Latched per item, because it is a property of the playlist that item loaded, and re-measured
+    /// when the item under the host changes. It reads 0 for the item a session starts with, which is
+    /// why nothing needed it until a swap attached a second one.
+    @MainActor
+    func measureLiveItemAxisOffset() {
+        guard isLive, let host = nativeHost else { return }
+        guard host.itemGeneration != liveItemAxisOffsetGeneration else { return }
+        // A range of zero width is an item that has not reported yet, not an item at the origin.
+        guard host.seekableEnd > host.seekableStart,
+              let producerFloor = residentLiveFloorSessionSeconds() else { return }
+        let offset = Self.liveItemAxisOffset(producerFloorSession: producerFloor,
+                                             itemSeekableStart: host.seekableStart,
+                                             shift: playlistShiftSeconds)
+        guard offset.isFinite else { return }
+        liveItemAxisOffsetGeneration = host.itemGeneration
+        liveItemAxisOffsetSeconds = offset
+        guard liveItemAxisOffsetSeconds > 0.01 else { return }
+        EngineLog.emit(
+            "[AetherEngine] #446 this item's playlist began \(String(format: "%.2f", liveItemAxisOffsetSeconds))s "
+            + "into the session, so its own clock reads that much below the session's; folding it into "
+            + "every conversion for as long as this item is the one playing",
+            category: .engine)
+    }
+
+    /// AE#446 round 4: the arithmetic behind `measureLiveItemAxisOffset`, on its own so the case can
+    /// be stated without a session.
+    ///
+    /// The producer's floor is on the session axis; the item's floor is on the item's own. One rule
+    /// sizes both, so their difference is what separates the axes, and it is a difference rather than
+    /// an assumption. Negative is not a case that can be acted on (an item claiming to hold content
+    /// older than the producer does), and it folds to 0, which is the pre-swap behaviour.
+    nonisolated static func liveItemAxisOffset(
+        producerFloorSession: Double, itemSeekableStart: Double, shift: Double
+    ) -> Double {
+        Swift.max(0, producerFloorSession - (itemSeekableStart + shift))
+    }
+
+    /// AE#446 round 4: the three readings a rejoin's placement is argued from, on one line.
+    ///
+    /// They were only ever available separately, which is why an item's clock and an item's seekable
+    /// range could disagree for a whole investigation without anyone being able to say so. Bounded to
+    /// the seconds after a swap, so a live session does not pay for it.
+    @MainActor
+    func auditLiveRejoinPlacement() {
+        guard let until = liveRejoinAuditUntil, let host = nativeHost else { return }
+        let now = Date()
+        guard now < until else { liveRejoinAuditUntil = nil; return }
+        if let last = liveRejoinAuditLastEmit, now.timeIntervalSince(last) < 1.0 { return }
+        liveRejoinAuditLastEmit = now
+        let producer = residentLiveRangeSessionSeconds()
+        EngineLog.emit(
+            "[AetherEngine] #446 placement audit: item clock \(String(format: "%.2f", nativeClockSeconds))s "
+            + "in item range \(String(format: "%.2f", host.seekableStart))..\(String(format: "%.2f", host.seekableEnd))s, "
+            + "shift \(String(format: "%.2f", playlistShiftSeconds))s + item offset "
+            + "\(String(format: "%.2f", liveItemAxisOffsetSeconds))s -> session \(String(format: "%.2f", currentTime))s; "
+            + "the producer holds "
+            + (producer.map { "\(String(format: "%.2f", $0.lowerBound))..\(String(format: "%.2f", $0.upperBound))s" } ?? "nothing it can state"),
+            category: .engine)
+    }
+
     /// AE#446 round 4: what the producer holds right now, on the session axis, both ends.
     ///
     /// This is the range a rejoin is measured against, and it is deliberately not either of the two
@@ -183,6 +252,7 @@ extension AetherEngine {
         w.noteEdge(edgeSessionTime)
         w.notePlayhead(currentTime)
         w.noteResidentFloor(residentLiveFloorSessionSeconds())
+        auditLiveRejoinPlacement()
         liveWindow = w
         // AE#442: tick-to-tick advancement, not a running maximum: a backward DVR seek drops the
         // playhead, and the next advancing publish has to be able to record the new, larger distance.
@@ -249,11 +319,12 @@ extension AetherEngine {
         shift: Double,
         axis: PresentationAxisMap,
         origin: SeekOrigin = .host,
-        residentRange: ClosedRange<Double>? = nil
+        residentRange: ClosedRange<Double>? = nil,
+        itemAxisOffset: Double = 0
     ) -> (sessionTarget: Double, clockTarget: Double) {
         // An item with no seekable range of its own yet has nothing to sample; the window's own edge
         // is then the only edge there is, and clamping against `shift` alone would collapse the range.
-        let edge = itemEnd > 0 ? itemEnd + shift : window.edgeTime
+        let edge = itemEnd > 0 ? itemEnd + shift + itemAxisOffset : window.edgeTime
         // AE#446 round 4: a host scrub is bound by what the session ADVERTISES, and the engine's own
         // rejoin by what the producer HOLDS. They are different questions, and at the moment a rejoin
         // runs they have different answers: the advertised range is measured against an edge that is
@@ -266,8 +337,11 @@ extension AetherEngine {
         } else {
             sessionTarget = window.clamp(requested, edge: edge)
         }
+        // AE#446 round 4: and then down onto the item's own axis, which for an item attached after
+        // the window slid begins above the session's zero. See `measureLiveItemAxisOffset`.
         let clockTarget = Swift.max(
-            0, axis.itemSeconds(forSourceSeconds: sessionTarget) ?? (sessionTarget - shift))
+            0, (axis.itemSeconds(forSourceSeconds: sessionTarget) ?? (sessionTarget - shift))
+               - itemAxisOffset)
         return (sessionTarget, clockTarget)
     }
 

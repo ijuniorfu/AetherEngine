@@ -246,6 +246,10 @@ final class NativeAVPlayerHost {
     private static var nextSessionID: Int = 0
     private var sessionID: Int = 0
 
+    /// AE#446 round 4: which item this host currently holds. Bumped by every `load`/`swapItem`, so a
+    /// caller that latches something about the item can tell when the item under it changed.
+    var itemGeneration: Int { sessionID }
+
     // MARK: - Init
 
     #if os(tvOS) || os(iOS)

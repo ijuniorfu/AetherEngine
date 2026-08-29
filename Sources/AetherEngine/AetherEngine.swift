@@ -1955,10 +1955,9 @@ public final class AetherEngine: ObservableObject {
             + "media playlist (no CC/subtitle renditions) at "
             + (isLive ? "the live edge" : "\(String(format: "%.2f", position))s"),
             category: .session)
-        host.load(url: fallbackURL,
-                  startPosition: isLive ? nil : position,
-                  skipInitialSeek: LiveReloadPolicy.skipInitialSeek(isLive: isLive, isRejoin: true),
-                  inPlaceSwap: true)
+        host.swapItem(url: fallbackURL,
+                      startPosition: isLive ? nil : position,
+                      skipInitialSeek: LiveReloadPolicy.skipInitialSeek(isLive: isLive, isRejoin: true))
         host.play()
     }
 
@@ -2070,7 +2069,7 @@ public final class AetherEngine: ObservableObject {
                     + "\(StartupReadinessGate.masterAttempts), link may still be warming) at "
                     + "\(String(format: "%.2f", position))s",
                     category: .session)
-                host.load(url: airPlayHostSwapped(masterURL), startPosition: position, inPlaceSwap: true)
+                host.swapItem(url: airPlayHostSwapped(masterURL), startPosition: position)
                 attempt += 1
 
             case .fallBackToMedia:
@@ -2084,7 +2083,7 @@ public final class AetherEngine: ObservableObject {
                         + "HDR-preserving reduced master (subtitles preserved, DV dropped) at "
                         + "\(String(format: "%.2f", position))s",
                         category: .session)
-                    host.load(url: airPlayHostSwapped(reducedURL), startPosition: position, inPlaceSwap: true)
+                    host.swapItem(url: airPlayHostSwapped(reducedURL), startPosition: position)
                     host.play()
                     let reducedOutcome = await host.awaitStartupReadiness(
                         timeoutSeconds: Self.startupGateReloadSeconds)
@@ -2109,7 +2108,7 @@ public final class AetherEngine: ObservableObject {
                     + "playlist at \(String(format: "%.2f", position))s (HDR10 base, DV upgrade "
                     + "dropped this session)",
                     category: .session)
-                host.load(url: airPlayHostSwapped(mediaURL), startPosition: position, inPlaceSwap: true)
+                host.swapItem(url: airPlayHostSwapped(mediaURL), startPosition: position)
                 host.play()
                 // Best-effort readiness confirm; the media playlist is the universal-compatible route.
                 // Clearing the gate (defer) lets a genuine residual media failure surface normally via
@@ -2282,10 +2281,9 @@ public final class AetherEngine: ObservableObject {
         // Live reload = live REJOIN: no stale-clock resume, no explicit start seek — the
         // zero-tolerance seek into a possibly-slid window wedges the fresh item in waitingToPlay.
         // Same contract as the #98 media fallback above; see LiveReloadPolicy.
-        host.load(url: url,
-                  startPosition: isLive ? nil : anchor,
-                  skipInitialSeek: LiveReloadPolicy.skipInitialSeek(isLive: isLive, isRejoin: true),
-                  inPlaceSwap: true)
+        host.swapItem(url: url,
+                      startPosition: isLive ? nil : anchor,
+                      skipInitialSeek: LiveReloadPolicy.skipInitialSeek(isLive: isLive, isRejoin: true))
         host.play()
         if let rejoinPosition {
             // Stashed rather than seeked: the pre-readiness seek IS the wedge LiveReloadPolicy exists
@@ -4936,7 +4934,7 @@ public final class AetherEngine: ObservableObject {
         session.markServingMediaAfterFallback()
         nativeSubtitleRenditionsServed = false
         airPlayServedMasterToReceiver = false
-        host.load(url: airPlayHostSwapped(mediaURL), startPosition: position, inPlaceSwap: true)
+        host.swapItem(url: airPlayHostSwapped(mediaURL), startPosition: position)
         host.play()
     }
 

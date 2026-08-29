@@ -432,23 +432,24 @@ extension AetherEngine {
                   perFrameHDR: true,
                   // AE#154: a VOD resume anchor seeks; nil keeps the live no-initial-seek contract.
                   skipInitialSeek: startPosition == nil,
-                  forwardBufferDuration: 0,
-                  // This lean path has no live-reopen / readiness watchdog; let AVPlayer's "gave up"
-                  // signal surface a dead upstream (segment 404 / token expiry) so the host can retune.
-                  surfaceEndFailures: true,
-                  httpHeaders: options.httpHeaders,
-                  // #168 follow-up: live-only (VOD remote HLS is the AE#154 reroute target; ingesting it
-                  // back would ping-pong), and hosts can opt out via LoadOptions.
-                  armIngestFallback: RemoteHLSIngestFallback.shouldArm(
-                      isLive: options.isLive, fallbackEnabled: options.nativeRemoteHLSIngestFallback),
-                  // #334: the ceiling on silence this path never had. AVPlayer's "gave up" covers an
-                  // origin that stops answering; it does not cover one that answers everything while
-                  // AVFoundation builds no track, where nothing terminal is ever published.
-                  readinessDeadline: RemoteHLSReadinessDeadline.defaultBudgetSeconds,
-                  isLive: options.isLive,
-                  // AE#440: the same join tail exists where AVPlayer owns the buffer; the engine only
-                  // owns the moment it is told to stop waiting.
-                  liveJoinStartsImmediately: options.liveJoinStartsImmediately)
+                  contract: .init(
+                      isLive: options.isLive,
+                      // AE#440: the same join tail exists where AVPlayer owns the buffer; the engine only
+                      // owns the moment it is told to stop waiting.
+                      liveJoinStartsImmediately: options.liveJoinStartsImmediately,
+                      forwardBufferDuration: 0,
+                      // This lean path has no live-reopen / readiness watchdog; let AVPlayer's "gave up"
+                      // signal surface a dead upstream (segment 404 / token expiry) so the host can retune.
+                      surfaceEndFailures: true,
+                      httpHeaders: options.httpHeaders,
+                      // #168 follow-up: live-only (VOD remote HLS is the AE#154 reroute target; ingesting
+                      // it back would ping-pong), and hosts can opt out via LoadOptions.
+                      armIngestFallback: RemoteHLSIngestFallback.shouldArm(
+                          isLive: options.isLive, fallbackEnabled: options.nativeRemoteHLSIngestFallback),
+                      // #334: the ceiling on silence this path never had. AVPlayer's "gave up" covers an
+                      // origin that stops answering; it does not cover one that answers everything while
+                      // AVFoundation builds no track, where nothing terminal is ever published.
+                      readinessDeadline: RemoteHLSReadinessDeadline.defaultBudgetSeconds))
 
         // AE#154: surface the item's legible AVMediaSelectionGroup as `subtitleTracks` so hosts with
         // their own picker see the external WebVTT renditions AVPlayer renders on this bypass.
@@ -1429,9 +1430,10 @@ extension AetherEngine {
                   skipInitialSeek: LiveReloadPolicy.skipInitialSeek(
                       isLive: isLive, isRejoin: liveRejoin),
                   inPlaceSwap: inPlaceHandover,
-                  isLive: isLive,
-                  // AE#440: the join tail, opt-in. The host itself gates this on `isLive`.
-                  liveJoinStartsImmediately: loadedOptions.liveJoinStartsImmediately)
+                  contract: .init(
+                      isLive: isLive,
+                      // AE#440: the join tail, opt-in. The host itself gates this on `isLive`.
+                      liveJoinStartsImmediately: loadedOptions.liveJoinStartsImmediately))
         forceNativeLegibleDeselectedUntilHostSelects()
     }
 

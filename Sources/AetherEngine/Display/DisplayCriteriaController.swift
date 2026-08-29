@@ -463,6 +463,47 @@ final class DisplayCriteriaController {
         return PanelCadenceRun(relation: relation, startedAtMs: nowMs)
     }
 
+    /// What the dwell did across a whole Stage 2, so a reading that never settled can say why (#449).
+    ///
+    /// The reporter's caution, from the same capture that confirmed the fix: `mode check (native)` read
+    /// cadences well away from nominal on 4 of 12 reads (35.456 Hz against a nominal 50.002), and a tick
+    /// like that landing inside the dwell restarts the run. It cannot reach the gate's reading, because
+    /// the two measure different things: `mode check` reports THROUGHPUT averaged over its whole sample
+    /// (`tickCount / span`, which missed ticks drag down), while the gate reads the mode interval of a
+    /// single tick (`targetTimestamp - timestamp`), which is why `nominal` stayed at 50.002 in every one
+    /// of those four lines. What CAN break the run is the freshness guard, if the missed ticks arrive in
+    /// one block longer than `panelCadenceFreshnessMs`. That outcome is safe (the cap stands, as before
+    /// the fix), so this is not a guard, it is the evidence: a cap line that names the breaks and the
+    /// longest run turns "I would look here first" into a reading.
+    struct PanelCadenceHistory: Equatable {
+        var run: PanelCadenceRun?
+        /// How many times a tick reported something other than what the run held.
+        var restarts: Int = 0
+        /// The longest unbroken run this Stage 2 achieved, in milliseconds.
+        var longestHeldMs: Int = 0
+
+        var logDescription: String {
+            "the cadence run broke \(restarts) time\(restarts == 1 ? "" : "s"), "
+            + "longest unbroken \(longestHeldMs)ms of the \(panelMultipleDwellMs)ms a multiple needs"
+        }
+    }
+
+    /// Fold one Stage 2 tick into the history above. Pure, because the case it describes is the one a
+    /// device run does not produce on demand.
+    nonisolated static func extendCadenceHistory(_ history: PanelCadenceHistory,
+                                                 relation: PanelRateRelation,
+                                                 nowMs: Int) -> PanelCadenceHistory {
+        var next = history
+        let run = extendCadenceRun(history.run, relation: relation, nowMs: nowMs)
+        if let previous = history.run, previous.startedAtMs != run.startedAtMs {
+            next.restarts += 1
+            next.longestHeldMs = max(next.longestHeldMs, previous.heldMs(atMs: nowMs))
+        }
+        next.run = run
+        next.longestHeldMs = max(next.longestHeldMs, run.heldMs(atMs: nowMs))
+        return next
+    }
+
     /// How stale a display-link tick may be and still describe the panel's current cadence (#449). Three
     /// frame intervals at the slowest mode tvOS switches to (23.976 Hz), so a panel that is merely running
     /// slowly is not mistaken for one that has stopped presenting.
@@ -818,14 +859,13 @@ final class DisplayCriteriaController {
         }
         // #449 round 2: the unbroken run of the same panel reading, so a cadence that only settles a
         // multiple after a dwell can be asked how long it has actually held it.
-        var cadenceRun: PanelCadenceRun?
+        var cadenceHistory = PanelCadenceHistory()
         while !Self.isBudgetSpent(elapsedMs: Self.elapsedMs(since: stage2Entry), budgetMs: capMs) {
             try? await Task.sleep(for: .milliseconds(50))
             let stage2Ms = Self.elapsedMs(since: stage2Entry)
             let relation = panelRelation()
-            let run = Self.extendCadenceRun(cadenceRun, relation: relation, nowMs: stage2Ms)
-            cadenceRun = run
-            let heldMs = run.heldMs(atMs: stage2Ms)
+            cadenceHistory = Self.extendCadenceHistory(cadenceHistory, relation: relation, nowMs: stage2Ms)
+            let heldMs = cadenceHistory.run?.heldMs(atMs: stage2Ms) ?? 0
             if observation.hasNewEnd(since: gateSnapshot) {
                 EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()), \(relation.logDescription))", category: .engine)
                 return
@@ -888,7 +928,7 @@ final class DisplayCriteriaController {
             // panel had nothing to do about. Reaching here on a `.multiple` means the reading never held
             // for `panelMultipleDwellMs` unbroken, so the panel kept changing what it reported or stopped
             // reporting; a `.different` reading is a panel in neither mode.
-            EngineLog.emit("[DisplayCriteria] proceed after cap (\(timing()); engine rate-only criteria, switch never reported end, panel may still be mid-switch; \(capRelation.logDescription); EDR headroom \(headroom))", category: .engine)
+            EngineLog.emit("[DisplayCriteria] proceed after cap (\(timing()); engine rate-only criteria, switch never reported end, panel may still be mid-switch; \(capRelation.logDescription); \(cadenceHistory.logDescription); EDR headroom \(headroom))", category: .engine)
         case .engineHDR:
             // "Unobservable DV panel" was the blanket reading here, but a panel that was already in HDR
             // when the criteria were re-written produces the same silence: no transition, so no headroom

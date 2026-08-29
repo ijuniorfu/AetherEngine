@@ -369,4 +369,87 @@ struct Issue440LiveJoinRollTests {
         #expect(Set(lines).count == outcomes.count)
         #expect(lines.allSatisfy { $0.hasPrefix("AE#440 live join: ") && $0.count > 40 })
     }
+
+    // MARK: - Round 5: a reading that was never taken, and a session that survives its item
+
+    /// The 6.56.2 field capture's one unaccountable line: a refusal at `empty=false` whose witness
+    /// reported `ahead 0.00s, empty=true` 0.26 s later, on a join that reached `playing` regardless.
+    /// Nothing had changed in the buffer. The hold ended inside the first sampling interval, so the
+    /// witness had taken no reading of its own and printed the placeholder it was initialised with.
+    @Test("an ending inside the first interval reports no reading rather than an invented one")
+    func endingBeforeTheFirstSampleSaysSo() {
+        let line = NativeAVPlayerHost.liveJoinHoldAccount(
+            outcome: .holdEnded, standingSeconds: 0.26, reading: nil)
+        #expect(line.contains("the wait ended 0.26s after the refusal"))
+        #expect(line.contains("no reading of its own was taken"))
+        // The two figures a reader would take as measurements must not appear at all.
+        #expect(!line.contains("ahead 0.00s"))
+        #expect(!line.contains("empty="))
+        // The floor is the number the sentence is about, so it travels either way.
+        #expect(line.contains("floor 1.50s"))
+    }
+
+    /// Every ending that can arrive before the first sample has to survive the same absence, because
+    /// the ending is checked before the sample is taken.
+    @Test("no outcome invents a buffer reading when none was taken")
+    func noOutcomeInventsAReading() {
+        let outcomes: [NativeAVPlayerHost.LiveJoinHoldOutcome] =
+            [.holdEnded, .cutShort, .itemReplaced, .hostGone, .budgetSpent]
+        for outcome in outcomes {
+            let line = NativeAVPlayerHost.liveJoinHoldAccount(
+                outcome: outcome, standingSeconds: 0.25, reading: nil)
+            #expect(!line.contains("empty="), "\(outcome) claims a buffer state it never read")
+            #expect(!line.contains("ahead 0.00s"), "\(outcome) claims a cushion it never read")
+        }
+    }
+
+    /// The reporter's rejoin: a #446 swap went through `WaitingToMinimizeStalls` twice and produced no
+    /// AE#440 line at all, decision or witness. The lever was not silent, it was disarmed: the swap
+    /// called `load` with the item arguments only, so the host re-declared the session as VOD.
+    @Test("an item swap keeps the contract its session was loaded under")
+    @MainActor
+    func swapKeepsTheSessionContract() {
+        let host = NativeAVPlayerHost()
+        let contract = NativeAVPlayerHost.SessionLoadContract(
+            isLive: true, liveJoinStartsImmediately: true, forwardBufferDuration: 0,
+            surfaceEndFailures: true, httpHeaders: ["X-Emby-Token": "t"], armIngestFallback: false,
+            readinessDeadline: 20)
+        host.load(url: URL(string: "http://127.0.0.1:1/live/media.m3u8")!,
+                  startPosition: nil, contract: contract)
+        #expect(host.sessionContract == contract)
+
+        host.swapItem(url: URL(string: "http://127.0.0.1:1/live/media.m3u8")!, startPosition: nil)
+        #expect(host.sessionContract == contract)
+    }
+
+    /// The other half of the same fact: a load that IS a new session states its own contract, so a live
+    /// zap's override cannot be left armed in front of the next VOD title's cold start.
+    @Test("a new load replaces the contract rather than inheriting it")
+    @MainActor
+    func newLoadStatesItsOwnContract() {
+        let host = NativeAVPlayerHost()
+        host.load(url: URL(string: "http://127.0.0.1:1/live/media.m3u8")!, startPosition: nil,
+                  contract: .init(isLive: true, liveJoinStartsImmediately: true))
+        host.load(url: URL(string: "http://127.0.0.1:1/vod/media.m3u8")!, startPosition: 0,
+                  contract: .init())
+        #expect(host.sessionContract == NativeAVPlayerHost.SessionLoadContract())
+        #expect(!host.sessionContract.isLive)
+    }
+
+    /// The third silent exit, and the one a rejoin takes: the swap's hold stood for 70 ms, the buffer
+    /// reading is asynchronous, and a hold that ends while it is in flight is correctly left alone. What
+    /// was wrong is that it said nothing, which from outside reads as a lever that was never armed.
+    @Test("a hold that ended before the reading came back says so")
+    func abandonedDecisionSpeaks() {
+        let rolled = NativeAVPlayerHost.liveJoinDecisionAbandoned(afterSeconds: 0.07, rolled: true)
+        #expect(rolled.contains("the rate had rolled"))
+        #expect(rolled.contains("0.07s later"))
+        #expect(rolled.contains("no decision was taken"))
+
+        // A host that paused under the reading ended the hold too, and did not roll: the line must not
+        // claim motion that never happened.
+        let paused = NativeAVPlayerHost.liveJoinDecisionAbandoned(afterSeconds: 0.12, rolled: false)
+        #expect(!paused.contains("rolled"))
+        #expect(paused.contains("no decision was taken"))
+    }
 }

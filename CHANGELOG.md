@@ -10,7 +10,40 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **An in-place item swap keeps the contract its session was loaded under (AE#440).** A swap replaces the
+  item under a session that stays whole, but all six swap sites called the host's `load` with the item
+  arguments only, so every one of them silently re-declared the session as VOD, header-less, and buffered
+  at the loopback default. The reporter found it from outside as a live rejoin that produced no AE#440
+  line at all, decision or witness: the lever was not silent, it was disarmed. The same `isLive: false`
+  also reached the AE#287 premature-end recovery, which is gated on it, on a live session that had just
+  closed a window with ENDLIST. The load contract is now a value the host holds for the session, and
+  `swapItem` carries it forward, so a swap has no contract argument left to get wrong. On the remote-HLS
+  bypass this also restores the origin's auth headers, the adaptive forward buffer, the readiness
+  deadline and the carriage probe across a recovery reload, all of which a swap used to drop.
+
+- **A live-join witness that ended before its first sample says so instead of printing a placeholder
+  (AE#440).** A refusal whose hold ended inside the first 250 ms reported `ahead 0.00s, empty=true`, which
+  is the value the sampler was initialised with rather than anything it read, and it contradicted the
+  `empty=false` the refusal itself had measured one line earlier. The reading is now optional and the
+  line names the absence, so a reader can tell a measured starved buffer from a witness that never got
+  to look.
+
+- **A join decision abandoned mid-reading says so (AE#440).** The buffer reading behind the decision is
+  asynchronous, so a hold that ends while it is in flight is correctly left alone rather than acted on
+  from a state that no longer exists. It used to be left alone silently, which is the third and last of
+  the silent exits this report walked into, and the one a rejoin swap takes: 70 ms of hold, no line, and
+  no way from outside to tell it apart from a lever that was never armed for that path.
+
+### Changed
+
+- **A rate-only gate that reaches its cap now names what the dwell did (AE#449).** The cap line carries
+  the number of times the cadence run broke and the longest unbroken run it managed, so a `.multiple`
+  that fails to settle says whether the panel kept changing what it reported or stopped reporting at all.
+  The field capture that prompted it never reached the cap; the reporter's caution came from `mode check`
+  reading 35.456 Hz against a nominal 50.002, which cannot reach the gate's own reading (that one is a
+  single tick's mode interval, not a throughput average) but can break a run through the freshness guard.
 
 ## [6.56.2] - 2026-08-29
 

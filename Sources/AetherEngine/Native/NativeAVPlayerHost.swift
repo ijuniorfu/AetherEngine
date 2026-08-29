@@ -57,6 +57,10 @@ final class NativeAVPlayerHost {
     /// consume; nothing here is worth reacting to on its own.
     @Published private(set) var isVideoReadyForDisplay: Bool = false
 
+    /// What the current session was loaded under, carried across an item swap (#440 round 5). See
+    /// `SessionLoadContract` and `swapItem`.
+    private(set) var sessionContract = SessionLoadContract()
+
     /// Set per load; gates the AE#287 premature-end recovery, which only makes sense for a fixed-length
     /// presentation. A live session has no advertised end to fall short of.
     private var isLiveSession: Bool = false
@@ -72,6 +76,8 @@ final class NativeAVPlayerHost {
     /// AE#440: keeps the "left the wait alone" line to one per load. It reports the depth that failed
     /// the floor, which is the only way to tell a starved join from a rate evaluation after the fact.
     private var liveJoinThinBufferLogged: Bool = false
+    /// AE#440 round 5: keeps the "the hold was over before the reading came back" line to one per load.
+    private var liveJoinNoDecisionLogged: Bool = false
     /// AE#440 round 3: one witness per load for a hold that was refused, so the bound is read while the
     /// hold stands and not only at its edges. Observes, never acts (see `startLiveJoinHoldWitness`).
     private var liveJoinHoldWitnessStarted: Bool = false
@@ -329,6 +335,50 @@ final class NativeAVPlayerHost {
         httpHeaders.isEmpty ? nil : ["AVURLAssetHTTPHeaderFieldsKey": httpHeaders]
     }
 
+    /// Everything a load establishes about the SESSION rather than about the item it opens (#440 round 5).
+    ///
+    /// It exists because an in-place swap replaces the item under a session that stays whole (#443), and
+    /// passing these per call site is what failed: six swap sites called `load` with the item arguments
+    /// only, so every one of them silently re-declared the session as VOD, header-less, and buffered at
+    /// the loopback default. The reporter found it from the outside, as a live rejoin that produced no
+    /// AE#440 decision at all; the same silence also handed the AE#287 premature-end recovery an
+    /// `isLive: false` on a live session that had just closed a window with ENDLIST.
+    ///
+    /// `swapItem` is the fix rather than a longer argument list: a swap has no contract argument to get
+    /// wrong, and a genuinely new session states its own.
+    struct SessionLoadContract: Sendable, Equatable {
+        /// Whether the session is live. Gates the AE#440 join override and the AE#287 premature-end
+        /// recovery, which only makes sense for a presentation with an advertised end.
+        var isLive: Bool = false
+        /// AE#440: may the join's stall-avoidance hold be cut short once the cushion is proven. Live-only,
+        /// and armed per load.
+        var liveJoinStartsImmediately: Bool = false
+        /// 4 s matches the loopback segment cadence; the remote-HLS bypass passes 0 (system adaptive),
+        /// where 4 s forced a 3-4 s black screen on bandwidth-limited Jellyfin live transcodes.
+        var forwardBufferDuration: Double = 4.0
+        /// The lean remote-HLS path has no live-reopen or readiness watchdog, so AVPlayer's "gave up"
+        /// signal has to surface a dead upstream instead of being swallowed as a recoverable stall.
+        var surfaceEndFailures: Bool = false
+        /// Sent with every asset and segment request. The bypass path carries the origin's auth here, so
+        /// a swap that dropped them would re-open the same URL unauthenticated.
+        var httpHeaders: [String: String] = [:]
+        /// #168 / #293: arm the carriage probe and the ingest reroute for a remote origin.
+        var armIngestFallback: Bool = false
+        /// #334: the ceiling on silence for a path with no other readiness watchdog.
+        var readinessDeadline: Double?
+    }
+
+    /// Replace the item under a session that survives the swap, keeping the contract that session was
+    /// loaded under (#440 round 5).
+    ///
+    /// Every in-place swap is this: the #35 readiness gate reloading a master, the #98 media fallback,
+    /// the #65 stalled-consumer reload, the #446 rejoin, an AirPlay hop. None of them starts a new
+    /// session, so none of them gets to re-decide whether the session is live or what headers it sends.
+    func swapItem(url: URL, startPosition: Double?, skipInitialSeek: Bool = false) {
+        load(url: url, startPosition: startPosition, skipInitialSeek: skipInitialSeek,
+             inPlaceSwap: true, contract: sessionContract)
+    }
+
     /// Load the loopback HLS-fMP4 URL into AVPlayer. DisplayCriteriaController.apply must run first so the HDR pipeline is configured before the first segment fetch.
     /// `inPlaceSwap`: atomic same-content item swap for the #93 recovery reload. The default
     /// teardown pauses and drops the current item to nil before the new one exists; during PiP
@@ -336,19 +386,25 @@ final class NativeAVPlayerHost {
     /// after an in-PiP recovery reload) and the pause bounces transport for nothing. The swap
     /// keeps transport intent, clocks and the old item alive until replaceCurrentItem hands
     /// AVPlayer the fresh one.
-    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false, httpHeaders: [String: String] = [:], armIngestFallback: Bool = false, readinessDeadline: Double? = nil, isLive: Bool = false, liveJoinStartsImmediately: Bool = false) {
+    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false,
+              inPlaceSwap: Bool = false, contract: SessionLoadContract) {
         unloadCurrentItem(inPlaceSwap: inPlaceSwap)
 
-        self.surfaceEndFailures = surfaceEndFailures
+        self.sessionContract = contract
+        let forwardBufferDuration = contract.forwardBufferDuration
+        let httpHeaders = contract.httpHeaders
+        let armIngestFallback = contract.armIngestFallback
+        self.surfaceEndFailures = contract.surfaceEndFailures
         self.ingestFallbackArmed = armIngestFallback
-        self.readinessDeadlineSeconds = readinessDeadline
-        self.isLiveSession = isLive
+        self.readinessDeadlineSeconds = contract.readinessDeadline
+        self.isLiveSession = contract.isLive
         // AE#440: per load, and only ever armed for a live session. The player is reused across loads,
         // so an override left armed from a live zap would meet the next VOD title's cold start.
-        self.liveJoinStartsImmediately = isLive && liveJoinStartsImmediately
+        self.liveJoinStartsImmediately = contract.isLive && contract.liveJoinStartsImmediately
         self.liveJoinImmediateStartSpent = false
         self.liveJoinImmediateStartProbeInFlight = false
         self.liveJoinThinBufferLogged = false
+        self.liveJoinNoDecisionLogged = false
         // AE#440 round 4: both of these are per LOAD, and the host is reused across loads on the
         // keepNativeHost path. Left standing, the second live join of a reused host would arm no witness
         // at all and read the previous join's spend reason.
@@ -425,7 +481,7 @@ final class NativeAVPlayerHost {
         seekableEnd = 0
         // #334: the bypass's ceiling on silence. Started with the mount rather than at readyToPlay,
         // because the session it exists for is exactly the one that never gets there.
-        if let budget = readinessDeadline {
+        if let budget = contract.readinessDeadline {
             startReadinessDeadline(item: item, budgetSeconds: budget)
         }
 
@@ -1101,6 +1157,7 @@ final class NativeAVPlayerHost {
               let item = playerItem
         else { return }
         liveJoinImmediateStartProbeInFlight = true
+        let probeStart = DispatchTime.now()
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.liveJoinImmediateStartProbeInFlight = false }
@@ -1110,7 +1167,23 @@ final class NativeAVPlayerHost {
             guard !self.liveJoinImmediateStartSpent,
                   self.playIntent,
                   self.timeControlStatus == .waitingToPlayAtSpecifiedRate
-            else { return }
+            else {
+                // Round 5: and say so. This is the last silent exit of the three the report walked into,
+                // and it is the one a short hold takes: a rejoin swap that rolled 70 ms after entering the
+                // wait produced no line at all, which from outside is indistinguishable from a lever that
+                // was never armed on that path. One per load, because a hold has one such ending.
+                if !self.liveJoinNoDecisionLogged {
+                    self.liveJoinNoDecisionLogged = true
+                    EngineLog.emit(
+                        "[NativeAVPlayerHost] #\(self.sessionID) "
+                        + Self.liveJoinDecisionAbandoned(
+                            afterSeconds: Self.secondsSince(probeStart),
+                            rolled: self.timeControlStatus == .playing),
+                        category: .engine
+                    )
+                }
+                return
+            }
             guard Self.shouldStartLiveJoinImmediately(
                 armed: self.liveJoinStartsImmediately,
                 alreadySpent: self.liveJoinImmediateStartSpent,
@@ -1179,7 +1252,11 @@ final class NativeAVPlayerHost {
         // carry the session they belong to.
         let sid = sessionID
         Task { @MainActor [weak self] in
-            var last = LiveJoinBufferReading(bufferEmpty: true, aheadSeconds: 0)
+            // Optional, and it stays nil until this witness has actually read something (#440 round 5).
+            // A placeholder here printed `ahead 0.00s, empty=true` for a hold that ended inside the first
+            // sampling interval, which reads as a measurement of a starved buffer and contradicted the
+            // refusal's own `empty=false` one line above it. A reading that was never taken has to say so.
+            var last: LiveJoinBufferReading?
             func account(_ outcome: LiveJoinHoldOutcome) {
                 EngineLog.emit(
                     "[NativeAVPlayerHost] #\(sid) "
@@ -1202,11 +1279,12 @@ final class NativeAVPlayerHost {
                     account(ending)
                     return
                 }
-                last = await Self.liveJoinBufferReading(item)
+                let reading = await Self.liveJoinBufferReading(item)
+                last = reading
                 guard Self.shouldStartLiveJoinImmediately(
                     armed: true, alreadySpent: false, hostWantsToPlay: true,
                     isWaitingToMinimizeStalls: true,
-                    playbackBufferEmpty: last.bufferEmpty, bufferedAheadSeconds: last.aheadSeconds
+                    playbackBufferEmpty: reading.bufferEmpty, bufferedAheadSeconds: reading.aheadSeconds
                 ) else { continue }
                 account(.crossed)
                 return
@@ -1259,11 +1337,18 @@ final class NativeAVPlayerHost {
     /// cases are pinned by tests rather than by a device run that happens not to produce them.
     nonisolated static func liveJoinHoldAccount(outcome: LiveJoinHoldOutcome,
                                                 standingSeconds: Double,
-                                                reading: LiveJoinBufferReading) -> String {
+                                                reading: LiveJoinBufferReading?) -> String {
         let stood = String(format: "%.2f", standingSeconds)
-        let ahead = String(format: "%.2f", reading.aheadSeconds)
         let floor = String(format: "%.2f", minimumLiveJoinBufferAhead)
         let head = "AE#440 live join: "
+        // What this witness itself measured, or the fact that it never got to (#440 round 5). The floor
+        // travels with it either way, since it is the number the sentence is about.
+        let seen: String = reading.map {
+            "last reading ahead \(String(format: "%.2f", $0.aheadSeconds))s, "
+            + "empty=\($0.bufferEmpty), floor \(floor)s"
+        } ?? "no reading of its own was taken before it ended, so the cushion named at the refusal is "
+            + "the last one measured (floor \(floor)s)"
+        let ahead = reading.map { String(format: "%.2f", $0.aheadSeconds) } ?? "n/a"
         switch outcome {
         case .crossed:
             return head + "the wait was still standing \(stood)s after the refusal when the buffer "
@@ -1271,22 +1356,36 @@ final class NativeAVPlayerHost {
                 + "is still taken at the edges"
         case .holdEnded:
             return head + "the wait ended \(stood)s after the refusal without the buffer reaching the "
-                + "floor (last reading ahead \(ahead)s, empty=\(reading.bufferEmpty), floor \(floor)s)"
+                + "floor (\(seen))"
         case .cutShort:
+            let sample = reading.map { "last sample ahead \(String(format: "%.2f", $0.aheadSeconds))s" }
+                ?? "this witness took no sample of its own"
             return head + "the wait was cut short at an edge \(stood)s after the refusal, so the cushion "
-                + "had crossed the floor by then (last sample ahead \(ahead)s, floor \(floor)s)"
+                + "had crossed the floor by then (\(sample), floor \(floor)s)"
         case .itemReplaced:
             return head + "the wait was still standing \(stood)s after the refusal when the item was "
-                + "replaced, so this join was abandoned rather than resolved (last reading ahead "
-                + "\(ahead)s, empty=\(reading.bufferEmpty), floor \(floor)s)"
+                + "replaced, so this join was abandoned rather than resolved (\(seen))"
         case .hostGone:
             return head + "the wait was still standing \(stood)s after the refusal when the host went "
-                + "away (last reading ahead \(ahead)s, empty=\(reading.bufferEmpty), floor \(floor)s)"
+                + "away (\(seen))"
         case .budgetSpent:
             return head + "the wait was still standing after \(stood)s of sampling and the buffer had "
-                + "not reached the floor (last reading ahead \(ahead)s, empty=\(reading.bufferEmpty), "
-                + "floor \(floor)s)"
+                + "not reached the floor (\(seen))"
         }
+    }
+
+    /// The decision's own ending when there was nothing left to decide (#440 round 5). Pure, because the
+    /// hold that produces it is 70 ms long and no harness reproduces it on demand.
+    ///
+    /// It is not a defect that no decision was taken: the buffer reading is asynchronous, so a hold that
+    /// ends while it is in flight has to be left alone rather than acted on from a state that no longer
+    /// exists (AE#422). What was a defect is that this said nothing, which reads exactly like a lever
+    /// that was never armed for the path at all.
+    nonisolated static func liveJoinDecisionAbandoned(afterSeconds: Double, rolled: Bool) -> String {
+        "AE#440 live join: the hold was over "
+        + (rolled ? "and the rate had rolled " : "")
+        + "by the time the buffer reading came back \(String(format: "%.2f", afterSeconds))s later, "
+        + "so no decision was taken on it"
     }
 
     /// Sampling cadence and budget for the witness above. A quarter second is well under the shortest

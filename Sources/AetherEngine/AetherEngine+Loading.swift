@@ -20,6 +20,8 @@ extension AetherEngine {
     func applyNativeHostClockTick(_ value: Double) {
         // nativeClockSeconds preserves the raw AVPlayer clock for onPlaylistShiftChanged to re-derive against.
         nativeClockSeconds = value
+        // AE#446 round 4: before anything folds, establish which axis this item's clock is even on.
+        measureLiveItemAxisOffset()
         // Newest seam at or before the raw clock wins: activates seams on forward play, re-applies pre-seam shift on backward DVR seeks.
         if let active = presentationAxis.shiftSeconds(atItemSeconds: value) {
             playlistShiftSeconds = active
@@ -28,12 +30,13 @@ extension AetherEngine {
             // AE#105: fold the disc's clip-0 STC base back out so the published playhead sits on the same
             // 0-based axis as the MPLS duration (origin 0 for normal/live -> no-op).
             clock.currentTime = PresentationAxis.display(
-                sourcePTS: value + playlistShiftSeconds,
+                sourcePTS: value + playlistShiftSeconds + liveItemAxisOffsetSeconds,
                 origin: displayOrigin(forShift: playlistShiftSeconds))
         }
         // Live edge must fold with the same playlistShiftSeconds as the playhead; opposite sign would make behindLiveSeconds meaningless.
         if isLive {
-            publishLiveWindow(edgeSessionTime: (nativeHost?.seekableEnd ?? 0) + playlistShiftSeconds)
+            publishLiveWindow(edgeSessionTime: (nativeHost?.seekableEnd ?? 0) + playlistShiftSeconds
+                              + liveItemAxisOffsetSeconds)
         }
     }
 
@@ -221,10 +224,10 @@ extension AetherEngine {
                 // #127: replay the latest host seek that arrived while the item was pre-ready.
                 // #178: not while still .loading (autostart paths hold .loading past readiness);
                 // replaying now would just re-stash. The state didSet resolves that case.
-                if ready, self.state != .loading, let pending = self.pendingPreReadySeekSeconds {
-                    self.pendingPreReadySeekSeconds = nil
-                    EngineLog.emit("[AetherEngine] replaying deferred pre-ready seek to \(String(format: "%.2f", pending))s (#127)", category: .engine)
-                    Task { @MainActor in await self.seek(to: pending) }
+                if ready, self.state != .loading, let pending = self.pendingPreReadySeek {
+                    self.pendingPreReadySeek = nil
+                    EngineLog.emit("[AetherEngine] replaying deferred pre-ready seek to \(String(format: "%.2f", pending.seconds))s (#127)", category: .engine)
+                    Task { @MainActor in await self.seek(to: pending.seconds, origin: pending.origin) }
                 }
             }
             .store(in: &cancellables)
@@ -1413,7 +1416,7 @@ extension AetherEngine {
         // way (HLSVideoEngine drops the resume anchor for a sequential origin), so leaving the
         // item on the EVENT edge default would start it mid-archive with no way back.
         if !isLive, loadedOptions.sequentialOrigin {
-            pendingPreReadySeekSeconds = 0.0
+            pendingPreReadySeek = PendingPreReadySeek(seconds: 0.0, origin: .host)
         }
         // AE#158: consume-and-reset so only the load() that armed the handover swaps in place; audio-switch
         // and recovery reloads keep their own contracts.

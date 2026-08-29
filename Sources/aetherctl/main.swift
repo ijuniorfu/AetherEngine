@@ -484,6 +484,10 @@ if first == "live" {
     // CAN-BLOCK-RELOAD, which is the arm that separates "AVPlayer stopped fetching because the
     // playlist stopped changing" from "AVPlayer stopped fetching because it is in low-latency mode".
     let noBlockingReload = takeFlag("--no-blocking-reload", from: &rest)
+    // AE#446 round 4: --live-only loads with no DVR window, the shape of a client that keeps its
+    // rewind outside the engine. The freeze leg then measures the only timeshift such a session can
+    // have, the backlog an outage puts between the closed window's end and the source's return.
+    let liveOnly = takeFlag("--live-only", from: &rest)
     // --sliding: accepted but ignored; sliding is now unconditional for live sessions.
     _ = takeFlag("--sliding", from: &rest)
     rejectStrayFlags(rest, subcommand: "live")
@@ -498,7 +502,8 @@ if first == "live" {
                  rewindBeforeFreeze: rewindBeforeFreeze,
                  forceRecoveryReloadAt: forceRecoveryReloadAt,
                  rewindHold: rewindHold,
-                 blockingReload: noBlockingReload ? false : nil))
+                 blockingReload: noBlockingReload ? false : nil,
+                 liveOnly: liveOnly))
 }
 
 if first == "play" {

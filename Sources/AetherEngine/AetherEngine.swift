@@ -272,7 +272,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// Opens (or replaces) the deferred stash entry. A second stashed seek supersedes the first, matching
-    /// `pendingPreReadySeekSeconds`' own latest-wins rule.
+    /// `pendingPreReadySeek`'s own latest-wins rule.
     func beginDeferredSeek(target: Double) {
         closeSeekTicket(&deferredSeekTicket, with: .superseded)
         deferredSeekTicket = beginSeekTicket(origin: .deferred, target: target)
@@ -666,8 +666,29 @@ public final class AetherEngine: ObservableObject {
     /// per real step. See `StartupProgress`.
     @Published public internal(set) var startupProgress: StartupProgress?
 
-    /// #127: latest host seek issued while the native item was pre-ready; replayed at readiness.
-    var pendingPreReadySeekSeconds: Double?
+    /// #127: latest seek issued while the native item was pre-ready; replayed at readiness.
+    ///
+    /// AE#446 round 4: with the origin that asked for it. The replay goes back out through
+    /// `seek(to:origin:)`, so a slot that only remembered a number handed the engine's own rejoin to
+    /// the host scrubber's guard, which refused it on a session that advertises no DVR window.
+    struct PendingPreReadySeek: Equatable {
+        var seconds: Double
+        var origin: SeekOrigin
+    }
+    var pendingPreReadySeek: PendingPreReadySeek?
+    /// AE#446 round 4: what separates the CURRENT item's own timeline from the session's, in seconds.
+    ///
+    /// AVPlayer places a live playlist's content by the PLAYLIST, so an item's zero is the first
+    /// segment its playlist listed when it loaded, not the producer's first segment. The two coincide
+    /// for the item a session starts with and stop coinciding for any item attached after the window
+    /// has slid, which an in-place swap does routinely. Measured rather than assumed; see
+    /// `measureLiveItemAxisOffset`. 0 on every path where the question does not arise.
+    var liveItemAxisOffsetSeconds: Double = 0
+    /// The item generation `liveItemAxisOffsetSeconds` was measured for.
+    var liveItemAxisOffsetGeneration: Int = -1
+    /// AE#446 round 4: bounded audit after a rejoin swap. See `auditLiveRejoinPlacement`.
+    var liveRejoinAuditUntil: Date?
+    var liveRejoinAuditLastEmit: Date?
     /// AE#158: set by load() when the running item must survive until the new master attaches (PiP
     /// next-episode handover); consumed and reset by the loopback host.load callsite (inPlaceSwap).
     var pendingInPlaceItemHandover = false
@@ -843,18 +864,18 @@ public final class AetherEngine: ObservableObject {
     /// playable state (covers autostart paths where readiness fires while `state` is still
     /// `.loading` and the #127 sink must not replay yet), discards it when the load dies.
     private func resolveLoadingStashedSeek(from oldState: PlaybackState) {
-        guard let pending = pendingPreReadySeekSeconds else { return }
+        guard let pending = pendingPreReadySeek else { return }
         switch Self.loadingStashResolution(oldState: oldState, newState: state) {
         case .hold:
             return
         case .discard:
-            pendingPreReadySeekSeconds = nil
+            pendingPreReadySeek = nil
             // The load died under the stash; the seek never reaches a host (#38 follow-up).
             endDeferredSeek(.rejected(.noActiveSession))
         case .replay:
-            pendingPreReadySeekSeconds = nil
-            EngineLog.emit("[AetherEngine] replaying seek stashed during load to \(String(format: "%.2f", pending))s (#178)", category: .engine)
-            Task { @MainActor in await self.seek(to: pending) }
+            pendingPreReadySeek = nil
+            EngineLog.emit("[AetherEngine] replaying seek stashed during load to \(String(format: "%.2f", pending.seconds))s (#178)", category: .engine)
+            Task { @MainActor in await self.seek(to: pending.seconds, origin: pending.origin) }
         }
     }
 
@@ -2178,6 +2199,8 @@ public final class AetherEngine: ObservableObject {
                 + "the place it held",
                 category: .engine)
             session.clearLiveOutageEndlist()
+            liveRejoinAuditUntil = Date().addingTimeInterval(20)
+            liveRejoinAuditLastEmit = nil
             reloadStalledConsumerItem(position: heldPosition, allowPausedConsumer: true,
                                       liveRejoinOverride: heldPosition > 0 ? heldPosition : nil)
             return true
@@ -2292,7 +2315,7 @@ public final class AetherEngine: ObservableObject {
             // land on 0. The #127 slot replays it once the item is ready, and the live seek expresses
             // its target as a distance behind the edge, so it lands on the same content whatever axis
             // the fresh item came up on.
-            pendingPreReadySeekSeconds = rejoinPosition
+            pendingPreReadySeek = PendingPreReadySeek(seconds: rejoinPosition, origin: .liveRejoin)
         }
         if let ordinal = nativeSubtitleReapplyOrdinal {
             EngineLog.emit(
@@ -4019,6 +4042,14 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func seek(to seconds: Double) async {
+        await seek(to: seconds, origin: .host)
+    }
+
+    /// AE#446 round 4: the same seek, with who asked for it. `.liveRejoin` is the engine coming back
+    /// to a position it decided itself out of content the session served; it is not a scrub, so the
+    /// live-only refusal below does not apply to it and its landing is measured against what the item
+    /// holds rather than against what the session advertises.
+    func seek(to seconds: Double, origin: SeekOrigin) async {
         // Guard: a host scrub racing stop() must not flip an idle/error engine to .seeking -> .playing.
         // .ended is terminal too: after end-of-media the host reloads to replay, it does not scrub a parked session.
         switch state {
@@ -4032,7 +4063,7 @@ public final class AetherEngine: ObservableObject {
             // in the #127 slot and resolve it on the transition out of .loading (state didSet):
             // replay into a playable state, discard into a terminal one. Clamp/live guards re-run
             // at replay when the session is actually known; duration may still be unprobed here.
-            pendingPreReadySeekSeconds = seconds
+            pendingPreReadySeek = PendingPreReadySeek(seconds: seconds, origin: origin)
             clock.currentTime = duration > 0 ? max(0, min(seconds, duration)) : max(0, seconds)
             EngineLog.emit("[AetherEngine] seek(to:\(String(format: "%.2f", seconds))) stashed during load; will replay when the session settles (#178)", category: .engine)
             beginDeferredSeek(target: clock.currentTime)
@@ -4042,8 +4073,18 @@ public final class AetherEngine: ObservableObject {
         }
         // Live-only (no DVR): no rewind range; AVPlayer would stall or land on an unmaterialised segment.
         // Hosts should hide the scrubber when seekableLiveRange == nil; this guard is defence-in-depth.
+        //
+        // AE#446 round 4: it is the HOST's contract, and the engine's own rejoin was never party to it.
+        // A client that keeps its rewind outside the engine loads with `dvrWindowSeconds` nil, and the
+        // outage swap's carried position was refused here, on a session whose producer was still
+        // holding the segment that position names.
         if isLive {
-            guard let w = liveWindow, w.windowSeconds != nil else {
+            guard let w = liveWindow else {
+                EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: live, DVR disabled", category: .engine)
+                emitSeekRejected(.liveWithoutDVR, target: seconds)
+                return
+            }
+            if Self.liveSeekRefusedWithoutDVR(origin: origin, windowSeconds: w.windowSeconds) {
                 EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: live, DVR disabled", category: .engine)
                 emitSeekRejected(.liveWithoutDVR, target: seconds)
                 return
@@ -4057,7 +4098,7 @@ public final class AetherEngine: ObservableObject {
             isLive: isLive,
             nativeHostReady: nativeHost?.isReady ?? true
         ) {
-            pendingPreReadySeekSeconds = seconds
+            pendingPreReadySeek = PendingPreReadySeek(seconds: seconds, origin: origin)
             clock.currentTime = max(0, min(seconds, duration))
             EngineLog.emit("[AetherEngine] seek(to:\(String(format: "%.2f", seconds))) deferred until item ready (#127)", category: .engine)
             beginDeferredSeek(target: clock.currentTime)
@@ -4071,12 +4112,36 @@ public final class AetherEngine: ObservableObject {
                 Self.liveSeekLanding(requested: seconds, window: $0,
                                      itemEnd: nativeHost?.seekableEnd ?? 0,
                                      shift: playlistShiftSeconds,
-                                     axis: presentationAxis)
+                                     axis: presentationAxis,
+                                     origin: origin,
+                                     residentRange: origin == .liveRejoin
+                                        ? residentLiveRangeSessionSeconds() : nil,
+                                     itemAxisOffset: liveItemAxisOffsetSeconds)
               }
             : nil
         let target: Double = isLive
             ? (liveLanding?.sessionTarget ?? seconds)
             : max(0, min(seconds, duration))
+        // AE#446 round 4: a rejoin on a session that advertises no rewind is the one landing measured
+        // against something other than what `seekableLiveRange` states, so it says so. Whether the
+        // place survived is the whole question the reader of this line has, so the line answers it.
+        if isLive, origin == .liveRejoin {
+            let resident = residentLiveRangeSessionSeconds()
+            let held = abs(target - seconds) < 0.5
+            let itemRange = nativeHost.map {
+                "\(String(format: "%.2f", $0.seekableStart + playlistShiftSeconds))..\(String(format: "%.2f", $0.seekableEnd + playlistShiftSeconds))s"
+            } ?? "no range"
+            EngineLog.emit(
+                "[AetherEngine] #446 rejoin to \(String(format: "%.2f", seconds))s"
+                + (liveWindow?.windowSeconds == nil ? " on a session that advertises no rewind" : "")
+                + "; the producer holds "
+                + (resident.map { "\(String(format: "%.2f", $0.lowerBound))..\(String(format: "%.2f", $0.upperBound))s" }
+                   ?? "a range it cannot state")
+                + " and the item reports \(itemRange)"
+                + ", landing at \(String(format: "%.2f", target))s"
+                + (held ? ", the place it held" : ", which is as close to it as the cache still reaches"),
+                category: .engine)
+        }
         state = .seeking
         // Span isSeeking across the real landing, not just the optimistic .playing flip (#38).
         // Generation guard at each finalize point prevents a superseded seek from clearing it.
@@ -5527,7 +5592,9 @@ public final class AetherEngine: ObservableObject {
         // over the new source's whole join.
         hasTransportRolled = false
         sessionPublishesVideoDisplaySignal = false
-        pendingPreReadySeekSeconds = nil
+        pendingPreReadySeek = nil
+        liveItemAxisOffsetSeconds = 0
+        liveItemAxisOffsetGeneration = -1
 
         // Shut down cache-backed scrub-thumbnail FrameExtractors with the session.
         let scrubThumbs = scrubThumbnailExtractors

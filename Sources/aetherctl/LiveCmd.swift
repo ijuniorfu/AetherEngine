@@ -125,7 +125,8 @@ func runLive(
     rewindBeforeFreeze: Double? = nil,
     forceRecoveryReloadAt: Double? = nil,
     rewindHold: Double? = nil,
-    blockingReload: Bool? = nil
+    blockingReload: Bool? = nil,
+    liveOnly: Bool = false
 ) -> Int32 {
     // Relative timestamps make join latency (readyToPlay et al.) readable off the log (AE#195).
     let logEpoch = Date()
@@ -232,7 +233,8 @@ func runLive(
                                              rewindBehind: rewindBeforeFreeze ?? 300,
                                              expectsRecovery: unfreezeAfter != nil,
                                              forceRecoveryReloadAt: forceRecoveryReloadAt,
-                                             blockingReload: blockingReload)
+                                             blockingReload: blockingReload,
+                                             liveOnly: liveOnly)
             fixture.stop()
             CFRunLoopStop(CFRunLoopGetMain())
             return
@@ -721,7 +723,8 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
                             freezeAt: Double, rewindBehind: Double,
                             expectsRecovery: Bool = false,
                             forceRecoveryReloadAt: Double? = nil,
-                            blockingReload: Bool? = nil) async -> Int32 {
+                            blockingReload: Bool? = nil,
+                            liveOnly: Bool = false) async -> Int32 {
     let counters = FreezeRecoveryCounters()
     let prior = EngineLog.handler
     EngineLog.handler = { line in counters.note(line); prior?(line) }
@@ -736,7 +739,14 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
 
     var options = LoadOptions(isLive: true)
     options.suppressDisplayCriteria = true
-    options.dvrWindowSeconds = dvrWindow
+    // AE#446 round 4: `--live-only` is the reported stack, a client whose rewind lives outside the
+    // engine and which therefore loads with no DVR window at all. There is nothing to rewind into
+    // here, so the timeshift the rejoin has to carry is the one the OUTAGE makes: the consumer plays
+    // the closed window to its end while the source, once it returns, has moved a backlog ahead of it.
+    options.dvrWindowSeconds = liveOnly ? nil : dvrWindow
+    if liveOnly {
+        print("  live-only: LoadOptions.dvrWindowSeconds = nil (the session advertises no rewind)")
+    }
     options.liveBlockingReload = blockingReload
     if let blockingReload {
         print("  blocking reload forced \(blockingReload ? "ON" : "OFF") for this leg")
@@ -769,6 +779,10 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         let elapsed = Date().timeIntervalSince(startTime)
 
+        if !didRewind, liveOnly, elapsed >= rewindAt {
+            didRewind = true
+            print("  REWIND: skipped, this session advertises no rewind to seek into")
+        }
         if !didRewind, elapsed >= rewindAt {
             didRewind = true
             let target = max(0, engine.liveEdgeTime - rewindBehind)

@@ -10,7 +10,30 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A third concurrent reader against one origin was parked, not slowed (AE#450).** The reader's
+  long-lived transport pool allowed two connections per host, and the pool is a `static let`, so
+  those two were the whole process's allowance to one origin, shared by the pump, the subtitle side
+  reader, the forward prefetcher and one more pump per playback surface. On the bounded pool that
+  number throttles, because every request on it ends. On the open-ended pool nothing ahead of the
+  third request is going to end, so URLSession parked it with no callback, no error and no metrics,
+  the open spent its full 15 s deadline, and the load reported a source that would not open for a
+  queue the engine had built itself. The reporter measured four live tiles on one Jellyfin origin
+  while three concurrent `curl` pulls of the same endpoints flowed at full rate. What the engine
+  asks of one origin is now bounded by `OriginRequestBudget` alone (AE#377), which counts requests
+  rather than connections, waits with a budget, says that it waited, and lowers itself when the
+  origin refuses. `LoadOptions.maxConcurrentSourceRequests == nil` documented "counts but does not
+  cap" and a lower ceiling underneath it made that untrue, in silence.
+
+- **A connection that never delivers a first byte says so (AE#450).** The only line describing a
+  connection that delivers nothing was armed at the stall threshold, 20 s, which is longer than the
+  arcs that give up on a source first, so the one outcome it could never describe was the one where
+  the first byte never comes. A generation with nothing delivered is now reported at a quarter of
+  the threshold, capped at 5 s, and the line carries how many requests the engine holds open against
+  that origin next to what the transport pool allows: a request parked in the transport and an
+  origin sitting on the request look identical from everywhere downstream, and they take different
+  fixes. It reports, it never acts, so nothing about when a connection ends has changed.
 
 ## [6.56.3] - 2026-08-29
 

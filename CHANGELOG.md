@@ -12,6 +12,81 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.56.0] - 2026-08-29
+
+### Fixed
+
+- **An outage rejoin lands where the session was held, and no longer at the live edge (AE#446).** A live
+  seek clamped its target against `LiveWindow.edgeTime`, a running maximum over publish ticks, and
+  converted it by subtracting that edge from the item's `seekableEnd` sampled now. The pair describes one
+  state only while both come from the same epoch, and a rejoin runs in the two moments where they do not:
+  during an outage the published edge freezes, because an item that has seen an ENDLIST never reloads its
+  playlist, while the playhead runs on through the runway. Measured on a device, a viewer 31 s back
+  rejoined 29 s past the place it held with its timeshift discarded. Both ends now read one sample, the
+  edge coming from the item being seeked and the conversion running through the seam-aware
+  `PresentationAxisMap` the engine already uses for scrub thumbnails, so the shift in force for that
+  position is the one applied.
+
+- **The outage hold now lasts as long as the read it depends on (AE#446).** The no-cut watchdog abandons
+  the source read 35 s after the last cut, and that read is the only thing able to observe the source
+  coming back. Measured on the harness with a 76 s outage: the read was aborted while 46 s of runway were
+  still being handed to the consumer, so the source delivering again at +76 s was never seen and the
+  session held its last frame for the rest of the run. A starvation verdict now defers while the closed
+  window still holds segments above the consumer's fetch point, bounded by the hold budget that already
+  exists, so the deferral lasts only while pictures are still being delivered. A wedged cutter is
+  untouched. Verified across three legs: a 25 s and a 76 s outage both rejoin with zero segments skipped,
+  and a 150 s outage spends the budget and hands the session to the host rather than swapping into it.
+
+- **A read that was given up no longer reads as a source delivering again (AE#446).** The no-cut exit
+  flushes a last partial segment in the same millisecond as its abort, which refreshes the finalize
+  timestamp, so the production-resumed check saw "delivering again" for one cadence and the watcher
+  swapped the item into a window whose source was dead. An abandoned read now blocks both the swap and
+  the watcher, and says so rather than polling a source nobody is reading.
+
+- **The served `TARGETDURATION` is decided at the resolution the playlist serves it in (AE#447).** A live
+  `#EXTINF` is `nextStart - startSeconds`, a difference of two accumulated item-axis doubles, and the
+  operands carry different representation error. On a reporting stack cutting a strictly 2.000 s GOP, 74
+  of 80 segments came out exactly 2.0 and six landed one to four ulp above it. The seal takes the max over
+  the window, so one is enough: `ceil` charged a whole second for an excess of 4e-16, and `3 x TD` turned
+  that into a 9 s first-manifest holdback instead of 6 s, a measured 1.07 to 1.09 s on every zap. The
+  playlist writes `#EXTINF` with `%.3f`, so a millisecond is the finest distinction any client can read,
+  and every term of the derivation is now taken at that resolution, with rounding that matches the
+  formatter so the value is never below what the playlist prints. A genuine excess is unaffected: 2.0006 s
+  still seals at 3. The same error runs the other way through the first-serve gate, where the float sum of
+  three 2.000 s segments lands a hair below 6.0 for some first-segment starts, which would have held for a
+  fourth segment nobody needs on some sessions and not others; the cushion check and the first-serve
+  account now use the same served resolution as the value they are checked against.
+
+- **The `TARGETDURATION` floor is sealed from what the source did, not from what it advertised (AE#447).**
+  Four terms pushed it up, and two of them were the engine measuring its own wait. The cadence meter was
+  seeded with the upstream's self-declared `TARGETDURATION`, which is the exact number the class exists to
+  distrust; the playlist poll ran at half that same advert, so a 2.000 s origin advertising 3 was sampled
+  every 1.5 s and its arrivals quantized upward (measured floor 3.133 s on one join of three); the floor
+  read the still-open gap from inside the gate that was holding it open, which feeds back through the
+  holdback (three consecutive joins sealed 3, then 4, then 4); and an arrival interval entered as
+  `ceil(gap)`, asking for `4.5 x gap` of startup depth that nobody chose, where the patience it answers to
+  is `1.5 x TD`. The poll now runs at half the segment duration the upstream really served, the floor
+  takes closed intervals and the longest segment actually delivered, and the whole derivation is printed
+  once per session so the term that carried a seal is nameable from a log rather than by elimination.
+
+- **A subtitle rendition serves the sealed `TARGETDURATION` (AE#447).** Its playlist rebuilt the
+  derivation by hand, so a rendition could advertise a different depth from the video it belongs to. Both
+  it and the whole-program sideload call the shared derivation now.
+
+### Changed
+
+- **The large-allocation census names the allocator family from its growth ladder (AE#445).** A footprint
+  pinned to one REALLOC-tagged block on an exact x1.25 ladder is attributable from the ratio alone:
+  Foundation's `Data` adds `newLength >> 2` above 128 KB, `av_fast_realloc` adds a sixteenth, the AVIO
+  dynamic buffer adds a half, Swift's `Array` doubles. The census prints `bigGrowth=1.2501x(Data)` beside
+  `bigExact`, with the memprobe walk and the 8 Hz trigger walk each keeping their own previous value,
+  since a shared one would report the ratio the other sampler's interval produced. An unrecognised ratio
+  is printed bare rather than rounded into the nearest family.
+
+- **`setLargeAllocationCensusEnabled` takes a `triggerCaptureCap` (0 = uncapped).** A steady mux-rate climb
+  spends one capture per threshold crossed, so the previously fixed twelve ran out 4.4 minutes before the
+  reporting session's kill and the decisive final step survived only in the 30 s grid.
+
 ## [6.55.0] - 2026-08-28
 
 ### Changed

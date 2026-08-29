@@ -72,6 +72,9 @@ final class NativeAVPlayerHost {
     /// AE#440: keeps the "left the wait alone" line to one per load. It reports the depth that failed
     /// the floor, which is the only way to tell a starved join from a rate evaluation after the fact.
     private var liveJoinThinBufferLogged: Bool = false
+    /// AE#440 round 3: one witness per load for a hold that was refused, so the bound is read while the
+    /// hold stands and not only at its edges. Observes, never acts (see `startLiveJoinHoldWitness`).
+    private var liveJoinHoldWitnessStarted: Bool = false
     /// AE#443: what the items this host has already retired transferred, so `rx` keeps describing the
     /// SESSION across an item swap the session survives.
     ///
@@ -1120,6 +1123,7 @@ final class NativeAVPlayerHost {
                         category: .engine
                     )
                 }
+                self.startLiveJoinHoldWitness(item: item)
                 return
             }
             self.liveJoinImmediateStartSpent = true
@@ -1134,6 +1138,116 @@ final class NativeAVPlayerHost {
             )
             self.avPlayer.playImmediately(atRate: rate)
         }
+    }
+
+    /// AE#440 round 3: what a refused hold did next, reported and never acted on.
+    ///
+    /// The guard above answers one instant, and the bound it read is read only at the hold's edges: a
+    /// `timeControlStatus` change or a `reasonForWaitingToPlay` change. A join that begins the hold
+    /// starved and fills while the reason stands still therefore gets no second look, and no log line
+    /// says whether that happened. The reporter's stack is about to make that shape common rather than
+    /// hypothetical: with #447 the first manifest is served 1.2 s into a join and with #449 the
+    /// display-criteria gate no longer spends a 2 s cap in front of `play()`, so the decision now falls
+    /// EARLIER relative to the media arriving, which is the variable that decides what the guard reads.
+    ///
+    /// So this samples the same reading while the hold stands, and says which of three things happened:
+    /// the cushion crossed the floor with the hold still standing (the case that would justify deciding
+    /// during a hold), the hold ended first (the guard was right and the wait was AVPlayer's own rate
+    /// estimate), or the sampling budget ran out with the hold still up. Exactly one line either way,
+    /// because a witness that is silent about its own negative cannot be told from a witness that never
+    /// ran.
+    ///
+    /// It does not start playback. Firing on a cushion that has just crossed and is still climbing is
+    /// the bet `minimumLiveJoinBufferAhead` exists to refuse, and the evidence for taking it is what
+    /// this produces rather than what it assumes.
+    private func startLiveJoinHoldWitness(item: AVPlayerItem) {
+        guard !liveJoinHoldWitnessStarted else { return }
+        liveJoinHoldWitnessStarted = true
+        let startedAt = DispatchTime.now()
+        Task { @MainActor [weak self] in
+            var last = LiveJoinBufferReading(bufferEmpty: true, aheadSeconds: 0)
+            for _ in 0..<Self.liveJoinHoldWitnessSamples {
+                try? await Task.sleep(nanoseconds: UInt64(Self.liveJoinHoldWitnessInterval * 1_000_000_000))
+                guard let self, self.playerItem === item, !self.liveJoinImmediateStartSpent else { return }
+                let standing = Self.secondsSince(startedAt)
+                // The hold is over: the roll, a pause or a spent one-shot all end this witness, and the
+                // last reading is what the guard would have been deciding on the whole time.
+                guard self.playIntent, self.timeControlStatus == .waitingToPlayAtSpecifiedRate else {
+                    EngineLog.emit(
+                        "[NativeAVPlayerHost] #\(self.sessionID) "
+                        + Self.liveJoinHoldAccount(outcome: .holdEnded,
+                                                   standingSeconds: standing, reading: last),
+                        category: .engine
+                    )
+                    return
+                }
+                last = await Self.liveJoinBufferReading(item)
+                guard Self.shouldStartLiveJoinImmediately(
+                    armed: true, alreadySpent: false, hostWantsToPlay: true,
+                    isWaitingToMinimizeStalls: true,
+                    playbackBufferEmpty: last.bufferEmpty, bufferedAheadSeconds: last.aheadSeconds
+                ) else { continue }
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(self.sessionID) "
+                    + Self.liveJoinHoldAccount(outcome: .crossed,
+                                               standingSeconds: Self.secondsSince(startedAt),
+                                               reading: last),
+                    category: .engine
+                )
+                return
+            }
+            guard let self else { return }
+            EngineLog.emit(
+                "[NativeAVPlayerHost] #\(self.sessionID) "
+                + Self.liveJoinHoldAccount(outcome: .budgetSpent,
+                                           standingSeconds: Self.secondsSince(startedAt), reading: last),
+                category: .engine
+            )
+        }
+    }
+
+    /// How a refused live-join hold ended, from the witness's side.
+    enum LiveJoinHoldOutcome: Sendable {
+        /// The cushion reached the floor while the hold was still standing.
+        case crossed
+        /// The hold ended (rolled, paused, or the one-shot was spent elsewhere) before it did.
+        case holdEnded
+        /// The sampling budget ran out with the hold still standing.
+        case budgetSpent
+    }
+
+    /// One line per refused hold, in the terms the decision would be taken in. Pure so the negative
+    /// cases are pinned by tests rather than by a device run that happens not to produce them.
+    nonisolated static func liveJoinHoldAccount(outcome: LiveJoinHoldOutcome,
+                                                standingSeconds: Double,
+                                                reading: LiveJoinBufferReading) -> String {
+        let stood = String(format: "%.2f", standingSeconds)
+        let ahead = String(format: "%.2f", reading.aheadSeconds)
+        let floor = String(format: "%.2f", minimumLiveJoinBufferAhead)
+        let head = "AE#440 live join: "
+        switch outcome {
+        case .crossed:
+            return head + "the wait was still standing \(stood)s after the refusal when the buffer "
+                + "reached the floor (ahead \(ahead)s, floor \(floor)s); observed only, the decision "
+                + "is still taken at the edges"
+        case .holdEnded:
+            return head + "the wait ended \(stood)s after the refusal without the buffer reaching the "
+                + "floor (last reading ahead \(ahead)s, empty=\(reading.bufferEmpty), floor \(floor)s)"
+        case .budgetSpent:
+            return head + "the wait was still standing after \(stood)s of sampling and the buffer had "
+                + "not reached the floor (last reading ahead \(ahead)s, empty=\(reading.bufferEmpty), "
+                + "floor \(floor)s)"
+        }
+    }
+
+    /// Sampling cadence and budget for the witness above. A quarter second is well under the shortest
+    /// hold either report measured (1.55 s), and five seconds outlives the longest (2.81 s) without
+    /// leaving a sampler running behind a session that has moved on.
+    nonisolated static let liveJoinHoldWitnessInterval: Double = 0.25
+    nonisolated static let liveJoinHoldWitnessSamples: Int = 20
+
+    nonisolated static func secondsSince(_ start: DispatchTime) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
     }
 
     /// AE#440 + AE#422: both figures the live-join guard weighs, read once and off the main actor.

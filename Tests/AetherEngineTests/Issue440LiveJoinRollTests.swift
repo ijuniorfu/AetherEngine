@@ -285,4 +285,88 @@ struct Issue440LiveJoinRollTests {
         #expect(budget >= 2.81)
         #expect(NativeAVPlayerHost.liveJoinHoldWitnessInterval <= 1.55 / 4)
     }
+
+    // MARK: - Round 4: the witness has to speak on the ordinary ending
+
+    /// The field defect, in one assertion. `startLiveJoinImmediatelyIfHolding` spends the one-shot on
+    /// the `.playing` edge, so the rate rolling and the one-shot being spent are the SAME event. Reading
+    /// the spend as "this witness no longer applies" therefore swallowed the ordinary ending: three
+    /// refusals on 6.56.1, one line.
+    @Test("the roll that spends the one-shot reports the hold ending, it does not silence the witness")
+    func spentOneShotIsAnEndingNotASilence() {
+        #expect(NativeAVPlayerHost.liveJoinHoldWitnessEnding(
+            itemIsCurrent: true, waitWasCutShort: false, oneShotSpent: true,
+            hostWantsToPlay: true, isWaitingToPlay: false) == .holdEnded)
+    }
+
+    /// Both orderings of the same edge, because the observer that mirrors `timeControlStatus` and the
+    /// one that spends the one-shot are not guaranteed to have run in the same order as the sample.
+    @Test("either half of the roll edge is enough to end the witness")
+    func eitherHalfOfTheRollEnds() {
+        #expect(NativeAVPlayerHost.liveJoinHoldWitnessEnding(
+            itemIsCurrent: true, waitWasCutShort: false, oneShotSpent: true,
+            hostWantsToPlay: true, isWaitingToPlay: true) == .holdEnded)
+        #expect(NativeAVPlayerHost.liveJoinHoldWitnessEnding(
+            itemIsCurrent: true, waitWasCutShort: false, oneShotSpent: false,
+            hostWantsToPlay: true, isWaitingToPlay: false) == .holdEnded)
+    }
+
+    /// A host that put the session down is an ending too, and it is the one case that was never silent.
+    @Test("a host that stopped wanting to play ends the witness")
+    func pausedHostEnds() {
+        #expect(NativeAVPlayerHost.liveJoinHoldWitnessEnding(
+            itemIsCurrent: true, waitWasCutShort: false, oneShotSpent: false,
+            hostWantsToPlay: false, isWaitingToPlay: true) == .holdEnded)
+    }
+
+    /// The override firing also spends the one-shot, so without its own flag it would report the exact
+    /// opposite of what happened: the cushion HAD reached the floor, an edge read it, and the wait was
+    /// cut rather than ending on its own.
+    @Test("an override that cut the wait is not reported as the wait ending on its own")
+    func cutShortOutranksThePlainSpend() {
+        #expect(NativeAVPlayerHost.liveJoinHoldWitnessEnding(
+            itemIsCurrent: true, waitWasCutShort: true, oneShotSpent: true,
+            hostWantsToPlay: true, isWaitingToPlay: true) == .cutShort)
+        let line = NativeAVPlayerHost.liveJoinHoldAccount(
+            outcome: .cutShort, standingSeconds: 0.75,
+            reading: .init(bufferEmpty: false, aheadSeconds: 1.92))
+        #expect(line.contains("cut short at an edge 0.75s after the refusal"))
+        #expect(!line.contains("without the buffer reaching the floor"))
+    }
+
+    /// An abandoned join is a different fact from a resolved one, and the reader outside cannot infer
+    /// it: this is the exit that used to return without a word.
+    @Test("an item replaced under the witness is an ending with a line of its own")
+    func replacedItemSpeaks() {
+        #expect(NativeAVPlayerHost.liveJoinHoldWitnessEnding(
+            itemIsCurrent: false, waitWasCutShort: false, oneShotSpent: true,
+            hostWantsToPlay: false, isWaitingToPlay: false) == .itemReplaced)
+        #expect(NativeAVPlayerHost.liveJoinHoldAccount(
+            outcome: .itemReplaced, standingSeconds: 2.0,
+            reading: .init(bufferEmpty: true, aheadSeconds: 0)).contains("abandoned rather than resolved"))
+    }
+
+    /// The only reason to keep sampling: the hold is still up, on this item, with the host still asking
+    /// for motion.
+    @Test("a hold that is still standing keeps the witness sampling")
+    func standingHoldKeepsSampling() {
+        #expect(NativeAVPlayerHost.liveJoinHoldWitnessEnding(
+            itemIsCurrent: true, waitWasCutShort: false, oneShotSpent: false,
+            hostWantsToPlay: true, isWaitingToPlay: true) == nil)
+    }
+
+    /// Six outcomes, six distinct sentences. A witness whose lines collide is back to being unreadable
+    /// from outside.
+    @Test("every outcome produces a line, and no two are the same")
+    func everyOutcomeHasItsOwnLine() {
+        let outcomes: [NativeAVPlayerHost.LiveJoinHoldOutcome] =
+            [.crossed, .holdEnded, .cutShort, .itemReplaced, .hostGone, .budgetSpent]
+        let lines = outcomes.map {
+            NativeAVPlayerHost.liveJoinHoldAccount(
+                outcome: $0, standingSeconds: 1.0,
+                reading: .init(bufferEmpty: false, aheadSeconds: 2.0))
+        }
+        #expect(Set(lines).count == outcomes.count)
+        #expect(lines.allSatisfy { $0.hasPrefix("AE#440 live join: ") && $0.count > 40 })
+    }
 }

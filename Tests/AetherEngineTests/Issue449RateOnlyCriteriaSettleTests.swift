@@ -70,33 +70,106 @@ struct Issue449RateOnlyCriteriaSettleTests {
     @Test("An exact match ends the wait for the engine's own rate-only write")
     func exactMatchSettlesRateOnly() {
         #expect(DisplayCriteriaController.rateOnlySwitchIsSettled(
-            attribution: .engineRateOnly, relation: .exact(panelRate: 50.002)))
+            attribution: .engineRateOnly, relation: .exact(panelRate: 50.002), heldForMs: 0))
     }
 
-    @Test("A multiple does not: both cadences satisfy the request, so a switch to the requested rate could still be in flight")
-    func multipleDoesNotSettle() {
+    /// The multiple is the round-2 half. It cannot settle on sight, because a 25.000 request is
+    /// satisfied both by the 50.002 Hz the panel already runs and by a 25 Hz mode it might still be
+    /// switching to. It settles on having HELD that reading, which a switch in flight cannot do: the
+    /// panel blanks while it runs and the link stops delivering ticks.
+    @Test("A multiple settles only once the panel has held it for the dwell")
+    func multipleSettlesAfterTheDwell() {
+        let multiple = DisplayCriteriaController.PanelRateRelation.multiple(panelRate: 50.002, factor: 2)
+        let dwell = DisplayCriteriaController.panelMultipleDwellMs
         #expect(!DisplayCriteriaController.rateOnlySwitchIsSettled(
-            attribution: .engineRateOnly, relation: .multiple(panelRate: 50.002, factor: 2)))
+            attribution: .engineRateOnly, relation: multiple, heldForMs: 0))
+        #expect(!DisplayCriteriaController.rateOnlySwitchIsSettled(
+            attribution: .engineRateOnly, relation: multiple, heldForMs: dwell - 1))
+        #expect(DisplayCriteriaController.rateOnlySwitchIsSettled(
+            attribution: .engineRateOnly, relation: multiple, heldForMs: dwell))
     }
 
-    @Test("A panel in another mode, or one not presenting at all, does not settle anything")
+    /// The asymmetry, stated as a test: the exact match needs no dwell because the requested state and
+    /// the observed state are the same, so a pending switch is a switch to what is already on screen.
+    @Test("An exact match needs no dwell, a multiple does")
+    func onlyTheMultipleNeedsTime() {
+        #expect(DisplayCriteriaController.rateOnlySwitchIsSettled(
+            attribution: .engineRateOnly, relation: .exact(panelRate: 50.002), heldForMs: 0))
+    }
+
+    @Test("A panel in another mode, or one not presenting at all, does not settle anything, however long it holds")
     func differentAndUnmeasuredDoNotSettle() {
-        #expect(!DisplayCriteriaController.rateOnlySwitchIsSettled(
-            attribution: .engineRateOnly, relation: .different(panelRate: 60.0)))
-        #expect(!DisplayCriteriaController.rateOnlySwitchIsSettled(
-            attribution: .engineRateOnly, relation: .unmeasured))
+        for held in [0, DisplayCriteriaController.panelMultipleDwellMs, 10_000] {
+            #expect(!DisplayCriteriaController.rateOnlySwitchIsSettled(
+                attribution: .engineRateOnly, relation: .different(panelRate: 60.0), heldForMs: held))
+            #expect(!DisplayCriteriaController.rateOnlySwitchIsSettled(
+                attribution: .engineRateOnly, relation: .unmeasured, heldForMs: held))
+        }
     }
 
     @Test("A matching rate says nothing about a dynamic-range handshake, so an HDR write is never settled by it")
     func hdrWriteIsNeverSettledByRate() {
         #expect(!DisplayCriteriaController.rateOnlySwitchIsSettled(
-            attribution: .engineHDR, relation: .exact(panelRate: 50.002)))
+            attribution: .engineHDR, relation: .exact(panelRate: 50.002), heldForMs: 0))
+        #expect(!DisplayCriteriaController.rateOnlySwitchIsSettled(
+            attribution: .engineHDR, relation: .multiple(panelRate: 50.002, factor: 2), heldForMs: 10_000))
     }
 
     @Test("A switch the engine did not initiate has no requested rate to be compared against")
     func hostDrivenWriteIsNeverSettledByRate() {
         #expect(!DisplayCriteriaController.rateOnlySwitchIsSettled(
-            attribution: .hostDriven, relation: .exact(panelRate: 50.002)))
+            attribution: .hostDriven, relation: .exact(panelRate: 50.002), heldForMs: 0))
+    }
+
+    // MARK: - The dwell is a run, not a timer
+
+    /// The reason the run compares relations rather than hertz: the per-tick figure moves in the fourth
+    /// decimal, and comparing the value would restart the dwell on nearly every tick.
+    @Test("A cadence wobbling in the fourth decimal is the same run")
+    func jitterDoesNotRestartTheRun() {
+        var run = DisplayCriteriaController.extendCadenceRun(
+            nil, relation: .multiple(panelRate: 50.002, factor: 2), nowMs: 0)
+        run = DisplayCriteriaController.extendCadenceRun(
+            run, relation: .multiple(panelRate: 50.001, factor: 2), nowMs: 50)
+        run = DisplayCriteriaController.extendCadenceRun(
+            run, relation: .multiple(panelRate: 50.003, factor: 2), nowMs: 100)
+        #expect(run.startedAtMs == 0)
+        #expect(run.heldMs(atMs: 300) == 300)
+    }
+
+    /// The case the dwell exists to catch: a panel that stops presenting mid-dwell reads `.unmeasured`,
+    /// which is a different state, so the run restarts and the multiple has to earn its time again.
+    @Test("A blank in the middle of the dwell restarts it")
+    func aBlankRestartsTheRun() {
+        var run = DisplayCriteriaController.extendCadenceRun(
+            nil, relation: .multiple(panelRate: 50.002, factor: 2), nowMs: 0)
+        run = DisplayCriteriaController.extendCadenceRun(run, relation: .unmeasured, nowMs: 150)
+        run = DisplayCriteriaController.extendCadenceRun(
+            run, relation: .multiple(panelRate: 50.002, factor: 2), nowMs: 200)
+        #expect(run.startedAtMs == 200)
+        #expect(!DisplayCriteriaController.rateOnlySwitchIsSettled(
+            attribution: .engineRateOnly, relation: run.relation, heldForMs: run.heldMs(atMs: 250)))
+    }
+
+    /// A panel that lands on a different multiple is a different state too, so a x2 run cannot be
+    /// inherited by a x4 reading.
+    @Test("A different factor is a different run")
+    func factorChangeRestartsTheRun() {
+        let run = DisplayCriteriaController.extendCadenceRun(
+            DisplayCriteriaController.extendCadenceRun(
+                nil, relation: .multiple(panelRate: 50.0, factor: 2), nowMs: 0),
+            relation: .multiple(panelRate: 100.0, factor: 4), nowMs: 100)
+        #expect(run.startedAtMs == 100)
+    }
+
+    /// Six Stage 2 polls, and longer than seven frame intervals at the slowest mode tvOS switches to,
+    /// so a blank cannot fit inside the dwell unobserved. It also has to stay well under the cap it is
+    /// there to avoid spending.
+    @Test("The dwell outlasts a blank and stays well under the cap")
+    func dwellIsBoundedOnBothSides() {
+        let dwell = DisplayCriteriaController.panelMultipleDwellMs
+        #expect(dwell >= 7 * Int(1000.0 / 23.976))
+        #expect(dwell <= 500)
     }
 
     // MARK: - Log vocabulary

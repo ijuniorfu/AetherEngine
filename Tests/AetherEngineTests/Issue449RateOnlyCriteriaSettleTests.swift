@@ -185,4 +185,53 @@ struct Issue449RateOnlyCriteriaSettleTests {
         #expect(DisplayCriteriaController.PanelRateRelation.unmeasured
             .logDescription.contains("unmeasured"))
     }
+
+    // MARK: - Round 3: what a cap line has to be able to say
+
+    /// The reporter's caution, made readable: if a `.multiple` ever reaches the cap, the question is
+    /// whether the run kept breaking or never got going, and the history answers it without a new run.
+    @Test("an unbroken Stage 2 reports no breaks and the run it held")
+    func unbrokenHistoryCountsNoBreaks() {
+        var history = DisplayCriteriaController.PanelCadenceHistory()
+        for ms in stride(from: 50, through: 400, by: 50) {
+            history = DisplayCriteriaController.extendCadenceHistory(
+                history, relation: .multiple(panelRate: 50.002, factor: 2), nowMs: ms)
+        }
+        #expect(history.restarts == 0)
+        #expect(history.longestHeldMs == 350)
+        #expect(history.logDescription.contains("broke 0 times"))
+    }
+
+    /// A tick that reads nothing at all is the blank the dwell exists to catch, and it has to show up as
+    /// a break rather than as a shorter run.
+    @Test("a tick that reads a different cadence breaks the run and is counted")
+    func brokenHistoryCountsTheBreak() {
+        var history = DisplayCriteriaController.PanelCadenceHistory()
+        history = DisplayCriteriaController.extendCadenceHistory(
+            history, relation: .multiple(panelRate: 50.002, factor: 2), nowMs: 50)
+        history = DisplayCriteriaController.extendCadenceHistory(
+            history, relation: .multiple(panelRate: 50.002, factor: 2), nowMs: 150)
+        history = DisplayCriteriaController.extendCadenceHistory(
+            history, relation: .unmeasured, nowMs: 200)
+        history = DisplayCriteriaController.extendCadenceHistory(
+            history, relation: .multiple(panelRate: 50.002, factor: 2), nowMs: 250)
+
+        #expect(history.restarts == 2)
+        // The longest run is the first one (50 ms to 200 ms), not the truncated tail.
+        #expect(history.longestHeldMs == 150)
+        #expect(history.logDescription.contains("broke 2 times"))
+        #expect(history.logDescription.contains("150ms"))
+    }
+
+    /// One break reads as one break, because a line that says "1 times" is a line nobody trusts.
+    @Test("the break count is written as English")
+    func singularBreakReadsAsOne() {
+        var history = DisplayCriteriaController.PanelCadenceHistory()
+        history = DisplayCriteriaController.extendCadenceHistory(
+            history, relation: .exact(panelRate: 50.002), nowMs: 50)
+        history = DisplayCriteriaController.extendCadenceHistory(
+            history, relation: .unmeasured, nowMs: 100)
+        #expect(history.restarts == 1)
+        #expect(history.logDescription.contains("broke 1 time,"))
+    }
 }

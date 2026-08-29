@@ -75,6 +75,10 @@ final class NativeAVPlayerHost {
     /// AE#440 round 3: one witness per load for a hold that was refused, so the bound is read while the
     /// hold stands and not only at its edges. Observes, never acts (see `startLiveJoinHoldWitness`).
     private var liveJoinHoldWitnessStarted: Bool = false
+    /// AE#440 round 4: the one-shot was spent by the override firing rather than by the rate rolling on
+    /// its own. Both spend it, and the witness has to name which, because "the wait ended without the
+    /// buffer reaching the floor" is the opposite of what happened when the override cut it.
+    private var liveJoinImmediateStartCutShort: Bool = false
     /// AE#443: what the items this host has already retired transferred, so `rx` keeps describing the
     /// SESSION across an item swap the session survives.
     ///
@@ -345,6 +349,11 @@ final class NativeAVPlayerHost {
         self.liveJoinImmediateStartSpent = false
         self.liveJoinImmediateStartProbeInFlight = false
         self.liveJoinThinBufferLogged = false
+        // AE#440 round 4: both of these are per LOAD, and the host is reused across loads on the
+        // keepNativeHost path. Left standing, the second live join of a reused host would arm no witness
+        // at all and read the previous join's spend reason.
+        self.liveJoinHoldWitnessStarted = false
+        self.liveJoinImmediateStartCutShort = false
         Self.nextSessionID += 1
         sessionID = Self.nextSessionID
         let sid = sessionID
@@ -1127,6 +1136,7 @@ final class NativeAVPlayerHost {
                 return
             }
             self.liveJoinImmediateStartSpent = true
+            self.liveJoinImmediateStartCutShort = true
             // #436: `defaultRate` is where the session's speed lives; a resume window must not silently
             // return a live join to 1.0 when the host is running at another rate.
             let rate = self.avPlayer.defaultRate != 0 ? self.avPlayer.defaultRate : 1.0
@@ -1155,7 +1165,8 @@ final class NativeAVPlayerHost {
     /// during a hold), the hold ended first (the guard was right and the wait was AVPlayer's own rate
     /// estimate), or the sampling budget ran out with the hold still up. Exactly one line either way,
     /// because a witness that is silent about its own negative cannot be told from a witness that never
-    /// ran.
+    /// ran. Round 4 makes that true: the first version still had two silent exits, and one of them was
+    /// the ordinary ending (see `liveJoinHoldWitnessEnding`).
     ///
     /// It does not start playback. Firing on a cushion that has just crossed and is still climbing is
     /// the bet `minimumLiveJoinBufferAhead` exists to refuse, and the evidence for taking it is what
@@ -1164,21 +1175,31 @@ final class NativeAVPlayerHost {
         guard !liveJoinHoldWitnessStarted else { return }
         liveJoinHoldWitnessStarted = true
         let startedAt = DispatchTime.now()
+        // Held rather than read off `self`, so the two endings that have no host to read it from still
+        // carry the session they belong to.
+        let sid = sessionID
         Task { @MainActor [weak self] in
             var last = LiveJoinBufferReading(bufferEmpty: true, aheadSeconds: 0)
+            func account(_ outcome: LiveJoinHoldOutcome) {
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sid) "
+                    + Self.liveJoinHoldAccount(outcome: outcome,
+                                               standingSeconds: Self.secondsSince(startedAt),
+                                               reading: last),
+                    category: .engine
+                )
+            }
             for _ in 0..<Self.liveJoinHoldWitnessSamples {
                 try? await Task.sleep(nanoseconds: UInt64(Self.liveJoinHoldWitnessInterval * 1_000_000_000))
-                guard let self, self.playerItem === item, !self.liveJoinImmediateStartSpent else { return }
-                let standing = Self.secondsSince(startedAt)
-                // The hold is over: the roll, a pause or a spent one-shot all end this witness, and the
-                // last reading is what the guard would have been deciding on the whole time.
-                guard self.playIntent, self.timeControlStatus == .waitingToPlayAtSpecifiedRate else {
-                    EngineLog.emit(
-                        "[NativeAVPlayerHost] #\(self.sessionID) "
-                        + Self.liveJoinHoldAccount(outcome: .holdEnded,
-                                                   standingSeconds: standing, reading: last),
-                        category: .engine
-                    )
+                guard let self else { account(.hostGone); return }
+                if let ending = Self.liveJoinHoldWitnessEnding(
+                    itemIsCurrent: self.playerItem === item,
+                    waitWasCutShort: self.liveJoinImmediateStartCutShort,
+                    oneShotSpent: self.liveJoinImmediateStartSpent,
+                    hostWantsToPlay: self.playIntent,
+                    isWaitingToPlay: self.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                ) {
+                    account(ending)
                     return
                 }
                 last = await Self.liveJoinBufferReading(item)
@@ -1187,31 +1208,49 @@ final class NativeAVPlayerHost {
                     isWaitingToMinimizeStalls: true,
                     playbackBufferEmpty: last.bufferEmpty, bufferedAheadSeconds: last.aheadSeconds
                 ) else { continue }
-                EngineLog.emit(
-                    "[NativeAVPlayerHost] #\(self.sessionID) "
-                    + Self.liveJoinHoldAccount(outcome: .crossed,
-                                               standingSeconds: Self.secondsSince(startedAt),
-                                               reading: last),
-                    category: .engine
-                )
+                account(.crossed)
                 return
             }
-            guard let self else { return }
-            EngineLog.emit(
-                "[NativeAVPlayerHost] #\(self.sessionID) "
-                + Self.liveJoinHoldAccount(outcome: .budgetSpent,
-                                           standingSeconds: Self.secondsSince(startedAt), reading: last),
-                category: .engine
-            )
+            account(.budgetSpent)
         }
     }
 
+    /// Which ending this sample landed on, or nil to keep sampling. Pure, because the endings that
+    /// matter most are the ones a device run does not reliably produce.
+    ///
+    /// The order is the whole point of round 4. A spent one-shot used to be read first and as a reason
+    /// to stop WITHOUT a line, on the theory that it meant the witness no longer applied. But the rate
+    /// rolling is exactly what spends it (`startLiveJoinImmediatelyIfHolding` spends it on the
+    /// `.playing` edge so the override can never reach a mid-stream rebuffer), so the single most
+    /// common way a refused hold ends was routed into the silent exit and `.holdEnded` was left
+    /// reachable only by a pause. The 6.56.1 field capture is that defect: three refusals, one line,
+    /// and no way from outside to tell a sampler that ended in a state with no line from one that never
+    /// armed. Every ending below emits.
+    nonisolated static func liveJoinHoldWitnessEnding(itemIsCurrent: Bool,
+                                                      waitWasCutShort: Bool,
+                                                      oneShotSpent: Bool,
+                                                      hostWantsToPlay: Bool,
+                                                      isWaitingToPlay: Bool) -> LiveJoinHoldOutcome? {
+        guard itemIsCurrent else { return .itemReplaced }
+        // Before the plain spend, which it also sets: the override firing is the opposite fact from the
+        // wait ending on its own.
+        if waitWasCutShort { return .cutShort }
+        if oneShotSpent || !hostWantsToPlay || !isWaitingToPlay { return .holdEnded }
+        return nil
+    }
+
     /// How a refused live-join hold ended, from the witness's side.
-    enum LiveJoinHoldOutcome: Sendable {
+    enum LiveJoinHoldOutcome: Sendable, Equatable {
         /// The cushion reached the floor while the hold was still standing.
         case crossed
-        /// The hold ended (rolled, paused, or the one-shot was spent elsewhere) before it did.
+        /// The hold ended on its own (the rate rolled, or the host paused) before it did.
         case holdEnded
+        /// A later edge found the cushion over the floor and the override cut the wait short.
+        case cutShort
+        /// The item was replaced under the witness: this join was abandoned rather than resolved.
+        case itemReplaced
+        /// The host went away while the hold stood.
+        case hostGone
         /// The sampling budget ran out with the hold still standing.
         case budgetSpent
     }
@@ -1233,6 +1272,16 @@ final class NativeAVPlayerHost {
         case .holdEnded:
             return head + "the wait ended \(stood)s after the refusal without the buffer reaching the "
                 + "floor (last reading ahead \(ahead)s, empty=\(reading.bufferEmpty), floor \(floor)s)"
+        case .cutShort:
+            return head + "the wait was cut short at an edge \(stood)s after the refusal, so the cushion "
+                + "had crossed the floor by then (last sample ahead \(ahead)s, floor \(floor)s)"
+        case .itemReplaced:
+            return head + "the wait was still standing \(stood)s after the refusal when the item was "
+                + "replaced, so this join was abandoned rather than resolved (last reading ahead "
+                + "\(ahead)s, empty=\(reading.bufferEmpty), floor \(floor)s)"
+        case .hostGone:
+            return head + "the wait was still standing \(stood)s after the refusal when the host went "
+                + "away (last reading ahead \(ahead)s, empty=\(reading.bufferEmpty), floor \(floor)s)"
         case .budgetSpent:
             return head + "the wait was still standing after \(stood)s of sampling and the buffer had "
                 + "not reached the floor (last reading ahead \(ahead)s, empty=\(reading.bufferEmpty), "

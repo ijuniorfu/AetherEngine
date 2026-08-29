@@ -1241,7 +1241,9 @@ final class HLSLocalServer: @unchecked Sendable {
             var total = 0.0
             for i in firstVisible..<count { total += provider.segmentDuration(at: i) }
             var lines: [String] = ["#EXTM3U", "#EXT-X-VERSION:7"]
-            lines.append("#EXT-X-TARGETDURATION:\(max(1, Int(ceil(total))))")
+            let wholeProgramTarget = LiveEdgePolicy.targetDurationSeconds(
+                maxSegmentDuration: total, cutTargetSeconds: nil, cadenceFloorSeconds: nil)
+            lines.append("#EXT-X-TARGETDURATION:\(wholeProgramTarget)")
             lines.append("#EXT-X-MEDIA-SEQUENCE:0")
             lines.append("#EXT-X-PLAYLIST-TYPE:VOD")
             // No trailing comma on EXTINF: the proven-working whole-file sideload omits it ("seems to break it"
@@ -1271,7 +1273,8 @@ final class HLSLocalServer: @unchecked Sendable {
         // segments, so the two values are the same number and may as well come from the same place.
         let targetDuration = (typeIsLive || liveOutage)
             ? provider.liveTargetDurationSeconds(maxSegmentDuration: maxDuration)
-            : Int(ceil(max(1.0, maxDuration)))
+            : LiveEdgePolicy.targetDurationSeconds(maxSegmentDuration: maxDuration,
+                                                   cutTargetSeconds: nil, cadenceFloorSeconds: nil)
 
         var lines: [String] = []
         lines.append("#EXTM3U")

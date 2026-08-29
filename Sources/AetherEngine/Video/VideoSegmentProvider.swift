@@ -112,18 +112,43 @@ enum LiveEdgePolicy {
     /// 2.000 s cadence the ordinary jitter that makes it 2.05 then buys a whole extra second of TD and
     /// three of holdback (measured: 1.07-1.09 s of wall clock per zap).
     static func targetDurationForCadence(_ cadenceSeconds: Double) -> Int {
-        Int(ceil(cadenceSeconds / unchangedPlaylistPatienceMultiplier))
+        wholeSecondsCovering(cadenceSeconds / unchangedPlaylistPatienceMultiplier)
+    }
+
+    /// A duration as the playlist actually serves it: `#EXTINF` is written with `%.3f`, so a millisecond
+    /// is the finest distinction any client can ever read, and nothing below it may decide anything.
+    ///
+    /// AE#447 round 2: the live durations are differences of accumulated item-axis doubles
+    /// (`nextStart - startSeconds` in `reportLiveSegmentFinalized`), and the two operands carry different
+    /// representation error, so a strictly 2.000 s GOP produces the odd `2.0000000000000004`. Measured on
+    /// the reporter's device: 74 of 80 segments exactly `2.0`, 6 one to four ulp above. `ceil` weighs that
+    /// invisible excess as a whole second, the seal takes the MAX over the window so one segment is enough,
+    /// and `3 x TD` turns it into a 9 s holdback: the same 1.1 s per zap the first four fixes removed,
+    /// arriving through a term nobody could see (his log read `max EXTINF 2.000s` and sealed at 3).
+    /// The rounding matches `String(format: "%.3f")`, ties away from zero, so this is never BELOW what the
+    /// playlist prints and the promise always covers the segment the client was handed. `seconds(_:)`
+    /// below is the same quantization as text, so a term printed in the seal line is the term that
+    /// decided it.
+    static func servedSeconds(_ seconds: Double) -> Double {
+        (seconds * 1000).rounded(.toNearestOrAwayFromZero) / 1000
+    }
+
+    /// Whole seconds of promise covering a measured duration, taken at the served resolution.
+    static func wholeSecondsCovering(_ seconds: Double) -> Int {
+        Int(servedSeconds(seconds).rounded(.up))
     }
 
     /// Served `#EXT-X-TARGETDURATION`, in whole seconds: `>= ceil(max EXTINF)` (HLS requirement), floored
     /// by `ceil(1.5 x cut target)` (widens AVPlayer's unchanged-playlist patience, anti -12888) and by
     /// what the observed cadence needs to stay inside that patience. `cutTargetSeconds` /
-    /// `cadenceFloorSeconds` are nil for VOD/EVENT.
+    /// `cadenceFloorSeconds` are nil for VOD/EVENT. Every term is taken at the resolution the playlist
+    /// serves (`servedSeconds`), so the value covers the EXTINFs the client is actually handed and no
+    /// sub-millisecond noise can buy a whole second of holdback.
     static func targetDurationSeconds(maxSegmentDuration: Double,
                                       cutTargetSeconds: Double?,
                                       cadenceFloorSeconds: Double?) -> Int {
-        var td = Int(ceil(max(1.0, maxSegmentDuration)))
-        if let cut = cutTargetSeconds { td = max(td, Int(ceil(cut * 1.5))) }
+        var td = wholeSecondsCovering(max(1.0, maxSegmentDuration))
+        if let cut = cutTargetSeconds { td = max(td, wholeSecondsCovering(cut * 1.5)) }
         if let floor = cadenceFloorSeconds { td = max(td, targetDurationForCadence(floor)) }
         return td
     }
@@ -171,7 +196,12 @@ enum LiveEdgePolicy {
                                         windowSegmentCount: Int) -> Bool {
         guard segmentCount >= minStartupSegments else { return false }
         if segmentCount >= windowSegmentCount { return true }
-        return summedDurationSeconds >= holdBackSeconds(targetDuration: targetDuration)
+        // Judged at the served resolution too, or the depth check disagrees with the value it is checking
+        // against. Same accumulated-double error, other direction: three 2.000 s segments sum to exactly
+        // 6.0 for some first-segment starts and to a hair under it for others (a first start of 0.030 s
+        // lands short, the reporter's 0.060 s does not), and the gate would then hold for a fourth
+        // segment it does not need, a full extra segment duration, on some sessions and not others.
+        return servedSeconds(summedDurationSeconds) >= holdBackSeconds(targetDuration: targetDuration)
     }
 
     /// AE#374: the first live manifest's own account of what it cost, for the log.
@@ -186,7 +216,7 @@ enum LiveEdgePolicy {
                                   summedDurationSeconds: Double,
                                   targetDuration: Int) -> String {
         let holdBack = holdBackSeconds(targetDuration: targetDuration)
-        let reached = summedDurationSeconds >= holdBack ? ">=" : "<"
+        let reached = servedSeconds(summedDurationSeconds) >= holdBack ? ">=" : "<"
         return "first live manifest served after \(seconds(waitedSeconds))s: "
             + "\(segmentCount) segments / \(seconds(summedDurationSeconds))s "
             + "\(reached) \(seconds(holdBack))s holdback (TARGETDURATION \(targetDuration)s)"

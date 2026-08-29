@@ -120,4 +120,126 @@ final class Issue447TargetDurationEvidenceTests: XCTestCase {
             value: 4, maxSegmentDuration: 3.2, cutTargetFloor: 4.0, cadenceFloor: nil, selfReported: nil)
         XCTAssertTrue(derivation.account.contains("measured floor none yet"), derivation.account)
     }
+
+    // MARK: - Round 2: the resolution the playlist serves
+
+    /// The producer derives a live EXTINF as `nextStart - startSeconds`, both accumulated item-axis
+    /// doubles. Built the way the producer builds them, from the reporter's own first start (0.060 s),
+    /// so the case is in the fixture and not in a hand-picked literal.
+    private func accumulatedDurations(first: Double, cut: Double, count: Int) -> [Double] {
+        var starts: [Double] = []
+        var t = first
+        for _ in 0...count { starts.append(t); t += cut }
+        return (0..<count).map { starts[$0 + 1] - starts[$0] }
+    }
+
+    func testAccumulatedStartsReallyProduceAnExcessBelowTheServedResolution() {
+        let durations = accumulatedDurations(first: 0.06, cut: 2.0, count: 8)
+        let maxDuration = durations.max() ?? 0
+        XCTAssertGreaterThan(maxDuration, 2.0,
+                             "if no duration exceeds 2.0 this suite proves nothing about the ceil")
+        XCTAssertLessThan(maxDuration - 2.0, 0.0005,
+                          "and the excess is below the millisecond the playlist can even print")
+        XCTAssertEqual(String(format: "%.3f", maxDuration), "2.000",
+                       "which is why the seal line read 2.000 while the value sealed at 3")
+    }
+
+    func testInvisibleExcessNoLongerBuysASecondOfTargetDuration() {
+        let durations = accumulatedDurations(first: 0.06, cut: 2.0, count: 8)
+        let td = LiveEdgePolicy.targetDurationSeconds(
+            maxSegmentDuration: durations.max() ?? 0,
+            cutTargetSeconds: 0.5,
+            cadenceFloorSeconds: 2.0
+        )
+        XCTAssertEqual(td, 2, "one ulp over a 2.000 s GOP used to seal at 3, holdback 9 s")
+        XCTAssertEqual(LiveEdgePolicy.holdBackSeconds(targetDuration: td), 6.0, accuracy: 1e-9)
+    }
+
+    /// The invariant the served value has to satisfy, checked against the formatter the playlist writer
+    /// actually uses: TARGETDURATION covers every EXTINF the client is handed.
+    func testTargetDurationCoversEveryEXTINFAsServed() {
+        for first in [0.0, 0.06, 0.123, 1.7, 9.94] {
+            for cut in [0.96, 2.0, 3.2, 5.76] {
+                let durations = accumulatedDurations(first: first, cut: cut, count: 12)
+                let td = LiveEdgePolicy.targetDurationSeconds(
+                    maxSegmentDuration: durations.max() ?? 0,
+                    cutTargetSeconds: nil, cadenceFloorSeconds: nil)
+                for duration in durations {
+                    let served = Double(String(format: "%.3f", duration))!
+                    XCTAssertGreaterThanOrEqual(Double(td), served,
+                                                "TD \(td) < served EXTINF \(served) (cut \(cut))")
+                }
+            }
+        }
+    }
+
+    func testARealExcessStillRaisesIt() {
+        XCTAssertEqual(LiveEdgePolicy.targetDurationSeconds(
+            maxSegmentDuration: 2.0006, cutTargetSeconds: nil, cadenceFloorSeconds: nil), 3,
+            "half a millisecond over is visible in the playlist, so it is paid for")
+        XCTAssertEqual(LiveEdgePolicy.targetDurationSeconds(
+            maxSegmentDuration: 2.4, cutTargetSeconds: nil, cadenceFloorSeconds: nil), 3)
+        XCTAssertEqual(LiveEdgePolicy.targetDurationSeconds(
+            maxSegmentDuration: 5.76, cutTargetSeconds: nil, cadenceFloorSeconds: nil), 6,
+            "AE#189's long-GOP shape is unchanged")
+    }
+
+    func testCadenceFloorIsTakenAtTheSameResolution() {
+        XCTAssertEqual(LiveEdgePolicy.targetDurationForCadence(3.0000000000000004), 2,
+                       "3 / 1.5 lands one ulp above 2 and used to ask for a third second of patience")
+        XCTAssertEqual(LiveEdgePolicy.targetDurationForCadence(3.003), 3,
+                       "a measurable 3 ms over still does")
+    }
+
+    /// The other half of the same error: with TD sealed at 2 the gate wants exactly three 2.000 s
+    /// segments, and their float sum lands a hair BELOW 6.0 for some first-segment starts.
+    func testStartupCushionIsJudgedAtTheServedResolutionToo() {
+        let durations = accumulatedDurations(first: 0.03, cut: 2.0, count: 3)
+        let summed = durations.reduce(0, +)
+        XCTAssertLessThan(summed, 6.0, "if this sum is not short the case is not in the fixture")
+        XCTAssertTrue(LiveEdgePolicy.startupCushionSatisfied(
+            segmentCount: 3, summedDurationSeconds: summed, targetDuration: 2, windowSegmentCount: 30),
+            "otherwise the gate holds for a fourth segment, a full extra 2 s, intermittently")
+        XCTAssertTrue(LiveEdgePolicy.firstServeAccount(
+            waitedSeconds: 2.2, segmentCount: 3, summedDurationSeconds: summed, targetDuration: 2)
+            .contains(">= 6.000s holdback"),
+            "and the account has to agree with the gate it reports on")
+        XCTAssertFalse(LiveEdgePolicy.startupCushionSatisfied(
+            segmentCount: 3, summedDurationSeconds: 5.998, targetDuration: 2, windowSegmentCount: 30),
+            "a genuinely short window is still short")
+    }
+
+    private func number(after label: String, in text: String) -> Double? {
+        guard let r = text.range(of: label + "[0-9]+\\.?[0-9]*", options: .regularExpression) else { return nil }
+        return Double(text[r].dropFirst(label.count))
+    }
+
+    /// What made the round-2 report answerable at all: the seal line contradicted itself, printing
+    /// `max(ceil(2.000), ceil(0.750), -)` and sealing at 3. It could, because the terms decided at full
+    /// precision and printed at millisecond. Now they decide at the resolution they print at, so the line
+    /// can be checked against itself by anyone holding a log, and that is what this asserts.
+    func testSealAccountRecomputesTheValueItReports() {
+        let accumulated = accumulatedDurations(first: 0.06, cut: 2.0, count: 8).max() ?? 0
+        for maxSegment in [0.96, 2.0, accumulated, 2.4, 3.2, 5.76] {
+            for cut in [nil, 0.5, 2.0, 4.0] as [Double?] {
+                for floor in [nil, 2.0, 3.0000000000000004, 20.0] as [Double?] {
+                    let value = LiveEdgePolicy.targetDurationSeconds(
+                        maxSegmentDuration: maxSegment, cutTargetSeconds: cut, cadenceFloorSeconds: floor)
+                    let account = LiveTargetDurationDerivation(
+                        value: value, maxSegmentDuration: maxSegment, cutTargetFloor: cut,
+                        cadenceFloor: floor, selfReported: 3.0).account
+                    var recomputed = Int(ceil(try! XCTUnwrap(number(after: "max EXTINF ", in: account))))
+                    if cut != nil {
+                        recomputed = max(recomputed,
+                                         Int(ceil(try! XCTUnwrap(number(after: "1.5 x cut target ", in: account)))))
+                    }
+                    if floor != nil {
+                        recomputed = max(recomputed, Int(try! XCTUnwrap(number(after: "needs ", in: account))))
+                    }
+                    XCTAssertEqual(Int(try! XCTUnwrap(number(after: "sealed at ", in: account))), recomputed,
+                                   "the line has to add up to the number it reports: \(account)")
+                }
+            }
+        }
+    }
 }

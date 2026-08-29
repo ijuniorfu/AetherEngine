@@ -228,4 +228,61 @@ struct Issue440LiveJoinRollTests {
         let ahead = NativeAVPlayerHost.contiguousBufferedEnd(ranges: [(100.8, 103.0)], now: 100.0) - 100.0
         #expect(abs(ahead - 3.0) < 0.001)
     }
+
+    // MARK: - Round 3: what a refused hold did next
+
+    /// The decision is taken at the hold's edges only, so a join that begins starved and fills while
+    /// the reason stands still gets no second look and leaves no trace of having needed one. The
+    /// witness reports the crossing in the terms the decision would be taken in, and does not act.
+    @Test("a crossing under a standing hold is reported as observed, not as a start")
+    func crossingLineNamesItselfAsObservationOnly() {
+        let line = NativeAVPlayerHost.liveJoinHoldAccount(
+            outcome: .crossed, standingSeconds: 0.62,
+            reading: .init(bufferEmpty: false, aheadSeconds: 2.34))
+        #expect(line.contains("still standing 0.62s after the refusal"))
+        #expect(line.contains("ahead 2.34s"))
+        #expect(line.contains("floor 1.50s"))
+        #expect(line.contains("observed only"))
+    }
+
+    /// A witness silent about its own negative cannot be told from one that never ran, which is the
+    /// reading error #447 round 3 had to correct in the seal line. So both negatives speak, and each
+    /// names which of them it is.
+    @Test("both negatives speak, and say which negative they are")
+    func negativesAreDistinguishable() {
+        let ended = NativeAVPlayerHost.liveJoinHoldAccount(
+            outcome: .holdEnded, standingSeconds: 1.81,
+            reading: .init(bufferEmpty: false, aheadSeconds: 0.42))
+        let budget = NativeAVPlayerHost.liveJoinHoldAccount(
+            outcome: .budgetSpent, standingSeconds: 5.0,
+            reading: .init(bufferEmpty: true, aheadSeconds: 0.0))
+        #expect(ended.contains("the wait ended 1.81s after the refusal"))
+        #expect(ended.contains("last reading ahead 0.42s, empty=false"))
+        #expect(budget.contains("still standing after 5.00s of sampling"))
+        #expect(budget.contains("empty=true"))
+        #expect(ended != budget)
+    }
+
+    /// The witness asks the guard, it does not re-implement it: the sample it reports as a crossing is
+    /// exactly a sample the guard would have fired on.
+    @Test("the crossing the witness reports is the guard's own verdict")
+    func witnessAsksTheSameGuard() {
+        for (empty, ahead, expected) in [(false, 2.34, true), (false, 1.49, false), (true, 4.0, false)]
+            as [(Bool, Double, Bool)] {
+            #expect(NativeAVPlayerHost.shouldStartLiveJoinImmediately(
+                armed: true, alreadySpent: false, hostWantsToPlay: true,
+                isWaitingToMinimizeStalls: true, playbackBufferEmpty: empty,
+                bufferedAheadSeconds: ahead) == expected)
+        }
+    }
+
+    /// The sampling bound has to outlive the holds both reports measured (1.55 to 2.81 s) and to be
+    /// finer than the shortest of them, or the witness answers a question nobody asked.
+    @Test("the sampling budget outlives the measured holds and resolves inside them")
+    func witnessBudgetCoversTheMeasuredHolds() {
+        let budget = NativeAVPlayerHost.liveJoinHoldWitnessInterval
+            * Double(NativeAVPlayerHost.liveJoinHoldWitnessSamples)
+        #expect(budget >= 2.81)
+        #expect(NativeAVPlayerHost.liveJoinHoldWitnessInterval <= 1.55 / 4)
+    }
 }

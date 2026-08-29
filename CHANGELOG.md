@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.56.3] - 2026-08-29
+
 ### Fixed
 
 - **An in-place item swap keeps the contract its session was loaded under (AE#440).** A swap replaces the

@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.56.4] - 2026-08-29
+
 ### Fixed
 
 - **A third concurrent reader against one origin was parked, not slowed (AE#450).** The reader's
@@ -34,6 +38,24 @@ the public-API contract.
   that origin next to what the transport pool allows: a request parked in the transport and an
   origin sitting on the request look identical from everywhere downstream, and they take different
   fixes. It reports, it never acts, so nothing about when a connection ends has changed.
+
+- **A concurrent session's segment cache is no longer swept away for being an hour old (AE#451).** A
+  session directory's creation date is when the session STARTED, so an hour in, a live session and a
+  crashed one read identically, and constructing a second `SegmentCache` deleted the running one's
+  directory with every segment in it. Each cache now holds an `flock(2)` on its own session marker for
+  its whole life and the sweep skips any candidate whose marker is still held. `flock` rather than
+  `fcntl`, because flock locks belong to the open file description, so a second cache in the same
+  process is refused too, which is the reported case; the kernel drops the lock when a process dies, so
+  a crashed sibling still sweeps on age exactly as before. An in-process registry would not have covered
+  it: a non-sandboxed process shares the temporary directory with its siblings per USER, not per process.
+
+- **A segment the cache no longer holds stops being advertised as one (AE#451).** The bookkeeping
+  outlived the file: `entries[index]` still named a deleted segment, so the server took the path,
+  stat'ed nothing, and answered 404 for an in-range VOD index, which AVPlayer treats as terminal
+  `loadFailed` rather than as something to re-fetch. The AE#50 in-range rule existed only in the data
+  path. An entry now stops answering where it is redeemed, the file path carries the same
+  classification as the data path (in range is 503, never 404), and a store into a directory that
+  vanished restores it instead of leaving the session permanently unable to write.
 
 ## [6.56.3] - 2026-08-29
 

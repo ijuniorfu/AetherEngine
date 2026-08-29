@@ -878,6 +878,24 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return segs[floor].startSeconds
     }
 
+    /// AE#446 round 4: the newest position the cache holds, in output seconds, i.e. the END of the
+    /// newest resident segment.
+    ///
+    /// The floor above exists because the advertised window over-promises depth. This exists because
+    /// at the one moment a rejoin runs, neither clock the engine publishes can be trusted for the
+    /// other end: the session's edge is a running maximum that an outage freezes below the playhead,
+    /// and a freshly swapped item's own `seekableEnd` is a range it has not finished reporting. The
+    /// producer is the only party that knows what is actually there, and it knows it now rather than
+    /// at the next publish tick.
+    func residentCeilingOutputSeconds() -> Double? {
+        guard let top = cache.highestResidentIndex else { return nil }
+        stateLock.lock()
+        let segs = segments
+        stateLock.unlock()
+        guard top >= 0, top < segs.count else { return nil }
+        return segs[top].startSeconds + segs[top].durationSeconds
+    }
+
     /// Non-blocking init.mp4 peek; the 30s blocking initSegment() is only for the HTTP server path.
     func peekInitSegment() -> Data? {
         cache.fetchInit(timeout: 0)

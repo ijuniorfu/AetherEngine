@@ -123,6 +123,8 @@ final class NativeAVPlayerHost {
     /// to mediaserverd, and clock-tick sinks plus the 1 Hz paused-live timer read this at a
     /// cadence that turns a busy media server into a main-thread hang (#134).
     @Published private(set) var seekableEnd: Double = 0
+    /// AE#446 round 4: the start of the same range. See `seekableStart(from:)`.
+    @Published private(set) var seekableStart: Double = 0
 
     /// Published when a startup `.failed` is a display-rejection of the served master (#98). The
     /// engine's fallback subscriber reads it, decides, and either reloads the media playlist or
@@ -490,7 +492,11 @@ final class NativeAVPlayerHost {
         // keep it current, including while paused.
         seekableObservation = item.observe(\.seekableTimeRanges, options: [.initial, .new]) { [weak self] item, _ in
             let end = Self.seekableEnd(from: item.seekableTimeRanges)
-            Task { @MainActor in self?.seekableEnd = end }
+            let start = Self.seekableStart(from: item.seekableTimeRanges)
+            Task { @MainActor in
+                self?.seekableEnd = end
+                self?.seekableStart = start
+            }
         }
 
         // KVO fires on AVPlayerItem's queue; Task round-trips to MainActor.
@@ -971,6 +977,17 @@ final class NativeAVPlayerHost {
     /// picture frozen BEHIND the target while it fills. The seek finalize / landing use this to avoid
     /// stamping `sourceTime`/`renderedTime` to a target the picture has not reached yet (#123).
     var isBufferingTowardSeekTarget: Bool { avPlayer.timeControlStatus == .waitingToPlayAtSpecifiedRate }
+
+    /// AE#446 round 4: the START of the first seekable range, the other end of `seekableEnd`.
+    ///
+    /// A live item's seekable range is a WINDOW, and only its end was ever mirrored, which is enough
+    /// to follow the live edge and not enough to answer whether a given position is inside the item
+    /// at all. A rejoin after an in-place swap asks exactly that question.
+    nonisolated static func seekableStart(from ranges: [NSValue]) -> Double {
+        guard let r = ranges.first?.timeRangeValue else { return 0 }
+        let start = CMTimeGetSeconds(r.start)
+        return start.isFinite ? start : 0
+    }
 
     /// Maps `seekableTimeRanges` to the end of the last range (seconds); 0 when empty or non-finite.
     nonisolated static func seekableEnd(from ranges: [NSValue]) -> Double {

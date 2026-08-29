@@ -148,6 +148,28 @@ extension AetherEngine {
             ?? (outputFloor + playlistShiftSeconds)
     }
 
+    /// AE#446 round 4: what the producer holds right now, on the session axis, both ends.
+    ///
+    /// This is the range a rejoin is measured against, and it is deliberately not either of the two
+    /// the engine publishes. `LiveWindow.edgeTime` is a running maximum an outage freezes BELOW the
+    /// playhead that legitimately ran past it, and a freshly swapped item's `seekableEnd` is a range
+    /// it has not finished reporting at the readiness instant the rejoin replays in (measured on the
+    /// harness: 43.4 s while the place held was 71.4 s and the producer was cutting past 100 s). The
+    /// cache is the only party that is neither ahead of nor behind itself.
+    ///
+    /// nil where there is no cache to ask, which leaves the rejoin exactly where it was.
+    func residentLiveRangeSessionSeconds() -> ClosedRange<Double>? {
+        guard let session = nativeVideoSession,
+              let floorOutput = session.residentFloorOutputSeconds(),
+              let ceilingOutput = session.residentCeilingOutputSeconds() else { return nil }
+        let floor = presentationAxis.sourceSeconds(forItemSeconds: floorOutput)
+            ?? (floorOutput + playlistShiftSeconds)
+        let ceiling = presentationAxis.sourceSeconds(forItemSeconds: ceilingOutput)
+            ?? (ceilingOutput + playlistShiftSeconds)
+        guard ceiling >= floor else { return nil }
+        return floor...ceiling
+    }
+
     /// AE#442: the TARGETDURATION the live playlist is serving, nil on every path that serves none
     /// (remote HLS live, the software live path, and before the first playlist build).
     var liveTargetDurationSeconds: Double? {
@@ -172,6 +194,32 @@ extension AetherEngine {
         clock.seekableLiveRange = w.seekableRange
         clock.isAtLiveEdge = w.isAtEdge
         clock.behindLiveSeconds = w.behindLiveSeconds
+    }
+
+    /// AE#446 round 4: who asked for a seek. The two differ in exactly two places, both about a live
+    /// session that advertises no DVR window: whether the seek is refused outright, and whether its
+    /// landing is measured against what the session offers or against what the item holds.
+    ///
+    /// A host that draws no scrubber can still have a place to come back to. Reported from a device:
+    /// the outage swap carried the held position, the replay went out through the public `seek(to:)`
+    /// like any host scrub, and the live-only guard refused it before it could land.
+    enum SeekOrigin: Sendable {
+        /// A scrub the host asked for, bound by the contract `seekableLiveRange` states.
+        case host
+        /// The engine coming back to a position it decided itself (the AE#446 outage swap, AE#442's
+        /// in-place recovery reload). Not a scrub, and not bound by the scrubber's contract.
+        case liveRejoin
+    }
+
+    /// AE#446 round 4: whether a live seek is refused for having no DVR window to land in.
+    ///
+    /// The refusal is the host contract's defence-in-depth: hosts hide the scrubber when
+    /// `seekableLiveRange` is nil, and one that does not must not put the item somewhere it cannot
+    /// play from. It says nothing about the engine's own rejoin, which picked its position out of
+    /// content the session itself served.
+    nonisolated static func liveSeekRefusedWithoutDVR(origin: SeekOrigin, windowSeconds: Double?) -> Bool {
+        guard origin == .host else { return false }
+        return windowSeconds == nil
     }
 
     /// AE#446 round 3: where a live seek lands, decided from ONE sample of the item's own clock.
@@ -199,12 +247,25 @@ extension AetherEngine {
         window: LiveWindow,
         itemEnd: Double,
         shift: Double,
-        axis: PresentationAxisMap
+        axis: PresentationAxisMap,
+        origin: SeekOrigin = .host,
+        residentRange: ClosedRange<Double>? = nil
     ) -> (sessionTarget: Double, clockTarget: Double) {
         // An item with no seekable range of its own yet has nothing to sample; the window's own edge
         // is then the only edge there is, and clamping against `shift` alone would collapse the range.
         let edge = itemEnd > 0 ? itemEnd + shift : window.edgeTime
-        let sessionTarget = window.clamp(requested, edge: edge)
+        // AE#446 round 4: a host scrub is bound by what the session ADVERTISES, and the engine's own
+        // rejoin by what the producer HOLDS. They are different questions, and at the moment a rejoin
+        // runs they have different answers: the advertised range is measured against an edge that is
+        // stale in one direction or the other (see `residentLiveRangeSessionSeconds`), while the
+        // carried position is content this same session cut and served, so the only thing that can
+        // disqualify it is eviction.
+        let sessionTarget: Double
+        if origin == .liveRejoin, let resident = residentRange {
+            sessionTarget = Swift.min(Swift.max(requested, resident.lowerBound), resident.upperBound)
+        } else {
+            sessionTarget = window.clamp(requested, edge: edge)
+        }
         let clockTarget = Swift.max(
             0, axis.itemSeconds(forSourceSeconds: sessionTarget) ?? (sessionTarget - shift))
         return (sessionTarget, clockTarget)

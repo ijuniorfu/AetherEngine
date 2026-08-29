@@ -221,10 +221,10 @@ extension AetherEngine {
                 // #127: replay the latest host seek that arrived while the item was pre-ready.
                 // #178: not while still .loading (autostart paths hold .loading past readiness);
                 // replaying now would just re-stash. The state didSet resolves that case.
-                if ready, self.state != .loading, let pending = self.pendingPreReadySeekSeconds {
-                    self.pendingPreReadySeekSeconds = nil
-                    EngineLog.emit("[AetherEngine] replaying deferred pre-ready seek to \(String(format: "%.2f", pending))s (#127)", category: .engine)
-                    Task { @MainActor in await self.seek(to: pending) }
+                if ready, self.state != .loading, let pending = self.pendingPreReadySeek {
+                    self.pendingPreReadySeek = nil
+                    EngineLog.emit("[AetherEngine] replaying deferred pre-ready seek to \(String(format: "%.2f", pending.seconds))s (#127)", category: .engine)
+                    Task { @MainActor in await self.seek(to: pending.seconds, origin: pending.origin) }
                 }
             }
             .store(in: &cancellables)
@@ -1413,7 +1413,7 @@ extension AetherEngine {
         // way (HLSVideoEngine drops the resume anchor for a sequential origin), so leaving the
         // item on the EVENT edge default would start it mid-archive with no way back.
         if !isLive, loadedOptions.sequentialOrigin {
-            pendingPreReadySeekSeconds = 0.0
+            pendingPreReadySeek = PendingPreReadySeek(seconds: 0.0, origin: .host)
         }
         // AE#158: consume-and-reset so only the load() that armed the handover swaps in place; audio-switch
         // and recovery reloads keep their own contracts.

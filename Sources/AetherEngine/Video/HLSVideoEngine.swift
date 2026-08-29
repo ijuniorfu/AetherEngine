@@ -2097,6 +2097,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return prov?.residentFloorOutputSeconds()
     }
 
+    /// AE#446 round 4: the newest resident position in output seconds, the other end of the floor above.
+    func residentCeilingOutputSeconds() -> Double? {
+        restartLock.lock()
+        let prov = provider
+        restartLock.unlock()
+        return prov?.residentCeilingOutputSeconds()
+    }
+
     /// AE#442: the sealed live TARGETDURATION, or nil before the first playlist build.
     func sealedLiveTargetDurationSeconds() -> Int? {
         restartLock.lock()

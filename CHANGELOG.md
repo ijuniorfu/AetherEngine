@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.56.2] - 2026-08-29
+
 ### Fixed
 
 - **A refused live-join hold now reports every ending, including the ordinary one (AE#440).** The witness

@@ -174,6 +174,42 @@ extension AetherEngine {
         clock.behindLiveSeconds = w.behindLiveSeconds
     }
 
+    /// AE#446 round 3: where a live seek lands, decided from ONE sample of the item's own clock.
+    ///
+    /// The two halves used to read different clocks. The target was clamped against
+    /// `LiveWindow.edgeTime`, a running maximum folded over every publish tick of the session, and the
+    /// conversion then subtracted that same edge from a `seekableEnd` sampled now. The pair only
+    /// agrees while both describe the same epoch, and the two moments where they do not are exactly
+    /// the ones a rejoin runs in:
+    ///
+    /// - An outage freezes the edge. The item that saw the ENDLIST never reloads its playlist, so
+    ///   nothing advances `edgeTime` while the playhead legitimately runs on through the runway. The
+    ///   held position is then ABOVE the published edge, the clamp pulls it back down onto it,
+    ///   `behind` collapses to zero, and the fresh item joins the live edge. Measured on a device: a
+    ///   viewer 31 s behind rejoined 29 s of content past the place it held, with its timeshift gone.
+    /// - A rebase moves the shift. An edge published on the new shift against an item still
+    ///   presenting the old one lands the seek BACKWARD by their difference (reported: 47 s of
+    ///   re-watched content, 49.06 s of rebase).
+    ///
+    /// So the edge comes from the item being seeked, and the session-to-item conversion is the
+    /// seam-aware one the rest of the engine already uses, which reads the shift that was in force for
+    /// THIS position rather than the newest one the producer has moved to.
+    nonisolated static func liveSeekLanding(
+        requested: Double,
+        window: LiveWindow,
+        itemEnd: Double,
+        shift: Double,
+        axis: PresentationAxisMap
+    ) -> (sessionTarget: Double, clockTarget: Double) {
+        // An item with no seekable range of its own yet has nothing to sample; the window's own edge
+        // is then the only edge there is, and clamping against `shift` alone would collapse the range.
+        let edge = itemEnd > 0 ? itemEnd + shift : window.edgeTime
+        let sessionTarget = window.clamp(requested, edge: edge)
+        let clockTarget = Swift.max(
+            0, axis.itemSeconds(forSourceSeconds: sessionTarget) ?? (sessionTarget - shift))
+        return (sessionTarget, clockTarget)
+    }
+
     /// Seek to the current live edge. No-op when not live.
     public func seekToLiveEdge() async {
         guard isLive, let w = liveWindow else { return }

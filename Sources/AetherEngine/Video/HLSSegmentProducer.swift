@@ -599,11 +599,21 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// and loops. Hold and re-arm instead, bounded by `liveSlowDeliveryMaxHolds`. A genuine SSAI wedge
     /// reads at full rate with frozen video PTS and still exits immediately; the source-starvation
     /// classification is untouched (its 35 s window with barely-advancing PTS is a dead source).
+    ///
+    /// AE#446 round 3: `servingOutageRunway` is the one case where a dead source must not be given up
+    /// on. The session has already diagnosed the outage, closed its window with ENDLIST, and is
+    /// feeding the consumer segments it holds; the exit tears down the read that is the only thing
+    /// able to notice the source coming back, and takes a playing session with it. Measured on the
+    /// harness with a 76 s outage: the read was aborted 35 s in while 46 s of runway were still
+    /// playing, so the source delivering again at +76 s was never seen and the session held its last
+    /// frame for the rest of the run. Bounded by the same hold budget, so a consumer that stops
+    /// fetching with runway still listed cannot keep a dead source open for the whole session.
     static func noCutStallAction(
         stalledFor: TimeInterval,
         readRate: Double,
         videoPtsAdvanceSeconds: Double,
-        consecutiveHolds: Int
+        consecutiveHolds: Int,
+        servingOutageRunway: Bool = false
     ) -> NoCutStallAction {
         let isWedge = readRate >= liveWedgeProgressRateThreshold
         let timeout = isWedge ? liveSegmentStallTimeoutSeconds : liveSourceStarvationTimeoutSeconds
@@ -611,6 +621,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         if isWedge,
            videoPtsAdvanceSeconds >= liveSlowDeliveryPtsAdvanceSeconds,
            consecutiveHolds < liveSlowDeliveryMaxHolds {
+            return .holdForSlowDelivery
+        }
+        // A wedge is a cutter that cannot cut what it is being given, which waiting does not fix; the
+        // runway deferral is for a source that is not giving it anything.
+        if !isWedge, servingOutageRunway, consecutiveHolds < liveSlowDeliveryMaxHolds {
             return .holdForSlowDelivery
         }
         return .exitForRetune
@@ -1145,6 +1160,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// backpressure wedge detector's fast path (park + flat clock + frozen fetch target -> single-digit
     /// detection instead of the 24 s counter). nil (tests, live) keeps the fast path inert.
     var playbackPositionProvider: (@Sendable () -> Double?)?
+
+    /// AE#446 round 3: reads whether the session is serving a window it closed with ENDLIST because
+    /// the source stopped delivering, with segments the consumer has not reached yet. While that is
+    /// true the no-cut watchdog's starvation exit would tear down a session that is still handing out
+    /// pictures, and with it the only read able to notice the source coming back. nil = false, which
+    /// is the historical behaviour for tests and every non-live path.
+    var outageRunwayProvider: (@Sendable () -> Bool)?
 
     /// #35/#93 startup guard: reads whether AVPlayer has ever presented a frame this item (its
     /// `timeControlStatus` reached `.playing` at least once), off the main actor. nil = assume started
@@ -2653,8 +2675,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// The abort costs nothing this exit was going to keep: `.segmentStall` delegates to a host
     /// retune, which tears the demuxer down.
     private func tickNoCutWatchdog(_ watchdog: NoCutStallWatchdog) {
-        guard let decision = watchdog.evaluate(now: Date()) else { return }
+        guard let decision = watchdog.evaluate(
+            now: Date(), servingOutageRunway: outageRunwayProvider?() ?? false) else { return }
         switch decision {
+        case .holdForOutageRunway(let w):
+            EngineLog.emit(
+                "[HLSSegmentProducer] #446 outage hold "
+                + "\(w.consecutiveHolds)/\(Self.liveSlowDeliveryMaxHolds): nothing cut for "
+                + "\(Int(w.stalledFor))s (rate=\(String(format: "%.1f", w.readRate))pkt/s), and the "
+                + "closed window is still feeding the consumer; keeping the source read so the source "
+                + "coming back can still be seen",
+                category: .session
+            )
         case .holdForSlowDelivery(let w):
             EngineLog.emit(
                 "[HLSSegmentProducer] slow live delivery hold "

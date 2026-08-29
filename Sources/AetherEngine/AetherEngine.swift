@@ -1191,6 +1191,9 @@ public final class AetherEngine: ObservableObject {
     /// AE#446 round 2: polls for the source coming back after a window was closed with ENDLIST.
     /// Cancelled on stop; see `handleLiveOutageWindowExhausted`.
     var liveOutageResumeWatcher: Task<Void, Never>?
+    /// AE#446 round 3: the source read behind that poll has been given up, so the poll cannot come
+    /// true. Set when the engine hands the session to the host; cleared with the session.
+    var liveOutageSourceGivenUp = false
     /// Thread-safe starvation inputs for session-coupled FrameExtractor yield closures
     /// (#93 startup); written on load/stop and by the 1 Hz telemetry tick.
     let extractorYieldState = ExtractorYieldState()
@@ -2143,6 +2146,21 @@ public final class AetherEngine: ObservableObject {
         guard isLive, let session = nativeVideoSession, session.liveOutageEndlistActive else {
             return false
         }
+        // AE#446 round 3: nothing to swap into once the source read is gone, and the last thing a
+        // dying source does is cut a partial segment on its way out (the no-cut exit flushes one in
+        // the same millisecond as its abort). That flush refreshes the finalize timestamp, so
+        // `liveOutageProductionResumed`, which asks whether the source is late, reads "delivering
+        // again" for one cadence and swaps the item into a window whose source is dead. Measured on
+        // the harness with a 150 s outage: the swap fired 10 ms after the retune request.
+        guard !liveOutageSourceGivenUp else {
+            liveOutageResumeWatcher?.cancel()
+            liveOutageResumeWatcher = nil
+            EngineLog.emit(
+                "[AetherEngine] #446 the window ran out and the source read is already given up; "
+                + "holding the last frame, and the session is the host's to retune",
+                category: .engine)
+            return true
+        }
         if session.liveOutageProductionResumed {
             // The place to come back to, decided BEFORE the swap. It cannot be left to
             // `LiveReloadPolicy.recoveryRejoinPosition`, which reads how far behind live the item was:
@@ -2163,7 +2181,8 @@ public final class AetherEngine: ObservableObject {
         guard liveOutageResumeWatcher == nil else { return true }
         EngineLog.emit(
             "[AetherEngine] #446 the window ran out with the source still down; holding the session "
-            + "live and watching for the source to cut again (this is not an end)",
+            + "live and watching for the source to cut again, for as long as the source read lasts "
+            + "(this is not an end)",
             category: .engine)
         liveOutageResumeWatcher = Task { @MainActor [weak self] in
             while !Task.isCancelled {
@@ -2178,6 +2197,27 @@ public final class AetherEngine: ObservableObject {
             }
         }
         return true
+    }
+
+    /// AE#446 round 3: the outage hold's wait ends when the source read does.
+    ///
+    /// The hold parks the session on its last frame and polls the provider for the source cutting
+    /// again. That poll can only come true while something is still reading the source, so when the
+    /// read is given up (the no-cut watchdog's starvation exit, a replayed source, an exhausted reopen
+    /// budget) the watcher is watching nothing. Measured on the harness before the read was taught to
+    /// survive a runway: the session held one frame for the rest of the run and the source delivering
+    /// again 41 s later was never seen. The host is handed the session in the same breath
+    /// (`liveSourceReset`); what has to stop here is the claim.
+    @MainActor
+    func noteLiveSourceGivenUp() {
+        liveOutageSourceGivenUp = true
+        guard liveOutageResumeWatcher != nil else { return }
+        liveOutageResumeWatcher?.cancel()
+        liveOutageResumeWatcher = nil
+        EngineLog.emit(
+            "[AetherEngine] #446 the outage wait ends here: the source read was given up, so nothing "
+            + "can observe the source cutting again; the session is the host's to retune",
+            category: .engine)
     }
 
     /// AE#446 round 2: how often the outage watcher above asks whether the source is back. A source
@@ -2205,16 +2245,25 @@ public final class AetherEngine: ObservableObject {
         // AE#442: this reload swaps the item under a session that stays whole, so a playhead parked
         // in the DVR window is still resident content. Decided BEFORE the load, while the window and
         // the pre-reload playhead still describe the item being replaced.
-        let rejoinPosition = LiveReloadPolicy.recoveryRejoinPosition(
+        let policyRejoin = LiveReloadPolicy.recoveryRejoinPosition(
             isLive: isLive,
             playhead: currentTime,
             behindWhenLastAdvancing: liveBehindWhenLastAdvancing,
             residentRange: liveWindow?.seekableRange,
-            targetDurationSeconds: liveTargetDurationSeconds) ?? liveRejoinOverride
-        let liveTarget: String = rejoinPosition.map {
-            "\(String(format: "%.2f", $0))s, the place it held "
-            + "(\(String(format: "%.1f", liveBehindWhenLastAdvancing))s behind live when the picture "
-            + "last moved, still resident)"
+            targetDurationSeconds: liveTargetDurationSeconds)
+        let rejoinPosition = policyRejoin ?? liveRejoinOverride
+        // AE#446 round 3: name which of the two decided, because they mean different things and the
+        // difference is exactly what a reader of this line is trying to establish. The policy reads
+        // how far behind live the item was; a window closed with ENDLIST is a finite asset whose
+        // seekable end IS the playhead, so that distance reads zero there and printing it next to a
+        // carried position says nothing true about a timeshifted viewer.
+        let liveTarget: String = rejoinPosition.map { position in
+            let provenance = policyRejoin != nil
+                ? "(\(String(format: "%.1f", liveBehindWhenLastAdvancing))s behind live when the "
+                  + "picture last moved, still resident)"
+                : "(carried across the swap: the window it played out under was closed, so its own "
+                  + "distance behind live reads zero)"
+            return "\(String(format: "%.2f", position))s, the place it held \(provenance)"
         } ?? "the live edge (rejoin)"
         EngineLog.emit(
             "[AetherEngine] #65 nudge did not revive the consumer; reloading item at "
@@ -4011,9 +4060,20 @@ public final class AetherEngine: ObservableObject {
             beginDeferredSeek(target: clock.currentTime)
             return
         }
-        // VOD: clamp to [0, duration] in source PTS. Live/DVR: clamp to the
-        // window's session-relative seekable range.
-        let target: Double = isLive ? (liveWindow?.clamp(seconds) ?? seconds) : max(0, min(seconds, duration))
+        // VOD: clamp to [0, duration] in source PTS. Live/DVR: clamp to the window's
+        // session-relative seekable range, and to the edge the ITEM is showing rather than the
+        // running maximum the window keeps across ticks (AE#446 round 3, see `liveSeekLanding`).
+        let liveLanding: (sessionTarget: Double, clockTarget: Double)? = isLive
+            ? liveWindow.map {
+                Self.liveSeekLanding(requested: seconds, window: $0,
+                                     itemEnd: nativeHost?.seekableEnd ?? 0,
+                                     shift: playlistShiftSeconds,
+                                     axis: presentationAxis)
+              }
+            : nil
+        let target: Double = isLive
+            ? (liveLanding?.sessionTarget ?? seconds)
+            : max(0, min(seconds, duration))
         state = .seeking
         // Span isSeeking across the real landing, not just the optimistic .playing flip (#38).
         // Generation guard at each finalize point prevents a superseded seek from clearing it.
@@ -4049,9 +4109,14 @@ public final class AetherEngine: ObservableObject {
                 closeSeekTicket(&programmaticSeekTicket, with: .landed(renderedTime: target))
                 return
             }
-            let behind = (liveWindow?.edgeTime ?? target) - target   // >= 0; 0 == "to the edge"
-            let clockTarget = max(0, (nativeHost?.seekableEnd ?? 0) - behind)
-            EngineLog.emit("[AetherEngine] live seek target=\(target) behind=\(behind) seekableEnd=\(nativeHost?.seekableEnd ?? 0) clockTarget=\(clockTarget)", category: .engine)
+            // AE#446 round 3: the conversion is the seam-aware one, decided in `liveSeekLanding`
+            // from the same sample the clamp above used. The edge-delta form it replaces read the
+            // published edge and the item's clock as if they were one state, which they stop being
+            // at exactly the moments a rejoin runs in.
+            let clockTarget = liveLanding?.clockTarget ?? max(0, target - playlistShiftSeconds)
+            EngineLog.emit("[AetherEngine] live seek target=\(target) clockTarget=\(clockTarget) "
+                           + "seekableEnd=\(nativeHost?.seekableEnd ?? 0) shift=\(playlistShiftSeconds) "
+                           + "publishedEdge=\(liveWindow?.edgeTime ?? 0)", category: .engine)
             // Publish target up front to hold the scrub clock while the host suppresses stale pre-seek reads.
             // Only currentTime takes the optimistic target; sourceTime stays on the rendered frame (#49).
             nativeClockSeconds = clockTarget
@@ -5399,6 +5464,7 @@ public final class AetherEngine: ObservableObject {
         // AE#446: the outage watcher belongs to the session whose window was closed with ENDLIST.
         liveOutageResumeWatcher?.cancel()
         liveOutageResumeWatcher = nil
+        liveOutageSourceGivenUp = false
         liveReloadWatchdogTask?.cancel()
         liveReloadWatchdogTask = nil
         // #95: stop the tap reader before the session (and its SegmentCache) goes away.

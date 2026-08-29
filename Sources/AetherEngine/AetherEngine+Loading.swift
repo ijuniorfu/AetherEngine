@@ -803,6 +803,8 @@ extension AetherEngine {
                     "[AetherEngine] onLiveSourceReset → publishing liveSourceReset to host",
                     category: .session
                 )
+                // AE#446 round 3: a #446 outage hold is waiting on this read; it has to stop saying so.
+                self.noteLiveSourceGivenUp()
                 self.liveSourceReset.send()
             }
         }

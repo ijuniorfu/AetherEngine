@@ -1476,6 +1476,21 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return _liveOutageEndlistLatched
     }
 
+    /// AE#446 round 3: is a window closed by an outage still feeding its consumer?
+    ///
+    /// The consumer's own fetch point is the measure, the same one that decided to close the window:
+    /// while segments remain above it, the session is still handing out pictures and the source read
+    /// must not be abandoned under it. Once the consumer has walked to the end of what the window
+    /// holds, nothing is being delivered any more and the starvation exit is the honest answer again.
+    var outageRunwayAheadOfConsumer: Bool {
+        let consumerTarget = cache.targetIndex
+        stateLock.lock()
+        let latched = _liveOutageEndlistLatched
+        let total = segments.count
+        stateLock.unlock()
+        return latched && consumerTarget >= 0 && consumerTarget + 1 < total
+    }
+
     /// AE#446 round 2: is the source late by its own advertised cadence? Read FRESH rather than through
     /// `liveDeliveryStalled`, which latches for the lifetime of the session on purpose (#167: a
     /// returning CAN-BLOCK-RELOAD would flap). A window closed by an outage has to be able to re-open,

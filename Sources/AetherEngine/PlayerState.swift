@@ -382,6 +382,12 @@ public struct LoadOptions: Sendable, Equatable {
     /// of them, so such a cap bounds nothing while the origin still counts the requests. This
     /// counts requests. The engine logs the negotiated protocol once per origin, so a report can
     /// say which case an origin is.
+    ///
+    /// #450: it is also the ONLY ceiling now. The reader's long-lived transport pool used to allow
+    /// two connections per host, process-wide across every reader and every playback surface, which
+    /// made `nil` here ("count, do not cap") untrue from the third concurrent open-ended read on,
+    /// and untrue in silence: a parked request has no callback, no error and no metrics. Several
+    /// engines on one origin are bounded by this value and by what the origin refuses, nothing else.
     public var maxConcurrentSourceRequests: Int? = nil
 
     /// Trusted media duration in seconds, overriding the container/estimate-derived value (same

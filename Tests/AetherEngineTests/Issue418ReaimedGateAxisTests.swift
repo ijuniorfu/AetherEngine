@@ -142,9 +142,14 @@ struct Issue418ReaimedGateAxisTests {
         #expect(table[13] == nil)
     }
 
-    @Test("an epoch that opened on its boundary records nothing")
-    func exactEpochRecordsNothing() {
-        #expect(HLSVideoEngine.epochShiftTable([13: -9.0], recordingEpochAt: 20, shift: 0) == [13: -9.0])
+    @Test("an epoch that opened on its boundary is recorded as worth nothing")
+    func exactEpochIsRecordedAsZero() {
+        // Round 2 asserted the opposite, that such an epoch is not recorded at all, and that
+        // assertion was the AE#448 defect written down: the entry is what says "an epoch begins
+        // here", so dropping it left the stretch the epoch had just taken over folding with the seam
+        // underneath it. Worth nothing to the axis VALUE is not the same as nothing to record.
+        #expect(HLSVideoEngine.epochShiftTable([13: -9.0], recordingEpochAt: 20, shift: 0)
+                == [13: -9.0, 20: 0])
     }
 
     @Test("segments below a restart keep the offset their bytes still carry")

@@ -2406,9 +2406,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard !isLiveSession else { return }
         anchorShiftLock.lock()
         lastPlacedIndex = index
-        let epochShift = epochShiftByIndex[index] ?? 0
+        // AE#448: the table answers "is this an epoch's FIRST segment", not "is it worth anything".
+        // Every other index is cut on its own boundary inside a run that already carries an axis, and
+        // has nothing to say about where that run begins.
+        let epochShift = epochShiftByIndex[index]
         anchorShiftLock.unlock()
-        guard epochShift != 0 else { return }
+        guard let epochShift else { return }
         restartLock.lock()
         let plannedStart = index >= 0 && index < segmentPlan.count
             ? segmentPlan[index].startSeconds : nil
@@ -2449,11 +2452,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Record what the epoch beginning at `index` is worth, dropping every entry at or above it: a
     /// producer that starts writing there rewrites those segments on their own boundaries, so an
     /// older epoch's offset must stop being claimed for them.
+    ///
+    /// AE#448: an epoch worth NOTHING is recorded too, and that is not bookkeeping. Its bytes still
+    /// carry the axis in force when AVPlayer places them, and they still take over the stretch from
+    /// their own placement upward. Dropping the entry left that stretch to whatever seam sat below it,
+    /// which after a backward seek is an older epoch's, so the clock folded a shift the picture there
+    /// no longer had.
     static func epochShiftTable(
         _ table: [Int: Double], recordingEpochAt index: Int, shift: Double
     ) -> [Int: Double] {
         var next = table.filter { $0.key < index }
-        if shift != 0 { next[index] = shift }
+        next[index] = shift
         return next
     }
 

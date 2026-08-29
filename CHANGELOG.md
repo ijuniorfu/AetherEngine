@@ -10,7 +10,31 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A refused live-join hold now reports every ending, including the ordinary one (AE#440).** The witness
+  added in 6.56.1 promised exactly one line per refusal, on the grounds that a witness silent about its
+  own negative cannot be told from one that never ran. The first field capture produced three refusals
+  and one line. The cause was an ordering rather than a missing case: the override's one-shot is spent on
+  the `.playing` edge so it can never reach a mid-stream rebuffer, which makes the rate rolling and the
+  one-shot being spent the same event, and the witness read that spend first and as a reason to stop
+  without a line. The most common way a hold ends was therefore the one that said nothing. The ending is
+  now a pure decision and all of its branches emit, with a line of their own for an override that cut the
+  wait short (the opposite fact from the wait ending on its own) and for an item replaced under the
+  witness (a join abandoned rather than resolved). The one-witness-per-load flag is also reset per load,
+  so a reused host arms a witness on its second live join instead of none.
+
+- **A panel already holding an integer multiple of the requested rate settles the rate-only gate
+  (AE#449).** The 6.56.1 fix released the gate as soon as the panel was measurably running the requested
+  rate, and left the integer multiple spending the full 2 s cap, because one reading cannot tell a panel
+  that will stay at 50.002 Hz from one still switching to the 25 Hz that was asked for. The device
+  capture that decides it came back twice: the panel read 50.002 Hz across the whole cap with the picture
+  up at t+0.06s and visibly frozen for 2.05 s and 2.02 s, while the 50 fps tunes in the same run reached
+  motion 44 to 84 ms after picture. What separates the two cases is time rather than a single reading, so
+  a multiple now settles after 300 ms of holding that cadence unbroken, and any tick reading a different
+  cadence or none at all restarts the run. This does not claim no switch will begin later, and the 2 s
+  cap never covered that either: a real switch on this hardware runs about 2.8 s, so the gate was already
+  releasing into one.
 
 ## [6.56.1] - 2026-08-29
 

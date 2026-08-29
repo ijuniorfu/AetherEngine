@@ -12,6 +12,48 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.56.5] - 2026-08-29
+
+### Fixed
+
+- **A live item's zero is where its playlist began, not where the producer began (AE#446).** AVPlayer
+  places a live playlist's content by the PLAYLIST it was handed, so an item's timeline starts at the
+  first segment that playlist listed. For the item a session starts with, that is the producer's first
+  segment and the two axes are the same one; for any item attached after the window has slid, which an
+  in-place swap does routinely, it is not, and the session had no term for the difference. Measured on
+  the harness: an item clock reading 70.01 s while its own seekable range ended at 42.00 s, a published
+  playhead of 71.41 s while the picture was at 121.4 s, and a rejoin to the place the viewer held that
+  aimed 50 s past it onto the live edge. The offset is measured rather than assumed and it verifies
+  itself, because one rule sizes both the playlist's first visible segment and the cache's eviction, so
+  the two floors slide together and their difference holds still (50.00 s at every sample across twelve
+  seconds of sliding). It is latched per item and re-measured when the item under the host changes, and
+  it reads 0 for the item a session starts with, so a live session that never swaps an item is
+  unchanged. Folded into the published playhead, the live edge, a seek's landing, and the sampled edge
+  a host scrub clamps against.
+
+- **The engine's own rejoin is no longer refused by the host scrubber's guard (AE#446).** The live-only
+  seek refusal is defence-in-depth for a host that draws a scrubber it should have hidden, and a client
+  that keeps its rewind outside the engine loads with no DVR window at all, so the outage swap's carried
+  position was rejected before it could land. A seek now carries its origin and only a host scrub is
+  refused; `seekableLiveRange` still reads nil on such a session, so nothing a host is told has moved.
+
+- **A rejoin's landing is measured against what the producer holds (AE#446).** At the moment a rejoin
+  runs, neither edge the engine publishes is true: `LiveWindow.edgeTime` is a running maximum an outage
+  freezes below the playhead that legitimately ran past it, and a freshly swapped item's `seekableEnd`
+  is a range it has not finished reporting. Clamping against either put a carried 71.40 s at 43.40 s,
+  four segments below the consumer's own last fetch. The resident range is sampled at the seek instead
+  (`residentCeilingOutputSeconds` is the other end of AE#441's floor), because the only thing that can
+  disqualify a position the session itself served is eviction.
+
+### Added
+
+- **`NativeAVPlayerHost.seekableStart`**, the start of the item's seekable range. Only the end was ever
+  mirrored, which follows a live edge and cannot answer whether a position is inside the item at all.
+
+- **`aetherctl live --live-only`** loads with no DVR window. Because live-only retention is a sliding
+  60 s, it is the only arm in which an item's own axis is observable at all; every DVR leg passed
+  because an 1800 s window does not slide inside one run.
+
 ## [6.56.4] - 2026-08-29
 
 ### Fixed

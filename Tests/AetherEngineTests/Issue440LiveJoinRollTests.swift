@@ -435,4 +435,21 @@ struct Issue440LiveJoinRollTests {
         #expect(host.sessionContract == NativeAVPlayerHost.SessionLoadContract())
         #expect(!host.sessionContract.isLive)
     }
+
+    /// The third silent exit, and the one a rejoin takes: the swap's hold stood for 70 ms, the buffer
+    /// reading is asynchronous, and a hold that ends while it is in flight is correctly left alone. What
+    /// was wrong is that it said nothing, which from outside reads as a lever that was never armed.
+    @Test("a hold that ended before the reading came back says so")
+    func abandonedDecisionSpeaks() {
+        let rolled = NativeAVPlayerHost.liveJoinDecisionAbandoned(afterSeconds: 0.07, rolled: true)
+        #expect(rolled.contains("the rate had rolled"))
+        #expect(rolled.contains("0.07s later"))
+        #expect(rolled.contains("no decision was taken"))
+
+        // A host that paused under the reading ended the hold too, and did not roll: the line must not
+        // claim motion that never happened.
+        let paused = NativeAVPlayerHost.liveJoinDecisionAbandoned(afterSeconds: 0.12, rolled: false)
+        #expect(!paused.contains("rolled"))
+        #expect(paused.contains("no decision was taken"))
+    }
 }

@@ -76,6 +76,8 @@ final class NativeAVPlayerHost {
     /// AE#440: keeps the "left the wait alone" line to one per load. It reports the depth that failed
     /// the floor, which is the only way to tell a starved join from a rate evaluation after the fact.
     private var liveJoinThinBufferLogged: Bool = false
+    /// AE#440 round 5: keeps the "the hold was over before the reading came back" line to one per load.
+    private var liveJoinNoDecisionLogged: Bool = false
     /// AE#440 round 3: one witness per load for a hold that was refused, so the bound is read while the
     /// hold stands and not only at its edges. Observes, never acts (see `startLiveJoinHoldWitness`).
     private var liveJoinHoldWitnessStarted: Bool = false
@@ -402,6 +404,7 @@ final class NativeAVPlayerHost {
         self.liveJoinImmediateStartSpent = false
         self.liveJoinImmediateStartProbeInFlight = false
         self.liveJoinThinBufferLogged = false
+        self.liveJoinNoDecisionLogged = false
         // AE#440 round 4: both of these are per LOAD, and the host is reused across loads on the
         // keepNativeHost path. Left standing, the second live join of a reused host would arm no witness
         // at all and read the previous join's spend reason.
@@ -1154,6 +1157,7 @@ final class NativeAVPlayerHost {
               let item = playerItem
         else { return }
         liveJoinImmediateStartProbeInFlight = true
+        let probeStart = DispatchTime.now()
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.liveJoinImmediateStartProbeInFlight = false }
@@ -1163,7 +1167,23 @@ final class NativeAVPlayerHost {
             guard !self.liveJoinImmediateStartSpent,
                   self.playIntent,
                   self.timeControlStatus == .waitingToPlayAtSpecifiedRate
-            else { return }
+            else {
+                // Round 5: and say so. This is the last silent exit of the three the report walked into,
+                // and it is the one a short hold takes: a rejoin swap that rolled 70 ms after entering the
+                // wait produced no line at all, which from outside is indistinguishable from a lever that
+                // was never armed on that path. One per load, because a hold has one such ending.
+                if !self.liveJoinNoDecisionLogged {
+                    self.liveJoinNoDecisionLogged = true
+                    EngineLog.emit(
+                        "[NativeAVPlayerHost] #\(self.sessionID) "
+                        + Self.liveJoinDecisionAbandoned(
+                            afterSeconds: Self.secondsSince(probeStart),
+                            rolled: self.timeControlStatus == .playing),
+                        category: .engine
+                    )
+                }
+                return
+            }
             guard Self.shouldStartLiveJoinImmediately(
                 armed: self.liveJoinStartsImmediately,
                 alreadySpent: self.liveJoinImmediateStartSpent,
@@ -1352,6 +1372,20 @@ final class NativeAVPlayerHost {
             return head + "the wait was still standing after \(stood)s of sampling and the buffer had "
                 + "not reached the floor (\(seen))"
         }
+    }
+
+    /// The decision's own ending when there was nothing left to decide (#440 round 5). Pure, because the
+    /// hold that produces it is 70 ms long and no harness reproduces it on demand.
+    ///
+    /// It is not a defect that no decision was taken: the buffer reading is asynchronous, so a hold that
+    /// ends while it is in flight has to be left alone rather than acted on from a state that no longer
+    /// exists (AE#422). What was a defect is that this said nothing, which reads exactly like a lever
+    /// that was never armed for the path at all.
+    nonisolated static func liveJoinDecisionAbandoned(afterSeconds: Double, rolled: Bool) -> String {
+        "AE#440 live join: the hold was over "
+        + (rolled ? "and the rate had rolled " : "")
+        + "by the time the buffer reading came back \(String(format: "%.2f", afterSeconds))s later, "
+        + "so no decision was taken on it"
     }
 
     /// Sampling cadence and budget for the witness above. A quarter second is well under the shortest

@@ -30,6 +30,12 @@ the public-API contract.
   line names the absence, so a reader can tell a measured starved buffer from a witness that never got
   to look.
 
+- **A join decision abandoned mid-reading says so (AE#440).** The buffer reading behind the decision is
+  asynchronous, so a hold that ends while it is in flight is correctly left alone rather than acted on
+  from a state that no longer exists. It used to be left alone silently, which is the third and last of
+  the silent exits this report walked into, and the one a rejoin swap takes: 70 ms of hold, no line, and
+  no way from outside to tell it apart from a lever that was never armed for that path.
+
 ### Changed
 
 - **A rate-only gate that reaches its cap now names what the dwell did (AE#449).** The cap line carries

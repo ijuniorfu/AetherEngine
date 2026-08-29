@@ -328,6 +328,85 @@ final class DisplayCriteriaController {
         headroomAboveOne && !switchInProgress
     }
 
+    /// How the cadence the panel is measurably running relates to the rate the criteria asked for (#449).
+    enum PanelRateRelation: Equatable {
+        /// The panel is running the requested rate.
+        case exact(panelRate: Double)
+        /// The panel is running an exact integer multiple of the requested rate. Every frame lands on a
+        /// whole number of refreshes, which is the mode tvOS itself picks for sub-50 content (a 25.000
+        /// request measured on a panel held at 50.002 Hz, #449), so nothing is wrong with it. It is
+        /// deliberately *not* treated as settled: unlike an exact match it cannot rule out a switch to the
+        /// requested rate still being in flight, because both cadences satisfy the request.
+        case multiple(panelRate: Double, factor: Int)
+        /// Measured, and neither. A switch may still be running, or the panel ignored the criteria.
+        case different(panelRate: Double)
+        /// No fresh display-link tick, or no rate was requested. The panel is not presenting frames, which
+        /// is exactly what a blanked mid-handshake panel looks like from here.
+        case unmeasured
+
+        var logDescription: String {
+            switch self {
+            case .exact(let rate):
+                String(format: "panel %.3fHz, the requested rate", rate)
+            case .multiple(let rate, let factor):
+                String(format: "panel %.3fHz", rate) + ", an exact x\(factor) multiple of the requested rate"
+            case .different(let rate):
+                String(format: "panel %.3fHz, neither the requested rate nor a multiple of it", rate)
+            case .unmeasured:
+                "panel cadence unmeasured (no display-link tick within the freshness window)"
+            }
+        }
+    }
+
+    /// How far two refresh rates may differ and still be the same mode, as a fraction of the rate (#449).
+    ///
+    /// The binding pair is 23.976 against 24.000: 0.024 Hz apart, and they are genuinely different modes
+    /// (mixing them repeats a frame every ~42 s). At 24 Hz this tolerance is 0.012 Hz, half that gap.
+    /// The other direction is a panel that reports its mode slightly off nominal, which is the normal case:
+    /// the #449 reporter's 50 Hz panel reads 50.002 Hz.
+    nonisolated static let panelRateTolerance: Double = 0.0005
+
+    nonisolated static func panelRateRelation(requestedRate: Float?, panelNominalRate: Double?) -> PanelRateRelation {
+        guard let requested = requestedRate.map(Double.init), requested > 0, requested.isFinite,
+              let panel = panelNominalRate, panel > 0, panel.isFinite else { return .unmeasured }
+        if abs(panel - requested) <= requested * panelRateTolerance { return .exact(panelRate: panel) }
+        // Bounded before the Int conversion: the ratio is derived from a display-link duration, and an
+        // Int(_:) of a value outside Int's range traps.
+        let factor = (panel / requested).rounded()
+        if factor >= 2, factor <= 16, abs(panel - factor * requested) <= panel * panelRateTolerance {
+            return .multiple(panelRate: panel, factor: Int(factor))
+        }
+        return .different(panelRate: panel)
+    }
+
+    /// #449: a rate-only criteria write asks the panel to change exactly one thing, so once the panel is
+    /// measurably running the requested rate that change is done, whatever the notifications say.
+    ///
+    /// It has to be said that way round, because on the reporter's panel the notifications say nothing
+    /// usable: a `rate=50.000` write to a display already running 50.002 Hz still posts a mode-switch
+    /// start, never posts an end, and leaves `isDisplayModeSwitchInProgress` set for the whole cap. Eight
+    /// of nine gates in an 18 minute session spent the full 2 s that way, and with the #447 holdback down
+    /// to 6 s the manifest no longer hides it: the first frame reaches the panel a second earlier and then
+    /// sits there frozen, which reads worse than the longer join it replaced.
+    ///
+    /// Restricted to `engineRateOnly` on purpose. An HDR write asks for a dynamic range as well, and a
+    /// matching rate says nothing about that handshake; a switch nobody here initiated has no requested
+    /// rate to compare against at all. The residual case this does not cover, and which the 2 s cap does
+    /// not cover either, is a range transition started elsewhere (a preceding `reset()`, a sole-writer
+    /// host) that is still running under a rate the panel never had to change: real switches on this
+    /// hardware measure 2.8 s, so the cap was already releasing ~800 ms into them.
+    nonisolated static func rateOnlySwitchIsSettled(attribution: CriteriaAttribution,
+                                                    relation: PanelRateRelation) -> Bool {
+        guard attribution == .engineRateOnly else { return false }
+        if case .exact = relation { return true }
+        return false
+    }
+
+    /// How stale a display-link tick may be and still describe the panel's current cadence (#449). Three
+    /// frame intervals at the slowest mode tvOS switches to (23.976 Hz), so a panel that is merely running
+    /// slowly is not mistaken for one that has stopped presenting.
+    nonisolated static let panelCadenceFreshnessMs = 125
+
     /// Whether a recorded switch belongs to the load whose gate is asking (#339).
     ///
     /// The record survives between loads, so a gate that runs without a preceding arm must not read it: an
@@ -553,6 +632,18 @@ final class DisplayCriteriaController {
             return
         }
 
+        // #449: what the panel is actually doing while the gate holds play(). Started here rather than at
+        // the criteria write so its lifetime is the gate's, and read per tick rather than averaged, because
+        // the question is which mode the panel is in *now*. Stage 1 gives it the ticks Stage 2 reads.
+        let cadence = DisplayLinkSampler()
+        cadence.start(screen: screen)
+        defer { cadence.invalidate() }
+        func panelRelation() -> PanelRateRelation {
+            Self.panelRateRelation(
+                requestedRate: lastApplied?.effectiveRate,
+                panelNominalRate: cadence.nominalRateNow(freshWithinMs: Self.panelCadenceFreshnessMs))
+        }
+
         // Fast exit: panel already in HDR (headroom already raised, e.g. a prior
         // HDR/DV session left it there) and not currently switching.
         if Self.entryHeadroomIsSettled(headroomAboveOne: observeHeadroom(screen),
@@ -667,7 +758,17 @@ final class DisplayCriteriaController {
         while !Self.isBudgetSpent(elapsedMs: Self.elapsedMs(since: stage2Entry), budgetMs: capMs) {
             try? await Task.sleep(for: .milliseconds(50))
             if observation.hasNewEnd(since: gateSnapshot) {
-                EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()))", category: .engine)
+                EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()), \(panelRelation().logDescription))", category: .engine)
+                return
+            }
+            // #449: the panel is measurably running the rate this rate-only write asked for, so the switch
+            // the notifications never finish reporting has nothing left to do. Named with the cap it did
+            // not spend, because that is the number the fix has to be verified against.
+            let relation = panelRelation()
+            if Self.rateOnlySwitchIsSettled(
+                attribution: Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR),
+                relation: relation) {
+                EngineLog.emit("[DisplayCriteria] rate-only criteria already satisfied (\(timing()), \(relation.logDescription); released \(capMs - Self.elapsedMs(since: stage2Entry))ms before the \(capMs)ms cap)", category: .engine)
                 return
             }
             // Only meaningful when this load recorded no start: the headroom rises with the transition, so
@@ -682,7 +783,7 @@ final class DisplayCriteriaController {
                 switch Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR) {
                 case .engineRateOnly:
                     // SDR rate-only criteria: refresh-rate switch settled, panel correctly stayed SDR.
-                    EngineLog.emit("[DisplayCriteria] rate-only switch settled (\(timing()), SDR, EDR headroom 1.0 as expected)", category: .engine)
+                    EngineLog.emit("[DisplayCriteria] rate-only switch settled (\(timing()), SDR, \(relation.logDescription), EDR headroom 1.0 as expected)", category: .engine)
                 case .engineHDR:
                     // Headroom 1.0 after an HDR write is NOT evidence of a refusal. The value is only raised
                     // by a dynamic-range transition, so a panel that was already in HDR reads identically to
@@ -707,9 +808,13 @@ final class DisplayCriteriaController {
         // its own event (Sodalite#49). Two of the reporter's three second-round runs landed here, both
         // rate-only SDR, so this is the common outcome on that panel rather than an edge case.
         let headroom = String(format: "%.2f", screen.currentEDRHeadroom)
+        let capRelation = panelRelation()
         switch Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR) {
         case .engineRateOnly:
-            EngineLog.emit("[DisplayCriteria] proceed after cap (\(timing()); engine rate-only criteria, switch never reported end, panel may still be mid-switch; EDR headroom \(headroom))", category: .engine)
+            // #449: the cadence is the part that says whether this was a switch in flight or a write the
+            // panel had nothing to do about. `.multiple` and `.different` both land here on purpose; only
+            // an exact match can rule out a pending switch, since a multiple satisfies the request too.
+            EngineLog.emit("[DisplayCriteria] proceed after cap (\(timing()); engine rate-only criteria, switch never reported end, panel may still be mid-switch; \(capRelation.logDescription); EDR headroom \(headroom))", category: .engine)
         case .engineHDR:
             // "Unobservable DV panel" was the blanket reading here, but a panel that was already in HDR
             // when the criteria were re-written produces the same silence: no transition, so no headroom
@@ -921,6 +1026,7 @@ private final class DisplayLinkSampler: NSObject {
     private var firstTimestamp: CFTimeInterval = 0
     private var lastTimestamp: CFTimeInterval = 0
     private var nominalDuration: CFTimeInterval = 0
+    private var lastTickNanos: UInt64 = 0
     private(set) var tickCount = 0
 
     func start(screen: UIScreen) {
@@ -933,12 +1039,32 @@ private final class DisplayLinkSampler: NSObject {
         nominalDuration = link.targetTimestamp - link.timestamp
         if tickCount == 0 { firstTimestamp = link.timestamp }
         lastTimestamp = link.timestamp
+        lastTickNanos = DispatchTime.now().uptimeNanoseconds
         tickCount += 1
     }
 
-    func finish() -> (measured: Double, nominal: Double)? {
+    /// The rate of the mode the panel is running *now*, or nil when no tick has landed within
+    /// `freshWithinMs` (#449).
+    ///
+    /// Taken from a single tick's `targetTimestamp - timestamp` rather than averaged over a window, because
+    /// a window spanning a mode switch reports neither of the two rates it straddles. Staleness is not a
+    /// measurement failure here, it is the reading: a panel that is not putting frames on screen is what a
+    /// blanked HDMI re-sync looks like from inside the app, and the gate is supposed to keep waiting for it.
+    func nominalRateNow(freshWithinMs: Int) -> Double? {
+        guard tickCount > 0, nominalDuration > 0 else { return nil }
+        let age = DisplayCriteriaController.elapsedMs(
+            fromNanos: lastTickNanos, toNanos: DispatchTime.now().uptimeNanoseconds)
+        guard age <= freshWithinMs else { return nil }
+        return 1.0 / nominalDuration
+    }
+
+    func invalidate() {
         link?.invalidate()
         link = nil
+    }
+
+    func finish() -> (measured: Double, nominal: Double)? {
+        invalidate()
         guard tickCount >= 2, lastTimestamp > firstTimestamp else { return nil }
         return (
             measured: Double(tickCount - 1) / (lastTimestamp - firstTimestamp),

@@ -12,6 +12,66 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.56.1] - 2026-08-29
+
+### Fixed
+
+- **The presentation axis is now measured where AVPlayer placed a segment, not predicted from a fetch
+  (AE#418).** After a seek burst the reporter's captions ran 2 to 3 s BEHIND the picture, the opposite
+  direction from every earlier round. A fetch is not a placement: during a burst AVPlayer asks for a
+  segment and seeks away before its bytes are used, so nothing on its timeline moves, while this side had
+  already folded that epoch's worth into the axis. Every later placement then composed onto a base
+  AVPlayer never carried, permanently for the session (`axis 0.000 -> -3.045 -> -5.088 -> -10.677`, where
+  the honest value was -8.634). His own host log carried the disproof in a line that was already there:
+  the item's loaded range began at 791.2 and `788.204 + 3.045 = 791.249`. After every VOD seam the engine
+  now reads `AVPlayerItem.loadedTimeRanges` for the range holding the playhead, inverts the placement,
+  and either confirms the base it composed onto or corrects it, and it only ever collapses onto an axis
+  this session published, so a range read before the bytes landed or after eviction trimmed its start is
+  refused rather than believed. The harness confirms the oracle exactly: a resume predicting a seam at
+  52.000 reads loaded [52.000-64.958], a far seek predicting 21.000 reads [21.000-38.622].
+
+- **An epoch worth nothing still publishes the seam it owns (AE#448).** After a seek whose restart opened
+  a fresh epoch, the reported clock sat about 1.7 s above the frame on screen for seven seconds and then
+  settled by itself. The axis was right throughout; the seam was missing. A placement published only when
+  the placed epoch was worth something and the shift table dropped a zero rather than recording it, so an
+  epoch whose first segment opens exactly on its boundary announced nothing, while its bytes still take
+  over everything from their placement upward. After a backward seek that stretch was still answered by an
+  older epoch's seam: `prodShift=-10.67s hostShift=-9.00s seams=2`, and the 1.667 s between them healed
+  only when playback crossed the newer seam. The axis value for such an epoch is unchanged; what it now
+  records is that an epoch begins here. Measured on the same arm, the landing goes from `rendered=4.67
+  target=3.00` to `rendered=3.00 target=3.00`, within one frame from the first tick.
+
+- **A display-criteria write for a rate the panel already runs no longer spends the full 2 s cap holding
+  `play()` (AE#449).** The gate had no way to tell "the handshake is still in flight" from "there was
+  never anything to hand over". A rate-only write of 50.000 to a display already running 50.002 Hz posts
+  a mode-switch start, never posts an end, and held `isDisplayModeSwitchInProgress` for the whole cap:
+  eight of nine gates in an 18 minute session spent the full 2000 ms, with `play()` released in the same
+  millisecond the cap expired every time. A display link armed at gate entry now reports the mode the
+  panel is running per tick, and a rate-only write whose requested rate the panel already runs has nothing
+  left to settle. Deliberately narrow: engine rate-only writes, exact match only (a 50.002 Hz panel
+  satisfies a 25.000 request, but so would a switch to 25 still in flight, so a multiple is measured and
+  logged rather than acted on), and a stale display link keeps the gate waiting, because a panel not
+  putting frames on screen is what a blanked HDMI re-sync looks like from in here.
+
+### Changed
+
+- **The live `TARGETDURATION` seal separates a floor that has no meter from one with no measurement yet
+  (AE#447).** The cadence meter is built only for live INGEST sources, where an upstream hands over
+  finished segments whose arrival intervals can be observed; a raw MPEG-TS source is cut inside the engine
+  and has no arrival cadence at all. Both cases printed `measured floor none yet`, which reads as pending,
+  and two device runs were read that way. A source with no meter now says so, `none yet` is kept for the
+  one case it was right about, and the served value is unchanged in both.
+
+- **A refused live-join hold is now sampled while it stands (AE#440).** The guard that may cut AVPlayer's
+  stall-avoidance wait short decides on a transport-status or waiting-reason change and nothing else
+  re-reads the buffer, so a join that begins starved and fills while the reason stands still gets no
+  second look and left no line saying whether that happened. A refused hold is sampled every 250 ms for up
+  to 5 s, which outlives both holds measured in the field (1.55 to 2.81 s) and resolves inside the
+  shortest, and exactly one line reports which of three things happened: the cushion reached the floor
+  with the hold still standing, the hold ended first, or the budget ran out. All three speak, because a
+  witness silent about its own negative cannot be told from one that never ran. It observes only: starting
+  on a cushion that has just crossed and is still climbing is the bet the floor exists to refuse.
+
 ## [6.56.0] - 2026-08-29
 
 ### Fixed

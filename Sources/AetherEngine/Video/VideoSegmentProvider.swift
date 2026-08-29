@@ -230,6 +230,40 @@ enum LiveEdgePolicy {
     }
 }
 
+/// AE#447 round 3: an absent cadence floor is two different facts, and the seal printed one word for
+/// both. A meter exists only where the upstream hands over finished segments (live ingest); a source the
+/// engine cuts itself has no arrival cadence at all, so its floor is not pending, it does not exist. The
+/// reporter's raw-TS session read `measured floor none yet` on every tune of two runs and reasonably took
+/// it for a meter that had not measured anything YET, which credited four fixes on a path none of them
+/// could reach. A term that cannot be measured has to say so.
+enum CadenceFloorTerm {
+    /// The meter has a measurement, in seconds.
+    case measured(Double)
+    /// A meter is running and has nothing yet: an ingest session before its first closed interval.
+    case pending
+    /// No meter on this path: the engine cuts these segments itself, so no arrival cadence exists.
+    case unmeasurable
+
+    /// The value that feeds the max, which only a real measurement ever does.
+    var seconds: Double? {
+        if case .measured(let value) = self { return value }
+        return nil
+    }
+
+    /// The term as the seal line states it, in the list the other terms are joined into.
+    var account: String {
+        switch self {
+        case .measured(let value):
+            return "measured floor \(LiveEdgePolicy.seconds(value))s needs "
+                + "\(LiveEdgePolicy.targetDurationForCadence(value))s of patience"
+        case .pending:
+            return "measured floor none yet"
+        case .unmeasurable:
+            return "no measured floor (segments are cut here, not ingested)"
+        }
+    }
+}
+
 /// AE#447: the served TARGETDURATION with the terms it was derived from, so the seal can say in one
 /// line why the session will hold this value for its whole life. Every term but `selfReported` feeds
 /// the max; `selfReported` is what the upstream CLAIMED, printed beside what was measured.
@@ -237,7 +271,7 @@ struct LiveTargetDurationDerivation {
     let value: Int
     let maxSegmentDuration: Double
     let cutTargetFloor: Double?
-    let cadenceFloor: Double?
+    let cadenceFloor: CadenceFloorTerm
     let selfReported: Double?
 
     /// One line, in the order the terms are maxed. Reads as an argument for the number it reports.
@@ -246,11 +280,7 @@ struct LiveTargetDurationDerivation {
         if let cutTargetFloor {
             terms.append("1.5 x cut target \(LiveEdgePolicy.seconds(cutTargetFloor * 1.5))s")
         }
-        terms.append("measured floor "
-                     + (cadenceFloor.map {
-                        "\(LiveEdgePolicy.seconds($0))s needs "
-                        + "\(LiveEdgePolicy.targetDurationForCadence($0))s of patience"
-                     } ?? "none yet"))
+        terms.append(cadenceFloor.account)
         let claim = selfReported.map {
             "; upstream advertises \(LiveEdgePolicy.seconds($0))s (reported, not used)"
         } ?? ""
@@ -1607,12 +1637,16 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         maxSegmentDuration: Double
     ) -> LiveTargetDurationDerivation {
         let cutTarget = liveWindowSizing.targetSegmentDurationSeconds
-        let floor = liveCadencePolicy?.targetDurationFloorSeconds
+        // Which of the two absences this is decides what the seal line may claim: no policy means no
+        // meter for the life of the session, not a measurement still to come (AE#447 round 3).
+        let floor: CadenceFloorTerm = liveCadencePolicy.map { policy in
+            policy.targetDurationFloorSeconds.map { CadenceFloorTerm.measured($0) } ?? .pending
+        } ?? .unmeasurable
         return LiveTargetDurationDerivation(
             value: LiveEdgePolicy.targetDurationSeconds(
                 maxSegmentDuration: maxSegmentDuration,
                 cutTargetSeconds: cutTarget,
-                cadenceFloorSeconds: floor
+                cadenceFloorSeconds: floor.seconds
             ),
             maxSegmentDuration: maxSegmentDuration,
             cutTargetFloor: cutTarget,
@@ -1649,8 +1683,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 "[HLSVideoEngine] live TARGETDURATION remains sealed at "
                 + "\(resolved.value)s, later candidate \(candidate.value)s "
                 + "(max segment \(String(format: "%.3f", maxSegmentDuration))s, "
-                + "cadence floor "
-                + (candidate.cadenceFloor.map { String(format: "%.3f", $0) } ?? "nil")
+                + candidate.cadenceFloor.account
                 + ")",
                 category: .session
             )

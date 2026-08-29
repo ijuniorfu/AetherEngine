@@ -106,7 +106,8 @@ final class Issue447TargetDurationEvidenceTests: XCTestCase {
 
     func testSealAccountReportsMeasuredTermsAndTheUnusedAdvert() {
         let derivation = LiveTargetDurationDerivation(
-            value: 2, maxSegmentDuration: 2.0, cutTargetFloor: 0.5, cadenceFloor: 2.0, selfReported: 3.0)
+            value: 2, maxSegmentDuration: 2.0, cutTargetFloor: 0.5,
+            cadenceFloor: .measured(2.0), selfReported: 3.0)
         let account = derivation.account
         XCTAssertTrue(account.contains("sealed at 2s"), account)
         XCTAssertTrue(account.contains("holdback 6.000s"), account)
@@ -117,8 +118,35 @@ final class Issue447TargetDurationEvidenceTests: XCTestCase {
 
     func testSealAccountNamesAnAbsentMeasurement() {
         let derivation = LiveTargetDurationDerivation(
-            value: 4, maxSegmentDuration: 3.2, cutTargetFloor: 4.0, cadenceFloor: nil, selfReported: nil)
+            value: 4, maxSegmentDuration: 3.2, cutTargetFloor: 4.0,
+            cadenceFloor: .pending, selfReported: nil)
         XCTAssertTrue(derivation.account.contains("measured floor none yet"), derivation.account)
+    }
+
+    /// Round 3, from the retest: on a source the engine cuts itself there is no meter at all, and the
+    /// line said `none yet`, which reads as a measurement still to come. Two runs on the reporter's
+    /// device were read that way, crediting the four floor fixes on a path that has no floor to fix.
+    func testSealAccountSeparatesNoMeterFromNoMeasurementYet() {
+        let unmeasurable = LiveTargetDurationDerivation(
+            value: 2, maxSegmentDuration: 2.0, cutTargetFloor: 0.5,
+            cadenceFloor: .unmeasurable, selfReported: nil).account
+        XCTAssertTrue(unmeasurable.contains("no measured floor (segments are cut here, not ingested)"),
+                      unmeasurable)
+        XCTAssertFalse(unmeasurable.contains("none yet"),
+                       "a term that will never be measured must not read as pending: \(unmeasurable)")
+        XCTAssertFalse(unmeasurable.contains("upstream advertises"),
+                       "and a source with no meter has no advert to report either: \(unmeasurable)")
+    }
+
+    /// The seal is taken at the first-serve gate, so an ingest session that has not closed an interval
+    /// yet is genuinely pending, and that is the ONLY case the old word was right about.
+    func testPendingAndUnmeasurableSealTheSameValueAndDifferInTheLineOnly() {
+        let terms: [CadenceFloorTerm] = [.pending, .unmeasurable]
+        let values = terms.map {
+            LiveEdgePolicy.targetDurationSeconds(
+                maxSegmentDuration: 2.0, cutTargetSeconds: 0.5, cadenceFloorSeconds: $0.seconds)
+        }
+        XCTAssertEqual(values, [2, 2], "neither absence may move the number, only what the line claims")
     }
 
     // MARK: - Round 2: the resolution the playlist serves
@@ -227,7 +255,8 @@ final class Issue447TargetDurationEvidenceTests: XCTestCase {
                         maxSegmentDuration: maxSegment, cutTargetSeconds: cut, cadenceFloorSeconds: floor)
                     let account = LiveTargetDurationDerivation(
                         value: value, maxSegmentDuration: maxSegment, cutTargetFloor: cut,
-                        cadenceFloor: floor, selfReported: 3.0).account
+                        cadenceFloor: floor.map { CadenceFloorTerm.measured($0) } ?? .pending,
+                        selfReported: 3.0).account
                     var recomputed = Int(ceil(try! XCTUnwrap(number(after: "max EXTINF ", in: account))))
                     if cut != nil {
                         recomputed = max(recomputed,

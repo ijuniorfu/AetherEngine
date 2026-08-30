@@ -389,6 +389,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// index rewrites it axis-true, which is what `recordingEpochAt` drops the entries above for.
     private let anchorShiftLock = NSLock()
     private var epochShiftByIndex: [Int: Double] = [:]
+    /// AE#418 round 5: what each recorded epoch's gating sample is presented AFTER its own decode
+    /// time. Kept beside the offsets rather than inside them so the same rewrite rule governs both,
+    /// and read only when a placement composes onto a run that is already in AVPlayer's timeline.
+    private var epochLeadByIndex: [Int: Double] = [:]
+    /// AE#418 round 5: whether any placement has established a mapping in this item's timeline. The
+    /// first one does not compose onto anything (AVPlayer anchors the item on its first PRESENTED
+    /// sample, measured base 0.000 on every arm of the fixture), every later one does.
+    private var hasComposedPlacement = false
     /// AE#418 round 3: the placement this session last published an axis for, so the prediction can be
     /// checked against where AVPlayer actually put those bytes.
     private var lastPublishedPlacement: PublishedPlacement?
@@ -2296,8 +2304,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()
         }
-        prod.onVideoShiftKnown = { [weak self] shiftPts, firstItemTfdtPts in
-            self?.handleVideoShiftKnown(shiftPts, firstItemTfdtPts: firstItemTfdtPts)
+        prod.onVideoShiftKnown = { [weak self] shiftPts, firstItemTfdtPts, presentationLeadPts in
+            self?.handleVideoShiftKnown(
+                shiftPts, firstItemTfdtPts: firstItemTfdtPts, presentationLeadPts: presentationLeadPts)
         }
         prod.onLiveTimelineRebase = { [weak self] shiftPts, seamOutputSeconds in
             self?.handleLiveTimelineRebase(shiftPts, seamOutputSeconds: seamOutputSeconds)
@@ -2360,9 +2369,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var lastMuxerRebuildSegmentCount = -1
     static let maxLiveMuxerRebuildCycles = 3
 
-    private func handleVideoShiftKnown(_ shiftPts: Int64, firstItemTfdtPts: Int64) {
+    private func handleVideoShiftKnown(_ shiftPts: Int64, firstItemTfdtPts: Int64, presentationLeadPts: Int64) {
         let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
         let seamItemSeconds = Double(firstItemTfdtPts) * sourceVideoTbSeconds
+        let leadSeconds = Double(presentationLeadPts) * sourceVideoTbSeconds
         // Live rebases the whole timeline at a program boundary and nothing older comes back on
         // screen, so its axis is the epoch's own and it publishes here as it always has.
         guard !isLiveSession else {
@@ -2380,6 +2390,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let isRecut = recutIndices.remove(index) != nil
         epochShiftByIndex = Self.epochShiftTable(
             epochShiftByIndex, recordingEpochAt: index, shift: isRecut ? 0 : seconds)
+        // A re-cut is placed at its own tfdt inside a timeline AVPlayer is already building (AE#412,
+        // measured `axisErr` 0.000 at three offsets), so it composes nothing and carries no lead.
+        epochLeadByIndex = Self.epochShiftTable(
+            epochLeadByIndex, recordingEpochAt: index, shift: isRecut ? 0 : leadSeconds)
         let placementAlreadyHappened = lastPlacedIndex == index
         anchorShiftLock.unlock()
         gateOpenCondition.lock()
@@ -2414,6 +2428,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // Every other index is cut on its own boundary inside a run that already carries an axis, and
         // has nothing to say about where that run begins.
         let epochShift = epochShiftByIndex[index]
+        // AE#418 round 5: the lead of the epoch being PLACED, and only once this item's timeline
+        // already holds a placement to compose onto.
+        let lead = hasComposedPlacement ? (epochLeadByIndex[index] ?? 0) : 0
         anchorShiftLock.unlock()
         guard let epochShift else { return }
         restartLock.lock()
@@ -2422,14 +2439,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
         restartLock.unlock()
         guard let plannedStart else { return }
         let current = playlistShiftSeconds
-        let composed = Self.axisShift(after: current, placing: epochShift)
-        let seam = Self.seamItemSeconds(advertisedStart: plannedStart, currentShift: current)
+        // The base this placement lands on is the axis in force LESS the epoch's presentation lead,
+        // which is where AVPlayer puts a segment it composes into a timeline it already has.
+        let base = Self.placementBase(axis: current, presentationLead: lead)
+        let composed = Self.axisShift(after: current, placing: epochShift, presentationLead: lead)
+        let seam = Self.seamItemSeconds(advertisedStart: plannedStart, currentShift: base)
         // AE#418 round 3: keep what this composition assumed, so the placement can be checked against
         // AVPlayer's own account of where it put the bytes.
         anchorShiftLock.lock()
         let superseded = lastPublishedPlacement
         lastPublishedPlacement = PublishedPlacement(
-            index: index, advertisedStart: plannedStart, worth: epochShift, assumedBase: current)
+            index: index, advertisedStart: plannedStart, worth: epochShift, assumedBase: base)
+        hasComposedPlacement = true
         anchorShiftLock.unlock()
         if let superseded {
             // AE#418 round 4: named rather than left silent. A placement whose successor arrives before
@@ -2444,7 +2465,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         EngineLog.emit(
             "[HLSVideoEngine] #418 seg\(index) placed (advertised \(String(format: "%.3f", plannedStart))s, "
-            + "worth \(String(format: "%.3f", epochShift))s): axis shift "
+            + "worth \(String(format: "%.3f", epochShift))s, lead \(String(format: "%.3f", lead))s): axis shift "
             + "\(String(format: "%.3f", current))s -> \(String(format: "%.3f", composed))s "
             + "from item \(String(format: "%.3f", seam))s",
             category: .session
@@ -2455,8 +2476,24 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// AE#418 round 2: the axis after AVPlayer places a segment worth `epochShift`. It composes,
     /// because AVPlayer puts the placed segment's advertised start where its CURRENT mapping says
     /// that position is, not where the playlist says it is.
-    static func axisShift(after currentShift: Double, placing epochShift: Double) -> Double {
-        return currentShift + epochShift
+    ///
+    /// AE#418 round 5: and it composes onto the base, not onto the axis. The two differ by the
+    /// epoch's presentation lead on every placement into a timeline that already holds one, because
+    /// AVPlayer aligns the fragment's DECODE start with the advertised start read through the axis
+    /// while the axis describes the PICTURE. Measured on the fixture pair, three placements, both
+    /// arms: with B-frames the composition read 0.083 s (two frames) high on every one of them and
+    /// the picture agreed with the lead-corrected value; without them the lead is zero and nothing
+    /// about this changes. See [[reference_an_offset_about_presentation_is_measured_at_the_pts]].
+    static func axisShift(
+        after currentShift: Double, placing epochShift: Double, presentationLead: Double
+    ) -> Double {
+        return placementBase(axis: currentShift, presentationLead: presentationLead) + epochShift
+    }
+
+    /// The base a placement lands on: the axis in force, less the lead its own gating sample is
+    /// presented by. This is the value the measurement reads back out of AVPlayer's buffer.
+    static func placementBase(axis: Double, presentationLead: Double) -> Double {
+        return axis - presentationLead
     }
 
     /// The item position the placed segment's content begins at: its advertised start, read through

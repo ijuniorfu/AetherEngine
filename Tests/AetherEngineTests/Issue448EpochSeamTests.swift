@@ -99,8 +99,9 @@ struct Issue448EpochSeamTests {
     @Test("a placement worth nothing verifies like any other")
     func zeroWorthPlacementVerifies() {
         // AVPlayer holds seg0 from item 10.667, which inverts to the base the composition assumed.
-        #expect(HLSVideoEngine.placementVerdict(
-            advertisedStart: 0.0, worth: 0, assumedBase: -10.667,
-            observedItemStart: 10.667, publishedAxes: [0, -9.0, -10.667]) == .agrees)
+        let reading = HLSVideoEngine.placementReading(
+            advertisedStart: 0.0, worth: 0, assumedBase: -10.667, observedItemStart: 10.667)!
+        #expect(abs(reading.residual) < HLSVideoEngine.axisRepublishEpsilonSeconds)
+        #expect(abs(reading.axis - -10.667) < 0.001)
     }
 }

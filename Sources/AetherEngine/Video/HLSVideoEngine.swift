@@ -1769,7 +1769,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         #else
         let videoCodecNeedsMasterSignaling = false
         #endif
-        let useMasterPlaylist = Self.resolveUseMasterPlaylist(
+        let useMasterPlaylist = AetherEngine.forceMasterPlaylistForTesting
+            || Self.resolveUseMasterPlaylist(
             videoRange: videoRange, effectiveDvMode: effectiveDvMode,
             panelIsInHDRMode: panelIsInHDRMode, displaySupportsHDR: displaySupportsHDR,
             hasNativeSubs: hasNativeSubs,
@@ -2980,6 +2981,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// AE#446 round 2: re-open the window as live for the next item. Call it immediately before the
     /// item swap that will fetch the playlist again, never while the current item could still poll.
     func clearLiveOutageEndlist() { provider?.clearLiveOutageEndlist() }
+
+    /// AE#454: tell the item the next swap loads where to start, in its own playlist. Call immediately
+    /// before the swap, so the first manifest that item fetches already carries the placement.
+    /// See `VideoSegmentProvider.armLiveRejoinStart`.
+    @discardableResult
+    func armLiveRejoinStart(atOutputSeconds seconds: Double) -> (segmentIndex: Int, secondsIntoSegment: Double)? {
+        provider?.armLiveRejoinStart(atOutputSeconds: seconds)
+    }
+
+    /// AE#454: the placement is spent once the item that asked for it is running.
+    func clearLiveRejoinStart() { provider?.clearLiveRejoinStart() }
 
     /// #178: called by the engine when a NEW user seek is dispatched. A recovery re-anchor still
     /// holding the coalescer's authoritative slot belongs to the superseded seek; left in place it

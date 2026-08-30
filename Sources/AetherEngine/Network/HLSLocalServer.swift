@@ -1406,7 +1406,16 @@ final class HLSLocalServer: @unchecked Sendable {
                visibleCount: count,
                targetDuration: targetDuration,
                segmentDuration: { provider.segmentDuration(at: $0) }) {
-            lines.append("#EXT-X-START:TIME-OFFSET=\(String(format: "%.3f", offset)),PRECISE=YES")
+            let tag = "#EXT-X-START:TIME-OFFSET=\(String(format: "%.3f", offset)),PRECISE=YES"
+            lines.append(tag)
+            // The served value, so a field log can say whether the placement was actually offered and
+            // at what depth. Bounded by the arm: this is off on every build except the ones between a
+            // rejoin swap and the item it placed running.
+            EngineLog.emit(
+                "[HLSLocalServer] #454 serving \(tag) for segment \(rejoin.segmentIndex) + "
+                + "\(String(format: "%.2f", rejoin.secondsIntoSegment))s, \(count - firstVisible) "
+                + "segment(s) listed from seg\(firstVisible)",
+                category: .session)
         }
         if typeIsLive {
             // Refresh counter keeps consecutive polls byte-distinct, which is worth having against any

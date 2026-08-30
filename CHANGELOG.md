@@ -12,6 +12,24 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.56.7] - 2026-08-30
+
+### Fixed
+
+- **A composition lands on the base, not on the axis (AE#418).** A reporter's retest of 6.56.6 had
+  every previous failure mode gone and exactly one frame left over on each correction, constant
+  rather than growing. The fixture pair isolates it: the FIRST placement into an item's timeline puts
+  the segment's first PRESENTED sample at its advertised start, and every later one puts its first
+  DECODED sample there instead, so a composition lands one presentation lead under the axis it
+  composes onto. Measured on two fixtures identical but for `-bf 3`: AVPlayer held a re-placed
+  segment from item 61.083 where the axis alone predicts 61.000 and the picture read -18.083 for the
+  rest of the run, against 61.000 and -18.000 without B-frames. The producer now publishes the gating
+  sample's own lead (pts minus dts) alongside the shift and the composition subtracts it, so the
+  reading confirms the prediction instead of correcting it. What this pays for is the placement that
+  cannot be measured at all, a seek burst reopening backwards inside the buffer: measured on that
+  arm, -23.166 s after two compositions and -27.166 s after three, both matching the picture exactly,
+  where 6.56.6 kept -23.083 and -27.000.
+
 ## [6.56.6] - 2026-08-30
 
 ### Fixed

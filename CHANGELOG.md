@@ -12,6 +12,16 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.56.9] - 2026-08-30
+
+### Added
+
+- **The served rejoin placement names itself in the log (AE#454).** A field log could see the engine
+  arm a placement and could not see whether the playlist actually offered one, or at what depth. The
+  served tag now says so, and the pair is self-checking: the offset the server writes and the
+  position the fresh item reports at readiness are the same number. Bounded by the arm, so it is off
+  on every build except the ones between a rejoin swap and the item it placed running.
+
 ## [6.56.8] - 2026-08-30
 
 ### Fixed

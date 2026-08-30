@@ -966,9 +966,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// (late) gate the pin makes the two identical, which is why publishing the mux shift held until
     /// the early-opening gate of AE#408 landed; on a re-aimed gate they differ by the whole re-aim,
     /// and the clock then ran that far ahead of the picture (captions early by the same amount).
-    static func presentedShiftPts(actualFirstDts: Int64, desiredTfdtPts: Int64) -> Int64 {
-        guard actualFirstDts != Int64.min, desiredTfdtPts != Int64.min else { return 0 }
-        return actualFirstDts &- desiredTfdtPts
+    ///
+    /// AE#418 round 4: taken on the first PTS, not the first DTS. A segment opens on a random-access
+    /// point in DECODE order, and with B-frames that sample is presented `video_delay` frames later
+    /// than it is decoded, so the two differ by exactly the composition offset the segment carries for
+    /// it. This is an offset about what AVPlayer SHOWS, so it is measured where the picture is: the
+    /// gate's own line already carried both numbers (`actual=42917 anchorPts=43000` on a 24 fps h264
+    /// fixture with `has_b_frames=2`), and the axis was published from the decode one. Measured with
+    /// `play --picture-probe`, that put the published axis 0.083 s under the truth on every epoch of
+    /// a B-frame source and 0.000 s under it on the same fixture encoded without them.
+    static func presentedShiftPts(actualFirstPts: Int64, desiredTfdtPts: Int64) -> Int64 {
+        guard actualFirstPts != Int64.min, desiredTfdtPts != Int64.min else { return 0 }
+        return actualFirstPts &- desiredTfdtPts
     }
 
     /// AE#408: aim the gate below a boundary that cannot be opened on, so the segment covers its own
@@ -3434,9 +3443,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             + (pinnedTfdtPts != desiredFirstVideoTfdtPts
                                 ? "pinnedTo=\(pinnedTfdtPts) " : "")
                             + "shift=\(videoShiftPts) "
-                            + (Self.presentedShiftPts(actualFirstDts: firstActualVideoDts,
+                            + (Self.presentedShiftPts(actualFirstPts: firstActualVideoPts,
                                                       desiredTfdtPts: desiredFirstVideoTfdtPts) != videoShiftPts
-                                ? "presentedShift=\(Self.presentedShiftPts(actualFirstDts: firstActualVideoDts, desiredTfdtPts: desiredFirstVideoTfdtPts)) " : "")
+                                ? "presentedShift=\(Self.presentedShiftPts(actualFirstPts: firstActualVideoPts, desiredTfdtPts: desiredFirstVideoTfdtPts)) " : "")
                             // #133 follow-up diag: PID + reconstruct state per epoch, so retest logs separate a
                             // same-PID mid-stream parameter-set change from a reopen storm (each reopen is a fresh
                             // gate-open here; a same-PID change is NOT, it stays in one epoch and rotates in place).
@@ -3456,7 +3465,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         // start: the stretch below it still belongs to the previous epoch on screen.
                         onVideoShiftKnown?(
                             Self.presentedShiftPts(
-                                actualFirstDts: firstActualVideoDts,
+                                actualFirstPts: firstActualVideoPts,
                                 desiredTfdtPts: desiredFirstVideoTfdtPts),
                             desiredFirstVideoTfdtPts)
                         // #133 follow-up: the gating IDR's in-band SPS/PPS back this epoch's muxer avcC. Establish

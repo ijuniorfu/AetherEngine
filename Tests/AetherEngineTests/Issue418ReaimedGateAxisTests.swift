@@ -97,29 +97,82 @@ struct Issue418ReaimedGateAxisTests {
 
     @Test("the first placement of a session establishes the axis")
     func firstPlacementEstablishesTheAxis() {
-        #expect(HLSVideoEngine.axisShift(after: 0, placing: -9.0) == -9.0)
+        #expect(HLSVideoEngine.axisShift(after: 0, placing: -9.0, presentationLead: 0) == -9.0)
     }
 
     @Test("an axis-true segment leaves the axis where it is")
     func axisTrueSegmentChangesNothing() {
         // The reporter's seek burst: seg179 was cut on its own boundary, and the run kept -14.056.
-        #expect(HLSVideoEngine.axisShift(after: -14.056, placing: 0) == -14.056)
+        #expect(HLSVideoEngine.axisShift(after: -14.056, placing: 0, presentationLead: 0) == -14.056)
     }
 
     @Test("re-placing the segment the gate opened into adds its offset again")
     func rePlacingTheAnchorComposes() {
         // Measured: resume 53 reads -9.000, and a seek that re-fetches that same segment reads -18.000.
-        #expect(HLSVideoEngine.axisShift(after: -9.0, placing: -9.0) == -18.0)
+        #expect(HLSVideoEngine.axisShift(after: -9.0, placing: -9.0, presentationLead: 0) == -18.0)
         // And at the deepest tier of the tiered fixture, -11.000 -> -22.000.
-        #expect(HLSVideoEngine.axisShift(after: -11.0, placing: -11.0) == -22.0)
+        #expect(HLSVideoEngine.axisShift(after: -11.0, placing: -11.0, presentationLead: 0) == -22.0)
     }
 
     @Test("a later epoch's own re-aim composes onto what the timeline already carries")
     func newEpochComposesOntoTheOldAxis() {
         // Measured: a -9.000 run, seek to 60, producer restarts at seg12 and re-aims 5 s, reads -14.000.
-        #expect(HLSVideoEngine.axisShift(after: -9.0, placing: -5.0) == -14.0)
+        #expect(HLSVideoEngine.axisShift(after: -9.0, placing: -5.0, presentationLead: 0) == -14.0)
         // Tiered fixture: a -11.000 run whose seek restarts at seg23 re-aiming 7 s reads -18.000.
-        #expect(HLSVideoEngine.axisShift(after: -11.0, placing: -7.0) == -18.0)
+        #expect(HLSVideoEngine.axisShift(after: -11.0, placing: -7.0, presentationLead: 0) == -18.0)
+    }
+
+    // MARK: - Round 5: a composition lands on the base, not on the axis
+
+    @Test("the lead is what the gating sample is presented after its own decode time")
+    func leadIsTheCompositionOffset() {
+        // The fixture's B-frame arm: the gate opens on a random-access point decoded at 42917 and
+        // presented at 43000, two frames at 24 fps.
+        #expect(HLSSegmentProducer.presentationLeadPts(actualFirstPts: 43_000, actualFirstDts: 42_917) == 83)
+        // Its twin without B-frames is one number, which is why the pair isolates this.
+        #expect(HLSSegmentProducer.presentationLeadPts(actualFirstPts: 43_000, actualFirstDts: 43_000) == 0)
+    }
+
+    @Test("an unresolved or inverted timestamp leads by nothing")
+    func leadNeverGoesNegative() {
+        #expect(HLSSegmentProducer.presentationLeadPts(actualFirstPts: .min, actualFirstDts: 42_917) == 0)
+        #expect(HLSSegmentProducer.presentationLeadPts(actualFirstPts: 43_000, actualFirstDts: .min) == 0)
+        #expect(HLSSegmentProducer.presentationLeadPts(actualFirstPts: 42_917, actualFirstDts: 43_000) == 0)
+    }
+
+    @Test("a composition onto an existing timeline lands one lead below the axis")
+    func compositionLandsOnTheBase() {
+        // Measured on tc-bframes.mkv: the axis stood at -9.000 and AVPlayer held the re-placed
+        // segment from item 61.083, not the 61.000 the axis alone predicts, and the picture read
+        // -18.083 for the rest of the run.
+        #expect(HLSVideoEngine.placementBase(axis: -9.0, presentationLead: 0.083) == -9.083)
+        #expect(abs(HLSVideoEngine.axisShift(
+            after: -9.0, placing: -9.0, presentationLead: 0.083) - (-18.083)) < 1e-9)
+    }
+
+    @Test("each composition eats its own lead, so an unmeasured chain of them accumulates")
+    func leadAccumulatesPerComposition() {
+        // The three-placement burst arm: -9.000 -> -18.083 -> -27.166, all three read back off the
+        // picture. Before this the third was kept at -27.000, 0.166 s over the truth.
+        let second = HLSVideoEngine.axisShift(after: -9.0, placing: -9.0, presentationLead: 0.083)
+        let third = HLSVideoEngine.axisShift(after: second, placing: -9.0, presentationLead: 0.083)
+        #expect(abs(third - (-27.166)) < 1e-9)
+    }
+
+    @Test("a source without reordering composes exactly as it did")
+    func noLeadIsTheOldArithmetic() {
+        // tc-drought.mkv, same three arms: -9.000 -> -18.000, confirmed by both the reading and the
+        // picture, so this round changes nothing where there is nothing to change.
+        #expect(HLSVideoEngine.axisShift(after: -9.0, placing: -9.0, presentationLead: 0) == -18.0)
+        #expect(HLSVideoEngine.placementBase(axis: -9.0, presentationLead: 0) == -9.0)
+    }
+
+    @Test("the seam sits where the placement lands, which is below the advertised start by the base")
+    func seamFollowsTheBase() {
+        // seg13 advertised at 52.000 composing onto -9.000 with a lead of 0.083 begins at item
+        // 61.083, which is where AVPlayer reported holding it.
+        let base = HLSVideoEngine.placementBase(axis: -9.0, presentationLead: 0.083)
+        #expect(abs(HLSVideoEngine.seamItemSeconds(advertisedStart: 52.0, currentShift: base) - 61.083) < 1e-9)
     }
 
     // MARK: - Where the new axis starts applying

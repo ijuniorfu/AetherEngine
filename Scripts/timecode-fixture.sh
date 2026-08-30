@@ -64,6 +64,25 @@
 # and the second epoch prints the correction the reading makes:
 # `#418 seg13 placed on base -9.083s, not -9.000s (... residual -0.083s): axis -18.000s -> -18.083s`.
 #
+# AE#418 round 5 turns that correction into a prediction, because the 0.083 s is not noise: it is the
+# gate sample's own presentation lead, and a composition lands on the BASE, which sits that far under
+# the axis. The pair is the whole proof, same arm on both fixtures:
+#
+#   tc-bframes.mkv   AVPlayer holds the re-placed seg13 from item 61.083, picture reads -18.083
+#   tc-drought.mkv   AVPlayer holds it from item 61.000,                  picture reads -18.000
+#
+# So on the B-frame arm both placements must now print `#418 segN placement confirmed` (3 of 3 runs)
+# and none of them `placed on base ...`. The case that pays for it is the one that cannot be measured
+# at all, a seek burst that reopens backwards inside the buffer:
+#
+#   swift run aetherctl play --seconds 30 --start-position 53 --picture-probe \
+#       --seek-every 2 --seek-count 4 --seek-pattern 65,60,70,58 file:///tmp/tc-bf-cues-lie.mkv
+#
+# It ends on `#418 segN opened no run of its own to measure`, so whatever the composition said is
+# what the session keeps. Measured, two shapes, both matching the picture exactly: `-23.166` after two
+# compositions and `-27.166` after three. Under round 4 those were kept at -23.083 and -27.000, i.e.
+# one lead per composition, which is why an unmeasured chain drifts and a measured one does not.
+#
 # For magnitudes this fixture cannot reach, engineer the droughts: a key 3 s below a boundary gives
 # -3, 5 s gives -5, and a key under a second below one gives an axis AVPlayer THROWS AWAY at the
 # next seek (measured: -0.500 and -0.875 snap to 0, -1.000 and above survive).

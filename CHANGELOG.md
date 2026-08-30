@@ -12,6 +12,32 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.56.8] - 2026-08-30
+
+### Fixed
+
+- **A rejoin places the item in its playlist (AE#454).** A rejoin is two operations, attaching an
+  item and placing it, and only the first was ever stated to AVPlayer at the swap: the item went out
+  with no start position, so it did what a live playlist tells any client to do, joined at its own
+  edge and started playing there, and the place the viewer held arrived afterwards as the deferred
+  seek. Reported from a device: thirteen outage swaps out of thirteen landed exactly on the held
+  place, and every one of them played 4 to 37 s ahead of it for 140 to 220 ms first, which on a
+  starving origin with a seam every 25 to 40 s reads as a channel jumping around rather than as a
+  recovery. The placement now goes into the manifest the fresh item loads
+  (`EXT-X-START:TIME-OFFSET`, `PRECISE=YES`), armed by segment rather than by seconds so a window
+  that slides between arming and serving still names the same content, and taken at the resolution
+  the playlist serves. Measured on the harness with one instrument across both arms: the fresh
+  item's first request went from eleven segments above the one the consumer had reached to the
+  segment the consumer was on, and the reported position went from 50.27 s above the held place to
+  never leaving it. The deferred seek stays as the fallback for a client that ignores the tag, and
+  is retired when the item did come up where it was asked for.
+- **An item's axis offset was measured on the item it was measured on (AE#454).** Between an
+  in-place swap and the fresh item reporting a seekable range, the retired item's offset was folded
+  into the fresh item's clock, which reads about zero, so the session published the retired item's
+  zero as its position: 70 to 80 s below the place it held in the field, and it flowed into the live
+  window's edge, which is a running maximum. The published playhead and the live window now hold
+  across the hand-off, bounded by the placement rather than by readiness. A cold join is unchanged.
+
 ## [6.56.7] - 2026-08-30
 
 ### Fixed

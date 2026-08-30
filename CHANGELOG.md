@@ -12,6 +12,44 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.56.6] - 2026-08-30
+
+### Fixed
+
+- **A measurement that may only agree is still a prediction (AE#418).** The VOD axis is read out of
+  `AVPlayerItem.loadedTimeRanges` after every seam, and that reading was then collapsed onto the
+  nearest axis the session had already published, which made the prediction the yardstick for the
+  measurement meant to check it. Reported from a retest on two devices: a reading matching no
+  prediction was thrown away, so a session kept composing to -26.152 s while two readings 400 s of
+  media apart both said -10.93 s, and one device ended 42.6 s wrong and stayed there for the rest of
+  the session; a reading one or two frames off the prediction was called a confirmation, so the
+  difference stayed in the axis and the next placement composed on top of it, walking the error past
+  the tolerance in six placements, after which every reading was refused. The reading is now the
+  axis. What decides whether it describes THIS placement is where it came from: a run that overlaps
+  nothing the item held when the placement was recorded, or one that opened above it. A start that
+  walked downward is the same run backfilling, which AVPlayer does after a run opens (measured: a run
+  that opened at 1522.6 read 1507.1 fifteen seconds later), and is never read. A placement counted
+  twice across a producer restart is undone by the next reading rather than carried, and a placement
+  superseded before its window closes says so instead of falling silent.
+
+- **The gate's offset is measured on the sample that is PRESENTED (AE#418).** It was taken on the
+  first packet's decode time. A segment opens on a random-access point in decode order, and with
+  B-frames that sample is presented `video_delay` frames after it is decoded, so the published axis
+  sat that far under the truth on every epoch of a B-frame source, which is most real content. The
+  gate's own line carried both numbers all along (`actual=42917 anchorPts=43000`), and the segment
+  bytes agree (tfdt 686672 with a first-sample composition offset of 1328 in a timescale of 16000,
+  the same 0.083 s). Measured with `play --picture-probe` on a new B-frame fixture that
+  `Scripts/timecode-fixture.sh` writes, mean `capErr` over 39 ticks: +0.113 s before, +0.031 s after,
+  against +0.030 s on the same fixture encoded without B-frames.
+
+- **A resampler reads a frame per what it was built for, at every site that keeps one (AE#452).** A
+  live transport-stream splice from 5.1 to stereo left a long-lived `SwrContext` reading six planes
+  from a frame carrying two, and the read past the end of the frame's plane array crashed the
+  session at the program boundary. The configuration a resampler was built from is a claim about
+  every later frame, so it is now re-checked per frame and the context rebuilt when it no longer
+  holds, at all three sites that keep one. Fix contributed by @tschuegy in #453, hardened across the
+  remaining sites here.
+
 ## [6.56.5] - 2026-08-29
 
 ### Fixed

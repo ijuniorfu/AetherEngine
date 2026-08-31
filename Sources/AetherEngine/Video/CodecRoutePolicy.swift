@@ -432,6 +432,31 @@ extension HLSVideoEngine {
             // Non-DV panel: strip dvvC (hvc1 + dvvC trips -11868 even without SUPPLEMENTAL, 2026-05-26).
             // "P8.6" malformed compat (#53): the dvcC rewrite normalizes the container to compat=1;
             //   on non-DV panel the strip path handles it without rewrite.
+            // AE#455, opt-in: on a display with no Dolby Vision of its own, serve the P8.1 the way a P5
+            // is served, so AVPlayer composes the RPU itself instead of the panel receiving the bare
+            // HDR10 base layer with its one static grade. The bitstream is untouched; what moves is the
+            // container's claim about it, and a P8.1 RPU already carries the mapping out of its own base
+            // layer. See `LoadOptions.forceDolbyVisionOnNonDVDisplay` for the risk this buys.
+            //
+            // P8.1 only. P8.4's base layer is HLG, and a profile-5 dvcC on an HLG `colr` is a container
+            // that contradicts itself; nobody has measured that and it is not what was reported.
+            if !effectiveDvMode && forceDolbyVisionOnNonDVDisplay {
+                EngineLog.emit(
+                    "[HLSVideoEngine] AE#455: serving HEVC DV Profile 8.1 as Profile 5 "
+                    + "(dvh1 sample entry, dvcC profile=5 compat=0, CODECS=dvh1.05.\(dvLevelStr)) "
+                    + "so AVPlayer composes the RPU on a display without Dolby Vision",
+                    category: .session
+                )
+                return CodecRoute(
+                    codecTagOverride: "dvh1",
+                    videoRange: .pq,
+                    primaryCodecs: "dvh1.05.\(dvLevelStr)",
+                    supplementalCodecs: nil,
+                    doviConfig: .rewriteToProfile5,
+                    convertP7ToProfile81: false,
+                    dvVariant: dvVariant
+                )
+            }
             let compat = Int(dvRecord?.dv_bl_signal_compatibility_id ?? 1)
             let needsCompatRewrite = compat != 1
             let supplemental: String?

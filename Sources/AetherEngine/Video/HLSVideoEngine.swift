@@ -47,6 +47,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// From `LoadOptions.keepDvh1TagWithoutDV`; default OFF, set only for misreporting DV panels.
     private let keepDvh1TagWithoutDV: Bool
 
+    /// From `LoadOptions.forceDolbyVisionOnNonDVDisplay` (AE#455); default OFF. Read only by the P8.1
+    /// route, and only while `effectiveDvMode` is false.
+    let forceDolbyVisionOnNonDVDisplay: Bool
+
     /// Match Content master toggle at load time; one input to the master-vs-media-playlist routing decision.
     private let matchContentEnabled: Bool
 
@@ -718,6 +722,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         dvModeAvailable: Bool = true,
         displaySupportsHDR: Bool = true,
         keepDvh1TagWithoutDV: Bool = false,
+        forceDolbyVisionOnNonDVDisplay: Bool = false,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
         audioSourceStreamIndexOverride: Int32? = nil,
@@ -753,6 +758,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.dvModeAvailable = dvModeAvailable
         self.displaySupportsHDR = displaySupportsHDR
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
+        self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode
         self.audioSourceStreamIndexOverride = audioSourceStreamIndexOverride
@@ -1261,8 +1267,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // Forcing the canonical IPT-PQ-c2 tuple writes `colr nclx` so AVPlayer sees the PQ signal.
         // Primaries/transfer/matrix are spec-fixed for P5, so this is a repair. Range is preserved if
         // already signaled (full-range P5 is legal, #20); unspecified defaults to limited.
+        // The AE#455 P8.1-as-P5 route needs the same guarantee for the same reason, and lands on the
+        // same tuple: an HDR10 base layer is BT.2020 / PQ / BT.2020-NCL by definition.
         let p5ColorOverride: MP4SegmentMuxer.ColorOverride?
-        if dvVariant == .profile5 {
+        if dvVariant == .profile5 || doviConfig == .rewriteToProfile5 {
             let sourceRange = codecpar.pointee.color_range
             p5ColorOverride = MP4SegmentMuxer.ColorOverride(
                 primaries: AVCOL_PRI_BT2020,

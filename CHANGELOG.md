@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`LoadOptions.forceDolbyVisionOnNonDVDisplay` (experimental, default off, AE#455).** On a display
+  with no Dolby Vision of its own, an HEVC Profile 8.1 source is served the way a Profile 5 source is
+  served: `dvh1` sample entry, container `dvcC` rewritten to profile 5 / compatibility 0,
+  `CODECS="dvh1.05.LL"`, no supplemental. AVPlayer then composes the Dolby Vision itself and applies
+  the per-frame RPU to the pixels before they leave the device, where the default route hands the
+  panel the HDR10 base layer and its single static grade. The bitstream is untouched; what changes is
+  the container's claim about it. Profile 8.1 only, ignored on a display that does Dolby Vision, and
+  reachable from `aetherctl serve|validate|segverify --no-dv --force-dv`.
 
 ## [6.57.1] - 2026-08-31
 

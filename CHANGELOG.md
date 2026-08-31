@@ -10,7 +10,33 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A rejoin's axis is stated by the playlist that placed the item, not measured off the cache
+  afterwards (AE#454 round 2).** Retested on a device on 6.57.0: three of four seams read `0.000s`
+  and retired the correcting seek exactly as designed, and the session's FIRST swap seeked an item
+  that was already precisely where the manifest had put it, then reported the place it held while
+  the picture ran 6.76 s ahead of it. The item was blameless, and so was the placement: its first
+  requests were the consumer's own segments and it came up at the served `TIME-OFFSET` to the
+  millisecond. What moved it was the check, and underneath the check, the axis.
+
+  That axis was a DIFFERENCE between two independently sampled quantities, the segment cache's
+  resident floor and the item's own reported seekable start, latched for the item's whole life on
+  the first tick that produced any number at all. Fed the range of the item that just left, whose
+  axis IS the session's, the difference collapses to exactly 0, which is indistinguishable from
+  "this item has no offset". The playlist knew the answer the whole time: it computes the placement
+  offset from the segments it lists, so the same build also states where the item's timeline
+  begins. Both numbers are now recorded when they are served, the readiness check compares against
+  the value the playlist actually stated, and a statement overrules a measurement even when a tick
+  got there first. Measured on the harness across both arms: the stated axis is the same 45.00 s
+  the measurement produced where the measurement was right, and it is fixed before readiness
+  instead of depending on where a 100 ms tick falls.
+
+- **A mirrored seekable range belongs to the item it was read from.** `NativeAVPlayerHost` reset
+  `seekableEnd` on attach and left `seekableStart` carrying the retired item's window, and a KVO
+  notification already in flight could land after the swap. Both ends now reset together, and a
+  reading is dropped unless it belongs to the item under the host. Observed in a harness log as
+  `range=30.0..0.0` under the fresh item's generation.
 
 ## [6.57.0] - 2026-08-31
 

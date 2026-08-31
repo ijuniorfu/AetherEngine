@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.57.1] - 2026-08-31
+
 ### Fixed
 
 - **A rejoin's axis is stated by the playlist that placed the item, not measured off the cache

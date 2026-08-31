@@ -2993,6 +2993,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// AE#454: the placement is spent once the item that asked for it is running.
     func clearLiveRejoinStart() { provider?.clearLiveRejoinStart() }
 
+    /// See `VideoSegmentProvider.servedLiveRejoinPlacement`.
+    var servedLiveRejoinPlacement: (timeOffset: Double, playlistStartOutputSeconds: Double)? {
+        provider?.servedLiveRejoinPlacement
+    }
+
     /// #178: called by the engine when a NEW user seek is dispatched. A recovery re-anchor still
     /// holding the coalescer's authoritative slot belongs to the superseded seek; left in place it
     /// would drop the new seek's segment-driven restart and land the producer on the stale

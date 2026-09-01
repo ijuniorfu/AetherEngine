@@ -108,7 +108,8 @@ extension HLSVideoEngine {
         streamCopyAudio: HLSSegmentProducer.AudioConfig?,
         sourceAudioStreamIndex: Int32,
         sourceAudioStream: UnsafeMutablePointer<AVStream>?,
-        audioHLSCodecs: inout String?
+        audioHLSCodecs: inout String?,
+        audioLanguage: String? = nil
     ) throws -> HLSSegmentProducer {
         // EAC3 profile=30 is the JOC marker; any stream-copy->FLAC fallback silently loses Atmos object metadata.
         let sourceIsAtmos: Bool = {
@@ -244,7 +245,8 @@ extension HLSVideoEngine {
                     sourceStreamIndex: sourceAudioStreamIndex,
                     inputTimeBase: bridge.encoderTimeBase,
                     sourceTimeBase: audioStream.pointee.time_base,
-                    bridge: bridge
+                    bridge: bridge,
+                    language: audioLanguage
                 )
                 self.savedAudioConfig = cfg
                 self.audioBridge = bridge

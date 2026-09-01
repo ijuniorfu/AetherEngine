@@ -12,6 +12,34 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.61.0] - 2026-09-01
+
+### Fixed
+
+- **An audio language is now a reason to serve the master playlist (AE#458).** 6.60.0 declared the
+  muxed audio track as an `EXT-X-MEDIA:TYPE=AUDIO` rendition, which is the only place AVFoundation
+  reads a track language from on an HLS asset, but the master-versus-media routing decision did not
+  know about it. Its three reasons to serve a master were an HDR/DV source on a panel ready for it,
+  native subtitle renditions (#15) and tvOS HEVC (AE#187), so the rendition reached AVKit only where
+  one of those had already forced the master. SDR H.264 with no subtitle track stayed media-direct
+  and still showed "Not Specified", as did SDR HEVC on iOS and macOS, where the AE#187 flag is not
+  set. `hasAudioRendition` is now a fourth reason of the same shape as `hasNativeSubs`: it forces the
+  master only where routing is safe, so an HDR source on an unready panel still routes media-direct
+  rather than risking a -11848 for a label, and it is gated on the audio having actually reached the
+  variant. Measured through `aetherctl serve --no-dv` on a `cmn`-tagged SDR H.264 fixture: 6.60.0
+  serves `media.m3u8` with `useMaster=false`, this release serves `master.m3u8` carrying
+  `LANGUAGE="zho"`. The serving log line now also names the language it advertises. Consumers whose
+  libraries are largely SDR H.264 should expect most sources to move from the media playlist to the
+  master.
+- **A language ICU aliases to a macrolanguage keeps its label (AE#458).**
+  `Locale.Language(identifier: "cmn").languageCode?.identifier(.alpha3)` is nil, so Mandarin tagged
+  with its ISO 639-3 code fell through to the fail-closed branch and was served with no `LANGUAGE`,
+  while `yue` and `nan`, which CLDR does not alias, resolved. `Locale.canonicalLanguageIdentifier`
+  now runs behind the direct route, wherever that came back empty, which covers `cmn`, `arb`, `pes`,
+  `swh`, `uzn` and `kmr` without moving any tag that already resolves (`no` stays `nor`, `tl` stays
+  `tgl`). It is gated on a well-formed BCP-47 primary subtag, since canonicalization also resolves
+  free text such as "English", and a language field holding prose is a track name rather than a tag.
+
 ## [6.60.0] - 2026-09-01
 
 ### Fixed

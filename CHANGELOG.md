@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.59.1] - 2026-09-01
+
 ### Fixed
 
 - **How much a gating sample's presentation lead counts toward a VOD placement is measured per

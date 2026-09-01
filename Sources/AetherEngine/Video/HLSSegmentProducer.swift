@@ -86,6 +86,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let bridge: AudioBridge?
         /// Strip 7/9-byte ADTS header per frame for MPEG-TS AAC stream-copy into fMP4; engine synthesises the ASC.
         let stripAacAdts: Bool
+        /// AE#458: the source track's language as ISO 639-2/T, carried into every muxer this config builds
+        /// (a producer restart rebuilds one, so it has to live on the config, not on the first muxer).
+        let language: String?
 
         init(codecpar: UnsafePointer<AVCodecParameters>,
              timeBase: AVRational,
@@ -93,7 +96,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
              inputTimeBase: AVRational,
              sourceTimeBase: AVRational,
              bridge: AudioBridge?,
-             stripAacAdts: Bool = false) {
+             stripAacAdts: Bool = false,
+             language: String? = nil) {
             self.codecpar = codecpar
             self.timeBase = timeBase
             self.sourceStreamIndex = sourceStreamIndex
@@ -101,6 +105,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             self.sourceTimeBase = sourceTimeBase
             self.bridge = bridge
             self.stripAacAdts = stripAacAdts
+            self.language = language
         }
     }
 
@@ -1969,7 +1974,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             extradataOverride: isAdCreative ? nil : videoConfig.extradataOverride
         )
         let muxerAudio: MP4SegmentMuxer.AudioConfig? = audioConfig.map { a in
-            MP4SegmentMuxer.AudioConfig(codecpar: a.codecpar, timeBase: a.inputTimeBase)
+            MP4SegmentMuxer.AudioConfig(codecpar: a.codecpar, timeBase: a.inputTimeBase, language: a.language)
         }
 
         do {

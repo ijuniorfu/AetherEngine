@@ -371,6 +371,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let hdcpLevel: String?
     private let sourceBitrate: Int64
 
+    /// AE#458: ISO 639-2/T of the ONE audio track muxed into the variant, for the master's
+    /// EXT-X-MEDIA:TYPE=AUDIO tag. Nil for a source whose audio carries no resolvable language.
+    private let audioLanguage: String?
+
     /// #15: native subtitle cue stores (one per text track) for the WebVTT rendition served to AVPlayer.
     /// Immutable references; each store is internally locked and filled lazily by the readers on selection.
     private let nativeSubStores: [NativeSubtitleCueStore]
@@ -533,6 +537,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         frameRate: Double?,
         hdcpLevel: String?,
         sourceBitrate: Int64,
+        audioLanguage: String? = nil,
         isLive: Bool = false,
         sequentialAppendPlaylist: Bool = false,
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
@@ -574,6 +579,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.frameRate = frameRate
         self.hdcpLevel = hdcpLevel
         self.sourceBitrate = sourceBitrate
+        self.audioLanguage = audioLanguage
         self.restartHandler = restartHandler
         self.unrecoverableGapHandler = unrecoverableGapHandler
         self.restartActivity = restartActivity
@@ -2038,6 +2044,15 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     var masterFrameRate: Double? { frameRate }
     var masterHDCPLevel: String? { hdcpLevel }
     var masterClosedCaptions: String? { "NONE" }
+
+    /// AE#458: NAME is required and must be unique in the group, and with one muxed track it always is.
+    /// AVKit labels the option from LANGUAGE, not from NAME, so this only has to be human-readable;
+    /// the localized language name is what the subtitle renditions already use.
+    var masterAudioRendition: (language: String, name: String)? {
+        guard let audioLanguage else { return nil }
+        let name = Locale.current.localizedString(forIdentifier: audioLanguage) ?? audioLanguage
+        return (language: audioLanguage, name: name)
+    }
 
     // MARK: - Native subtitle renditions (#15)
 

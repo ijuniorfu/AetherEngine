@@ -1479,6 +1479,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
         var streamCopyAudio: HLSSegmentProducer.AudioConfig?
         var bridgePreferred = false
         var audioHLSCodecs: String?
+        // AE#458: resolved once here so the stream-copy config and the bridge cascade below label the
+        // track identically; both end up in the same fMP4 mdhd.
+        let audioLanguage = AudioLanguageMap.iso639_2T(
+            forSourceLanguage: audioStreamIndex >= 0
+                ? audioDem.audioTrackInfos().first(where: { $0.id == Int(audioStreamIndex) })?.language
+                : nil
+        )
 
         if audioStreamIndex >= 0, let audioStream = audioDem.stream(at: audioStreamIndex) {
             let codecID = audioStream.pointee.codecpar.pointee.codec_id
@@ -1547,7 +1554,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     inputTimeBase: audioStream.pointee.time_base,
                     sourceTimeBase: audioStream.pointee.time_base,
                     bridge: nil,
-                    stripAacAdts: stripAdts
+                    stripAacAdts: stripAdts,
+                    language: audioLanguage
                 )
                 // Audio fallback duration from codec-fixed frame sizes (AC3/EAC3=1536, AAC=1024).
                 let acp = audioStream.pointee.codecpar.pointee
@@ -1631,7 +1639,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             streamCopyAudio: streamCopyAudio,
             sourceAudioStreamIndex: audioStreamIndex,
             sourceAudioStream: audioStreamIndex >= 0 ? audioDem.stream(at: audioStreamIndex) : nil,
-            audioHLSCodecs: &audioHLSCodecs
+            audioHLSCodecs: &audioHLSCodecs,
+            audioLanguage: audioLanguage
         )
         self.producer = prod
         self.activeAudioSourceStreamIndex = savedAudioConfig != nil ? audioStreamIndex : -1
@@ -1656,6 +1665,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             frameRate: frameRate,
             hdcpLevel: hdcpLevel,
             sourceBitrate: sourceBitrate,
+            // AE#458: only when the audio actually reached the variant. A cascade that fell through to
+            // video-only must not advertise an audio rendition that is not in the segments.
+            audioLanguage: savedAudioConfig != nil ? audioLanguage : nil,
             isLive: isLiveSession,
             // Sequential archives: playlist grows with the producer's REAL cut durations. The
             // static plan's uniform EXTINF lies whenever the archive's GOP cadence does not

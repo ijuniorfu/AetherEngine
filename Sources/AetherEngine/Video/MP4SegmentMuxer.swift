@@ -93,6 +93,16 @@ final class MP4SegmentMuxer {
     struct AudioConfig {
         let codecpar: UnsafePointer<AVCodecParameters>
         let timeBase: AVRational
+        /// AE#458: ISO 639-2/T for the track's `mdhd`. Nil writes nothing, leaving movenc's `und`.
+        let language: String?
+
+        init(codecpar: UnsafePointer<AVCodecParameters>,
+             timeBase: AVRational,
+             language: String? = nil) {
+            self.codecpar = codecpar
+            self.timeBase = timeBase
+            self.language = language
+        }
     }
 
     /// Result of a segment cut. `deferredAwaitingAudioSampleEntry` is a THIRD state, distinct from both
@@ -440,6 +450,12 @@ final class MP4SegmentMuxer {
                 throw MuxerError.copyParametersFailed(code: aCopy)
             }
             audioStream.pointee.time_base = audio.timeBase
+            // AE#458: movenc reads this in mov_init, so it has to be set before write_header. With one
+            // muxed audio track and no EXT-X-MEDIA rendition, mdhd is the only place AVFoundation can
+            // read a track language from.
+            if let language = audio.language {
+                av_dict_set(&audioStream.pointee.metadata, "language", language, 0)
+            }
             // AE#382: a source-container codec_tag (MPEG-TS stream type / registration descriptor) makes
             // movenc refuse the header, which the audio cascade reads as "cannot stream-copy" and bridges.
             Self.dropForeignAudioCodecTag(ctx: ctx, codecpar: audioStream.pointee.codecpar)

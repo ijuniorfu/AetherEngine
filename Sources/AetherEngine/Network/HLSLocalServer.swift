@@ -69,6 +69,11 @@ protocol HLSSegmentProvider: AnyObject {
     var masterHDCPLevel: String? { get }
     var masterClosedCaptions: String? { get }
 
+    /// AE#458: the muxed audio track's language (ISO 639-2/T) and display NAME for the master's
+    /// EXT-X-MEDIA:TYPE=AUDIO tag. Nil leaves the master without an audio group, which is what an
+    /// untagged source gets. A muxed rendition carries no URI: the audio is inside the variant.
+    var masterAudioRendition: (language: String, name: String)? { get }
+
     /// Native subtitle renditions (#15): one per text track, for the master EXT-X-MEDIA:TYPE=SUBTITLES tags
     /// and the /subs_{N} endpoints. Empty unless prepareNativeSubtitles is on and the cue stores are threaded.
     /// NAMEs must be unique within the group (duplicates collapse AVFoundation's legible options).
@@ -136,6 +141,7 @@ extension HLSSegmentProvider {
     var masterAverageBandwidth: Int? { nil }
     var masterHDCPLevel: String? { nil }
     var masterClosedCaptions: String? { nil }
+    var masterAudioRendition: (language: String, name: String)? { nil }
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)] { [] }
     var nativeSubtitleDefaultOrdinal: Int { 0 }
     var nativeSubtitleWholeProgram: Bool { false }
@@ -1213,9 +1219,26 @@ final class HLSLocalServer: @unchecked Sendable {
         if let hdcp = provider.masterHDCPLevel {
             streamInfAttrs.append("HDCP-LEVEL=\(hdcp)")
         }
+        // AE#458: the audio is muxed into the variant, so its rendition carries no URI (RFC 8216 4.3.4.2.1).
+        // That tag is the ONLY place AVFoundation reads an audio language from on an HLS asset: measured on
+        // macOS 26, an fMP4 whose mdhd reads "deu" still reports languageCode=nil and builds no audible
+        // selection group at all, so every UI over that group (AVKit's audio menu) shows "Not Specified".
+        // MP4SegmentMuxer writes the mdhd too, but that is not what fixes the label.
+        let audioRendition = provider.masterAudioRendition
+        if audioRendition != nil {
+            streamInfAttrs.append("AUDIO=\"aud\"")
+        }
         if let cc = provider.masterClosedCaptions {
             streamInfAttrs.append("CLOSED-CAPTIONS=\(cc)")
         }
+        if let audio = audioRendition {
+            let audioAttrs = [
+                "TYPE=AUDIO", "GROUP-ID=\"aud\"", "NAME=\"\(audio.name)\"",
+                "LANGUAGE=\"\(audio.language)\"", "DEFAULT=YES", "AUTOSELECT=YES",
+            ]
+            lines.append("#EXT-X-MEDIA:\(audioAttrs.joined(separator: ","))")
+        }
+
         // #15: native WebVTT subtitle renditions (separate from the A/V variant; in-band timed text is
         // non-conformant for HLS). Orthogonal to the video VIDEO-RANGE/CODECS attributes.
         // Sodalite#32: DEFAULT=NO,AUTOSELECT=NO so AVKit never auto-selects a subtitle rendition in fullscreen

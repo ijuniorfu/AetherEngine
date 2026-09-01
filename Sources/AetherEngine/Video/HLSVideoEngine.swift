@@ -1644,6 +1644,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         )
         self.producer = prod
         self.activeAudioSourceStreamIndex = savedAudioConfig != nil ? audioStreamIndex : -1
+        // AE#458: only when the audio actually reached the variant. A cascade that fell through to
+        // video-only must not advertise an audio rendition that is not in the segments, and must not
+        // force the master for one either.
+        let servedAudioLanguage = savedAudioConfig != nil ? audioLanguage : nil
 
         // 7. Wire provider, server, and URL.
         let manifestCodecs = audioHLSCodecs.map { "\(primaryCodecs),\($0)" } ?? primaryCodecs
@@ -1665,9 +1669,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             frameRate: frameRate,
             hdcpLevel: hdcpLevel,
             sourceBitrate: sourceBitrate,
-            // AE#458: only when the audio actually reached the variant. A cascade that fell through to
-            // video-only must not advertise an audio rendition that is not in the segments.
-            audioLanguage: savedAudioConfig != nil ? audioLanguage : nil,
+            audioLanguage: servedAudioLanguage,
             isLive: isLiveSession,
             // Sequential archives: playlist grows with the producer's REAL cut durations. The
             // static plan's uniform EXTINF lies whenever the archive's GOP cadence does not
@@ -1802,7 +1804,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             hasNativeSubs: hasNativeSubs,
             builtInPanelEngagesOnDemand: Self.builtInPanelEngagesOnDemand,
             frameRateKnown: frameRate != nil,
-            videoCodecNeedsMasterSignaling: videoCodecNeedsMasterSignaling)
+            videoCodecNeedsMasterSignaling: videoCodecNeedsMasterSignaling,
+            hasAudioRendition: servedAudioLanguage != nil)
         let resolvedURL: URL? = useMasterPlaylist
             ? srv.playlistURL
             : srv.mediaPlaylistURL
@@ -1812,7 +1815,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         self.servingMasterPlaylist = useMasterPlaylist
         self.servedSourceIsHDR = videoRange != .sdr
-        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) panelIsHDR=\(panelIsInHDRMode) displaySupportsHDR=\(displaySupportsHDR) matchContent=\(matchContentEnabled) sourceIsHDR=\(videoRange != .sdr || effectiveDvMode) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant))")
+        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) panelIsHDR=\(panelIsInHDRMode) displaySupportsHDR=\(displaySupportsHDR) matchContent=\(matchContentEnabled) sourceIsHDR=\(videoRange != .sdr || effectiveDvMode) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant) audioLang=\(servedAudioLanguage ?? "none"))")
         return url
     }
 
@@ -1847,6 +1850,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// DrHurt's external SDR monitor, #98). Do not reinstate an OS-version gate: the fault was the
     /// engine's own master, not a stricter platform codec filter.
     ///
+    /// AE#458: `hasAudioRendition` is the same shape of reason as `hasNativeSubs`. An
+    /// `EXT-X-MEDIA:TYPE=AUDIO` tag lives only in a master, and it is the only place AVFoundation reads
+    /// an audio language from on an HLS asset, so a media-direct SDR source reports
+    /// `languageCode == nil` and AVKit's audio menu reads "Not Specified" no matter what the segment's
+    /// mdhd says. 6.60.0 wrote the rendition but did not route to it, so the label landed only where
+    /// HDR or AE#187 had already forced the master; SDR H.264 (and SDR HEVC off tvOS) kept the old
+    /// symptom (htrung14, tvOS transport bar, Apple TV 4K 3rd gen). Routing-safety still decides: an
+    /// unready HDR panel is a -11848 rejection, and a language is not worth one.
+    ///
     /// #130: `frameRateKnown` gates PQ/HLG masters. AVPlayer filters a VIDEO-RANGE=PQ/HLG
     /// EXT-X-STREAM-INF that has no FRAME-RATE attribute out of the master at parse time and fails
     /// the item with NSURLErrorDomain -1002 without ever fetching media.m3u8 (byte-exact local
@@ -1861,7 +1873,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         hasNativeSubs: Bool,
         builtInPanelEngagesOnDemand: Bool,
         frameRateKnown: Bool,
-        videoCodecNeedsMasterSignaling: Bool = false
+        videoCodecNeedsMasterSignaling: Bool = false,
+        hasAudioRendition: Bool = false
     ) -> Bool {
         let sourceIsHDR = videoRange != .sdr || effectiveDvMode
         let panelReadyForHDR = panelIsInHDRMode
@@ -1879,7 +1892,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // before any media fetch (macOS / the Simulator build the track from the init hvcC and never
         // reproduce it). Forcing the master where it is routing-safe (SDR on any panel, HDR on a ready
         // one) closes that gap; the caller scopes the flag to tvOS + HEVC.
-        if (hasNativeSubs || videoCodecNeedsMasterSignaling) && routingSafeForMaster { return true }
+        if (hasNativeSubs || videoCodecNeedsMasterSignaling || hasAudioRendition)
+            && routingSafeForMaster { return true }
         return sourceIsHDR && panelReadyForHDR
     }
 

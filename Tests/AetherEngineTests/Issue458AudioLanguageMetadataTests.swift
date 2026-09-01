@@ -39,6 +39,41 @@ struct Issue458AudioLanguageMetadataTests {
         #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "yue") == "yue")
     }
 
+    /// htrung14, AE#458 follow-up: `Locale.Language(identifier: "cmn").languageCode?.identifier(.alpha3)`
+    /// is nil, so Mandarin tagged with its ISO 639-3 code hit the fail-closed branch and lost LANGUAGE.
+    /// ICU has no alpha3 entry for the 639-3 members it aliases to a macrolanguage; canonicalizing the
+    /// tag first resolves them. `yue` and `nan` are NOT aliased and must keep their own codes.
+    @Test("ISO 639-3 members ICU aliases to a macrolanguage resolve to that macrolanguage")
+    func resolvesMacrolanguageMembers() {
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "cmn") == "zho")
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "arb") == "ara")
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "pes") == "fas")
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "swh") == "swa")
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "uzn") == "uzb")
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "kmr") == "kur")
+    }
+
+    /// The fallback runs only where the direct route came back empty, so no tag that resolves today
+    /// changes its answer. Canonicalization would move both of these ("no" -> "nb", "tl" -> "fil").
+    @Test("a tag ICU resolves directly keeps that answer, canonicalization does not override it")
+    func directResolutionWinsOverCanonicalization() {
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "no") == "nor")
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "tl") == "tgl")
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "yue") == "yue")
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "nan") == "nan")
+    }
+
+    /// Canonicalization resolves "English" to "en" and "Japanese" to "jpn", so the fallback is gated on
+    /// a well-formed BCP-47 primary subtag (2 or 3 letters). Free text in a language field is a NAME,
+    /// not a tag, and guessing at it is how a commentary track ends up labelled as its own language.
+    @Test("free text stays unresolved even where canonicalization would name a language")
+    func freeTextIsNotCanonicalized() {
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "English") == nil)
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "Japanese") == nil)
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "Original") == nil)
+        #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "Commentary") == nil)
+    }
+
     @Test("region and script subtags collapse to the base language")
     func resolvesBCP47Subtags() {
         #expect(AudioLanguageMap.iso639_2T(forSourceLanguage: "pt-BR") == "por")

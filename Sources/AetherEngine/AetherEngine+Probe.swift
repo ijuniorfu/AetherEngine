@@ -216,6 +216,10 @@ extension AetherEngine {
         return try swDecodeProbeRun(demuxer: demuxer, maxPackets: maxPackets)
     }
 
+    /// #407: how many decoded picture timestamps `swDecodeProbe` retains. Enough to read a reorder
+    /// cadence off, small enough that a long probe stays a diagnostic.
+    private nonisolated static let probeFrameTimeCap = 240
+
     private nonisolated static func swDecodeProbeRun(
         demuxer: Demuxer,
         maxPackets: Int
@@ -245,12 +249,18 @@ extension AetherEngine {
             var firstFramePixelFormat: String?
             var firstFrameWidth: Int = 0
             var firstFrameHeight: Int = 0
+            /// #407: in decoder output order, i.e. presentation order. Capped so a long run stays a
+            /// diagnostic rather than an allocation.
+            var frameTimesSeconds: [Double] = []
         }
         let accum = Accum()
 
         do {
-            try decoder.open(stream: stream) { pixelBuffer, _, _ in
+            try decoder.open(stream: stream) { pixelBuffer, pts, _ in
                 accum.framesDecoded += 1
+                if accum.frameTimesSeconds.count < Self.probeFrameTimeCap {
+                    accum.frameTimesSeconds.append(pts.seconds)
+                }
                 if accum.firstFramePixelFormat == nil {
                     let pfType = CVPixelBufferGetPixelFormatType(pixelBuffer)
                     let bytes: [UInt8] = [
@@ -323,7 +333,8 @@ extension AetherEngine {
             firstFramePixelFormat: accum.firstFramePixelFormat,
             firstFrameWidth: accum.firstFrameWidth,
             firstFrameHeight: accum.firstFrameHeight,
-            firstError: firstError
+            firstError: firstError,
+            frameTimesSeconds: accum.frameTimesSeconds
         )
     }
 

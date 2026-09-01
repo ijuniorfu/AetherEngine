@@ -204,6 +204,11 @@ public final class Demuxer: @unchecked Sendable {
     private var compositionRepair: H264CompositionOffsetRepairSession?
     private var compositionRepairEvaluated = false
 
+    /// #407: video streams whose PTS `+genpts` invented out of decode order, because the container
+    /// carries none of its own. Cleared on the way out of `readPacketLocked` so the decoder's reorder
+    /// owns the presentation axis. Decided once at open, see `armGeneratedPTSSuppression`.
+    private var generatedPTSStreams: Set<Int32> = []
+
     /// #112 round 11: whether `seekByteEstimate` has what it needs (a resolved byte size and a positive
     /// duration). The side reader caps the timestamp-seek attempt tight when this is true, because the
     /// verified estimate is a cheaper, bounded way to position on an index-less source.
@@ -583,6 +588,46 @@ public final class Demuxer: @unchecked Sendable {
             throw DemuxerError.streamInfoFailed(code: findRet)
         }
         logStreams(ctx)
+        armGeneratedPTSSuppression(ctx)
+    }
+
+    /// #407: find the video streams whose PTS `+genpts` is inventing out of decode order, so
+    /// `readPacketLocked` can clear it and leave the axis to the decoder's own reorder. Needs the
+    /// stream parameters `avformat_find_stream_info` fills in, hence the call site right below it.
+    /// See `VFWDecodeOrderPTSRepair` for why the gate is an equivalence rather than a heuristic.
+    private func armGeneratedPTSSuppression(_ ctx: UnsafeMutablePointer<AVFormatContext>) {
+        generatedPTSStreams.removeAll()
+        guard let nameC = ctx.pointee.iformat?.pointee.name else { return }
+        let formatName = String(cString: nameC)
+        guard VFWDecodeOrderPTSRepair.isMatroska(formatName) else { return }
+        for index in 0..<Int32(ctx.pointee.nb_streams) {
+            guard let stream = ctx.pointee.streams[Int(index)],
+                  let par = stream.pointee.codecpar,
+                  par.pointee.codec_type == AVMEDIA_TYPE_VIDEO else { continue }
+            let shape = VFWDecodeOrderPTSRepair.StreamShape(
+                codecTag: par.pointee.codec_tag,
+                videoDelay: par.pointee.video_delay,
+                codecID: par.pointee.codec_id
+            )
+            guard VFWDecodeOrderPTSRepair.suppressesGeneratedPTS(formatName: formatName, shape: shape)
+            else { continue }
+            generatedPTSStreams.insert(index)
+            EngineLog.emit(
+                "[Demuxer] AE#407 stream=\(index) is VFW-carried (tag=\(fourCC(par.pointee.codec_tag)) "
+                + "videoDelay=\(par.pointee.video_delay)); the container carries no PTS, so the "
+                + "+genpts axis is decode order. Clearing PTS, the decoder's reorder owns presentation.",
+                category: .demux
+            )
+        }
+    }
+
+    /// A `codec_tag` printed the way the VFW header spells it, for the diagnostic above.
+    private func fourCC(_ tag: UInt32) -> String {
+        let bytes = [tag, tag >> 8, tag >> 16, tag >> 24].map { UInt8($0 & 0xFF) }
+        let text = String(decoding: bytes, as: UTF8.self)
+        return text.allSatisfy { $0.isASCII && !$0.isNewline && $0 != "\0" }
+            ? text
+            : String(format: "0x%08X", tag)
     }
 
     /// Run a bounded `avformat_find_stream_info` on an already-open context (#87). Used by the subtitle
@@ -1185,6 +1230,13 @@ public final class Demuxer: @unchecked Sendable {
                 return nil
             }
             throw DemuxerError.readFailed(code: ret)
+        }
+        // #407: before anything reads a timestamp off this packet. The PTS on these streams was
+        // invented by `+genpts` out of decode order and transposes every B/P pair; dropping it leaves
+        // the decoder's own reorder to place the picture. See `VFWDecodeOrderPTSRepair`.
+        if !generatedPTSStreams.isEmpty, let pkt = packet,
+           generatedPTSStreams.contains(pkt.pointee.stream_index) {
+            pkt.pointee.pts = Int64.min
         }
         if !clipTimeline.isEmpty, let pkt = packet {
             let si = Int(pkt.pointee.stream_index)

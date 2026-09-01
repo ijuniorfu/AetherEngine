@@ -656,6 +656,11 @@ public struct SoftwareDecodeProbeResult: Sendable {
     public let firstFrameWidth: Int
     public let firstFrameHeight: Int
     public let firstError: String?
+    /// #407: presentation timestamps of the decoded pictures, in the order the decoder handed them
+    /// out. A healthy reordering stream produces a strictly ascending, evenly spaced ladder here; a
+    /// container that withheld its PTS and had one invented from decode order produces a sawtooth,
+    /// which is the one shape no packet-level or renderer-level counter can see.
+    public let frameTimesSeconds: [Double]
 
     public init(
         codecName: String,
@@ -670,8 +675,10 @@ public struct SoftwareDecodeProbeResult: Sendable {
         firstFramePixelFormat: String?,
         firstFrameWidth: Int,
         firstFrameHeight: Int,
-        firstError: String?
+        firstError: String?,
+        frameTimesSeconds: [Double] = []
     ) {
+        self.frameTimesSeconds = frameTimesSeconds
         self.codecName = codecName
         self.codecID = codecID
         self.width = width

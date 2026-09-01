@@ -10,7 +10,21 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **How much a gating sample's presentation lead counts toward a VOD placement is measured per
+  source instead of assumed (AE#418).** 6.56.7 established that a composition lands on a BASE one
+  presentation lead under the axis, measured it on a fixture with a two-frame reorder depth, and
+  shipped it as arithmetic for every source. It is a property of the content. Measured with
+  `aetherctl play --picture-probe` on three clips that differ in reorder depth alone
+  (`Scripts/timecode-fixture.sh` now writes the third, `tc-bf1.mkv`), same burst arm, three runs
+  each, the reading and the picture agreeing in all nine: a source presented at its decode time and
+  one presented a single frame after it both land ON the axis, while one presented two frames after
+  it lands a whole lead below. So on a one-frame-reorder source, which is what the reporting asset
+  is at 23.976 fps, every composition was two frames out and every placement that could not be read
+  back kept that error. A session now starts with no coefficient, composes without one, and takes it
+  from the first placement it reads back (`#418 segN says a lead counts 1.00x on this source`); each
+  `placed` line prints the coefficient it used.
 
 ## [6.59.0] - 2026-09-01
 

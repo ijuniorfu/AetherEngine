@@ -176,6 +176,25 @@ opens on a random-access point in DECODE order, and taking the offset there put 
 as the MEAN of `capErr` per axis over the run, since a single tick carries up to two frames of the
 probe's own quantisation.
 
+**Round 6: how much a lead counts is a property of the SOURCE, so the session measures it.** Round 5
+found that a composition lands on a BASE one presentation lead under the axis, measured it on
+`tc-bframes.mkv` and shipped it as arithmetic. It is not arithmetic. The script now writes a third
+clip, `tc-bf1.mkv`, identical but for `-bf 1`, and on the same burst arm the three reorder depths
+place three different ways, the reading and the picture agreeing in all nine runs:
+
+| clip | gate lead | base a composition lands on | burst arm |
+|---|---|---|---|
+| `tc-drought.mkv` | 0.000 | the axis | -9.000 -> -18.000 -> -23.000 |
+| `tc-bf1.mkv` | 0.042 (one frame) | the axis | -9.000 -> -18.000 -> -23.000 |
+| `tc-bframes.mkv` | 0.083 (two frames) | one lead below the axis | -9.000 -> -18.083 -> -23.166 |
+
+So a session now starts with no coefficient and composes without one, and the first placement it can
+read back states what a lead is worth here: `#418 segN says a lead counts 1.00x on this source (axis
+Xs, base measured Ys, lead Zs)`. Every `placed` line prints the coefficient it used (`lead 0.083s
+x1.00`, or `x0.00 unmeasured` before the first reading). Under round 5 the middle row was composed
+0.042 s low and corrected back on every measurable placement, and the placements that cannot be
+measured at all kept that error for the rest of the session.
+
 `--start-position S` starts at a resume anchor, the same one `serve` takes. `--sw` forces the software path for a source that would route native, which is how a native-only fixture exercises the SW pipeline.
 
 `--malloc-census` turns on the large-allocation census (`AetherEngine.setLargeAllocationCensusEnabled`) for the run, for tracing a footprint that grows where the segment budget says it should not. Besides the 30 s sample it arms a jump trigger, which exists because the 30 s memprobe cannot catch a failure that completes inside one sample (every kill on #220 was that shape): a counter polled at `--census-hz N` runs the zone walk once it climbs `--census-threshold-mb N` above its running high-water. Both flags are inert without `--malloc-census`.

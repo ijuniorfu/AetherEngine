@@ -97,29 +97,29 @@ struct Issue418ReaimedGateAxisTests {
 
     @Test("the first placement of a session establishes the axis")
     func firstPlacementEstablishesTheAxis() {
-        #expect(HLSVideoEngine.axisShift(after: 0, placing: -9.0, presentationLead: 0) == -9.0)
+        #expect(HLSVideoEngine.axisShift(after: 0, placing: -9.0, presentationLead: 0, coefficient: 1) == -9.0)
     }
 
     @Test("an axis-true segment leaves the axis where it is")
     func axisTrueSegmentChangesNothing() {
         // The reporter's seek burst: seg179 was cut on its own boundary, and the run kept -14.056.
-        #expect(HLSVideoEngine.axisShift(after: -14.056, placing: 0, presentationLead: 0) == -14.056)
+        #expect(HLSVideoEngine.axisShift(after: -14.056, placing: 0, presentationLead: 0, coefficient: 1) == -14.056)
     }
 
     @Test("re-placing the segment the gate opened into adds its offset again")
     func rePlacingTheAnchorComposes() {
         // Measured: resume 53 reads -9.000, and a seek that re-fetches that same segment reads -18.000.
-        #expect(HLSVideoEngine.axisShift(after: -9.0, placing: -9.0, presentationLead: 0) == -18.0)
+        #expect(HLSVideoEngine.axisShift(after: -9.0, placing: -9.0, presentationLead: 0, coefficient: 1) == -18.0)
         // And at the deepest tier of the tiered fixture, -11.000 -> -22.000.
-        #expect(HLSVideoEngine.axisShift(after: -11.0, placing: -11.0, presentationLead: 0) == -22.0)
+        #expect(HLSVideoEngine.axisShift(after: -11.0, placing: -11.0, presentationLead: 0, coefficient: 1) == -22.0)
     }
 
     @Test("a later epoch's own re-aim composes onto what the timeline already carries")
     func newEpochComposesOntoTheOldAxis() {
         // Measured: a -9.000 run, seek to 60, producer restarts at seg12 and re-aims 5 s, reads -14.000.
-        #expect(HLSVideoEngine.axisShift(after: -9.0, placing: -5.0, presentationLead: 0) == -14.0)
+        #expect(HLSVideoEngine.axisShift(after: -9.0, placing: -5.0, presentationLead: 0, coefficient: 1) == -14.0)
         // Tiered fixture: a -11.000 run whose seek restarts at seg23 re-aiming 7 s reads -18.000.
-        #expect(HLSVideoEngine.axisShift(after: -11.0, placing: -7.0, presentationLead: 0) == -18.0)
+        #expect(HLSVideoEngine.axisShift(after: -11.0, placing: -7.0, presentationLead: 0, coefficient: 1) == -18.0)
     }
 
     // MARK: - Round 5: a composition lands on the base, not on the axis
@@ -140,38 +140,101 @@ struct Issue418ReaimedGateAxisTests {
         #expect(HLSSegmentProducer.presentationLeadPts(actualFirstPts: 42_917, actualFirstDts: 43_000) == 0)
     }
 
-    @Test("a composition onto an existing timeline lands one lead below the axis")
+    @Test("on a two-frame reorder source a composition lands one lead below the axis")
     func compositionLandsOnTheBase() {
-        // Measured on tc-bframes.mkv: the axis stood at -9.000 and AVPlayer held the re-placed
-        // segment from item 61.083, not the 61.000 the axis alone predicts, and the picture read
-        // -18.083 for the rest of the run.
-        #expect(HLSVideoEngine.placementBase(axis: -9.0, presentationLead: 0.083) == -9.083)
+        // Measured on tc-bframes.mkv (`-bf 3`, pyramid, lead two frames): the axis stood at -9.000
+        // and AVPlayer held the re-placed segment from item 61.083, not the 61.000 the axis alone
+        // predicts, and the picture read -18.083 for the rest of the run. Round 6 arrives at the
+        // coefficient of 1 by reading it back rather than by assuming it, see
+        // `readingTeachesTheCoefficient`.
+        #expect(HLSVideoEngine.placementBase(axis: -9.0, presentationLead: 0.083, coefficient: 1) == -9.083)
         #expect(abs(HLSVideoEngine.axisShift(
-            after: -9.0, placing: -9.0, presentationLead: 0.083) - (-18.083)) < 1e-9)
+            after: -9.0, placing: -9.0, presentationLead: 0.083, coefficient: 1) - (-18.083)) < 1e-9)
     }
 
-    @Test("each composition eats its own lead, so an unmeasured chain of them accumulates")
+    @Test("where a lead counts, each composition eats one, so an unmeasured chain accumulates")
     func leadAccumulatesPerComposition() {
         // The three-placement burst arm: -9.000 -> -18.083 -> -27.166, all three read back off the
         // picture. Before this the third was kept at -27.000, 0.166 s over the truth.
-        let second = HLSVideoEngine.axisShift(after: -9.0, placing: -9.0, presentationLead: 0.083)
-        let third = HLSVideoEngine.axisShift(after: second, placing: -9.0, presentationLead: 0.083)
+        let second = HLSVideoEngine.axisShift(after: -9.0, placing: -9.0, presentationLead: 0.083, coefficient: 1)
+        let third = HLSVideoEngine.axisShift(after: second, placing: -9.0, presentationLead: 0.083, coefficient: 1)
         #expect(abs(third - (-27.166)) < 1e-9)
+    }
+
+    // MARK: - AE#418 round 6: how much a lead counts is measured, not assumed
+    //
+    // Round 5 measured `1` on tc-bframes.mkv and shipped it as arithmetic for every source. The
+    // reporter's asset (23.976 fps, one frame of reorder) reads the other way, and so does the
+    // fixture that isolates it: `Scripts/timecode-fixture.sh` writes tc-bf1.mkv, identical to
+    // tc-bframes.mkv but for `-bf 1`, and on the same burst arm the picture reads -23.000 where
+    // round 5 kept -23.042. Three runs each, three reorder depths, the reading and the picture
+    // agreeing in all nine.
+
+    @Test("a reading is what the next composition learns its coefficient from")
+    func readingTeachesTheCoefficient() {
+        // tc-bframes.mkv: axis -9.000, AVPlayer held the re-placed segment from item 61.083, so the
+        // base it composed onto was -9.083, one whole lead below.
+        let twoFrames = HLSVideoEngine.leadCoefficient(
+            axis: -9.0, measuredBase: -9.083, presentationLead: 0.083)
+        #expect(twoFrames != nil && abs((twoFrames ?? 0) - 1) < 1e-9)
+        // tc-bf1.mkv, same arm: held from item 61.000, so the base IS the axis and the lead counts
+        // for nothing. Round 5 predicted -9.042 here and the reading had to undo it every time.
+        let oneFrame = HLSVideoEngine.leadCoefficient(
+            axis: -9.0, measuredBase: -9.0, presentationLead: 0.042)
+        #expect(oneFrame != nil && abs(oneFrame ?? 1) < 1e-9)
+    }
+
+    @Test("a placement carrying no lead teaches nothing about what a lead is worth")
+    func noLeadTeachesNothing() {
+        // tc-drought.mkv has no reordering at all, so its every placement divides by zero here. The
+        // coefficient it would produce describes the reading's resolution, not the placement.
+        #expect(HLSVideoEngine.leadCoefficient(
+            axis: -9.0, measuredBase: -9.0, presentationLead: 0) == nil)
+        #expect(HLSVideoEngine.leadCoefficient(
+            axis: -9.0, measuredBase: -9.083, presentationLead: 0.0005) == nil)
+    }
+
+    @Test("a wrong reading cannot teach more than a reorder depth could ever produce")
+    func coefficientIsBounded() {
+        // Round 4 adopts a reading that can be wrong once, on the grounds that the next placement
+        // undoes it. What it must not do is leave a coefficient behind that outlives the mistake.
+        #expect(HLSVideoEngine.leadCoefficient(
+            axis: -9.0, measuredBase: -42.0, presentationLead: 0.042) == HLSVideoEngine.maxLeadCoefficient)
+        #expect(HLSVideoEngine.leadCoefficient(
+            axis: -9.0, measuredBase: 33.0, presentationLead: 0.042) == -HLSVideoEngine.maxLeadCoefficient)
+    }
+
+    @Test("round 5's rule leaves a one-frame-reorder source two frames out per composition")
+    func roundFiveOvershotASingleFrameReorder() {
+        // tc-bf1.mkv, the three-placement burst: -9.000 -> -18.000 -> -23.000 off the picture, 3 of
+        // 3 runs. Under round 5 the measurable placement was corrected back every time and the
+        // unmeasurable one kept -23.042.
+        let roundFive = HLSVideoEngine.axisShift(
+            after: -18.0, placing: -5.0, presentationLead: 0.042, coefficient: 1)
+        let roundSix = HLSVideoEngine.axisShift(
+            after: -18.0, placing: -5.0, presentationLead: 0.042, coefficient: 0)
+        #expect(abs(roundFive - (-23.042)) < 1e-9)
+        #expect(abs(roundSix - (-23.0)) < 1e-9)
     }
 
     @Test("a source without reordering composes exactly as it did")
     func noLeadIsTheOldArithmetic() {
         // tc-drought.mkv, same three arms: -9.000 -> -18.000, confirmed by both the reading and the
         // picture, so this round changes nothing where there is nothing to change.
-        #expect(HLSVideoEngine.axisShift(after: -9.0, placing: -9.0, presentationLead: 0) == -18.0)
-        #expect(HLSVideoEngine.placementBase(axis: -9.0, presentationLead: 0) == -9.0)
+        #expect(HLSVideoEngine.axisShift(
+            after: -9.0, placing: -9.0, presentationLead: 0, coefficient: 1) == -18.0)
+        #expect(HLSVideoEngine.placementBase(
+            axis: -9.0, presentationLead: 0, coefficient: 1) == -9.0)
+        // And with no coefficient learned yet, which is where every session starts.
+        #expect(HLSVideoEngine.axisShift(
+            after: -9.0, placing: -9.0, presentationLead: 0.083, coefficient: 0) == -18.0)
     }
 
     @Test("the seam sits where the placement lands, which is below the advertised start by the base")
     func seamFollowsTheBase() {
         // seg13 advertised at 52.000 composing onto -9.000 with a lead of 0.083 begins at item
         // 61.083, which is where AVPlayer reported holding it.
-        let base = HLSVideoEngine.placementBase(axis: -9.0, presentationLead: 0.083)
+        let base = HLSVideoEngine.placementBase(axis: -9.0, presentationLead: 0.083, coefficient: 1)
         #expect(abs(HLSVideoEngine.seamItemSeconds(advertisedStart: 52.0, currentShift: base) - 61.083) < 1e-9)
     }
 

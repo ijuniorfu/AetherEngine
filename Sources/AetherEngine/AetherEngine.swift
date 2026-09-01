@@ -3571,9 +3571,10 @@ public final class AetherEngine: ObservableObject {
         // HDR/DV title as SDR in Stats for Nerds.
         videoFormat = effectiveFormat
         #else
-        videoFormat = (effectiveFormat != .sdr && panelHDRAfterHandshake)
-            ? effectiveFormat
-            : .sdr
+        videoFormat = Self.presentedVideoFormat(
+            effectiveFormat: effectiveFormat,
+            panelPresentsHDR: panelHDRAfterHandshake,
+            sourceVideoFormat: sourceVideoFormat)
         #endif
         // #361: the handshake above is the second stretch a host cannot see, and on a real SDR->HDR
         // switch it is seconds long. Recorded on every branch, including the ones with nothing to
@@ -3828,6 +3829,9 @@ public final class AetherEngine: ObservableObject {
                 startLiveTelemetrySampler()
                 armDisplayModeDiagnostic(gen: gen, backend: "software",
                                          contentRate: detectedRate, requestedRate: snappedRate)
+                armPlaybackPanelProbe(gen: gen, effectiveFormat: effectiveFormat,
+                                      panelPresentedHDRAtLoad: panelHDRAfterHandshake,
+                                      sessionIsPlaying: Self.loadPerformsAutostart(options))
             } else {
                 // Native path: pass the probe Demuxer to loadNative so HLSVideoEngine.start() skips
                 // avformat_open_input + find_stream_info (~1-3 s saved on slow CDN). The cue prewarm
@@ -3915,6 +3919,9 @@ public final class AetherEngine: ObservableObject {
                 startLiveTelemetrySampler()
                 armDisplayModeDiagnostic(gen: gen, backend: "native",
                                          contentRate: detectedRate, requestedRate: snappedRate)
+                armPlaybackPanelProbe(gen: gen, effectiveFormat: effectiveFormat,
+                                      panelPresentedHDRAtLoad: panelHDRAfterHandshake,
+                                      sessionIsPlaying: Self.loadPerformsAutostart(options))
             }
         } catch is CancellationError {
             // Superseded.
@@ -4959,6 +4966,8 @@ public final class AetherEngine: ObservableObject {
 
     private var displayModeDiagnostic: Task<Void, Never>?
 
+    private var playbackPanelProbe: Task<Void, Never>?
+
     /// Sodalite #49: read back what the Match-Frame-Rate switch actually landed on. `preferredDisplayCriteria`
     /// is a hint with no read-back, so a display-link sample once playback is running is the only way to tell
     /// three cases apart for a judder report: the panel ignored the criteria and kept the system rate (50.000
@@ -4987,6 +4996,45 @@ public final class AetherEngine: ObservableObject {
                 + "(nominal \(fmt(sample?.nominal))) player=\(fmt(playerRate.map(Double.init)))fps",
                 category: .engine
             )
+        }
+        #endif
+    }
+
+    /// AE#459: re-ask the panel, once frames are running, whether it is presenting HDR.
+    ///
+    /// Every answer `panelPresentsHDR` gets is sampled around the criteria write, and an Apple TV whose
+    /// output format is fixed to HDR has nothing to say at that moment: there is no dynamic-range
+    /// transition, so the EDR headroom stays 1.00 and `panelProvenToEngageHDR` can never be armed either.
+    /// Such a panel therefore reads SDR forever, which mislabels every HDR/DV session in Stats for Nerds
+    /// and, through the same boolean, serves it media-direct with no HDR signaling.
+    ///
+    /// The probe does not re-route the running session; the proof it latches makes the next load in this
+    /// process route correctly on its own. What it fixes here and now is the label.
+    @MainActor
+    func armPlaybackPanelProbe(gen: UInt64, effectiveFormat: VideoFormat,
+                               panelPresentedHDRAtLoad: Bool, sessionIsPlaying: Bool) {
+        #if os(tvOS)
+        playbackPanelProbe?.cancel()
+        playbackPanelProbe = nil
+        guard DisplayCriteriaController.shouldProbePanelDuringPlayback(
+            effectiveFormat: effectiveFormat,
+            panelPresentedHDRAtLoad: panelPresentedHDRAtLoad,
+            sessionIsPlaying: sessionIsPlaying) else { return }
+        playbackPanelProbe = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let presentsHDR = await self.displayCriteria.probePanelDuringPlayback()
+            guard !Task.isCancelled, self.loadGeneration == gen, presentsHDR else { return }
+            let corrected = Self.presentedVideoFormat(
+                effectiveFormat: effectiveFormat,
+                panelPresentsHDR: true,
+                sourceVideoFormat: self.sourceVideoFormat)
+            guard corrected != self.videoFormat else { return }
+            EngineLog.emit(
+                "[AetherEngine] panel answered HDR during playback, republishing videoFormat "
+                + "\(self.videoFormat) -> \(corrected); the load-time read could not see it and this "
+                + "session was served without HDR signaling (#459)",
+                category: .engine)
+            self.videoFormat = corrected
         }
         #endif
     }
@@ -5639,6 +5687,8 @@ public final class AetherEngine: ObservableObject {
         airPlayProgressWatchdog = nil
         displayModeDiagnostic?.cancel()
         displayModeDiagnostic = nil
+        playbackPanelProbe?.cancel()
+        playbackPanelProbe = nil
         airPlayServedMasterToReceiver = false
         extractorYieldState.deactivate()
         setPendingRecoverySeekTarget(nil)

@@ -133,7 +133,7 @@ extension HLSVideoEngine {
                 codecpar: vcfg.codecpar,
                 timeBase: vcfg.timeBase,
                 codecTagOverride: vcfg.codecTagOverride,
-                stripDolbyVisionMetadata: vcfg.stripDolbyVisionMetadata,
+                doviConfig: vcfg.doviConfig,
                 colorOverride: vcfg.colorOverride,
                 extradataOverride: vcfg.extradataOverride
             )

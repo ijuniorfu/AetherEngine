@@ -12,6 +12,36 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.59.0] - 2026-09-01
+
+### Fixed
+
+- **A VFW-carried Matroska track keeps the decoder's picture order instead of an invented one
+  (AE#407).** A track written as `V_MS/VFW/FOURCC` carries no presentation timestamps at all:
+  `matroskadec` puts the block timecode on `pkt->dts` and leaves `pkt->pts` unset. That is the
+  carriage every VC-1 remux uses, because VC-1 has no native Matroska mapping. The engine opens
+  every source with `fflags=+genpts`, and that reconstruction assumes decode order and presentation
+  order are the same sequence, which on a stream with B pictures produces a uniform
+  `pts = dts + one frame` ladder. libavcodec then hands its pictures out in presentation order while
+  each carries the timestamp of the packet it came from, so a B picture wears the following P
+  picture's time, and `SampleBufferRenderer` sorts its reorder buffer by PTS and puts the pictures
+  back into decode order. Motion steps forward, back, forward, back for the length of the title, at
+  an even frame spacing, with no drop, no late frame and no corrupted frame to count, which is why
+  every counter in the report read healthy. Such a stream now has its invented PTS cleared and
+  `best_effort_timestamp` places the picture. Measured through `aetherctl swdecode` on the WVC1
+  sample from samples.ffmpeg.org remuxed with a plain `ffmpeg -c copy`: 49 of 98 steps backwards
+  before, 0 after. The gate is an equivalence rather than a heuristic, since `matroskadec` sets
+  `ms_compat` and `par->codec_tag` out of the same VFW header and no natively mapped Matroska track
+  carries a codec tag; H.264, HEVC and AV1 are held out because they can stay on the native path,
+  where the fMP4 muxer refuses a timestamp-less packet outright.
+
+### Added
+
+- **`SoftwareDecodeProbeResult.frameTimesSeconds`** records the decoded picture timestamps in
+  decoder output order, and `aetherctl swdecode` prints that ladder with a backwards-step count and
+  its own verdict. A picture paired with the wrong timestamp is invisible to every packet-level and
+  renderer-level counter, which is how AE#407 survived three rounds of instrumented captures.
+
 ## [6.58.0] - 2026-09-01
 
 ### Added

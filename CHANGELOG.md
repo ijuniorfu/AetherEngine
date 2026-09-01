@@ -12,6 +12,27 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.60.0] - 2026-09-01
+
+### Fixed
+
+- **A muxed audio track's language is declared where AVFoundation actually reads it, the master
+  playlist (AE#458).** Reported as AVKit labelling the track "Not Specified". The proposal was to
+  write ISO 639-2/T into the fMP4 audio stream's `mdhd`, which is where a progressive `.mp4` carries
+  it, but measured on macOS 26 against a `language=ger` Matroska source served by the engine and read
+  back through a real `AVPlayerItem`, an `mdhd` reading `deu` still yields
+  `AVAssetTrack.languageCode == nil` and no `.audible` media selection group at all; the same `mdhd`
+  read progressively yields `deu` and an option named "German". For an HLS asset the language comes
+  from the master, and the engine's master declared no audio rendition, because it muxes its one
+  audio track into the variant. It now declares that track as a URI-less rendition (RFC 8216
+  4.3.4.2.1) and joins the variant to it, which produces a `.audible` group with the right display
+  name. The `mdhd` is written as well, since the track is that language whoever reads it. Resolution
+  goes through ICU (`Locale.Language(identifier:).languageCode?.identifier(.alpha3)`), which covers
+  every language ICU knows plus BCP-47 subtags and rejects free text, in front of a twenty-row ISO
+  639-2/B table for the bibliographic codes ICU does not resolve and Matroska writes (`ger`, `fre`,
+  `cze`). An unresolvable label writes nothing, and a source with no audio language produces a
+  byte-identical master to before.
+
 ## [6.59.1] - 2026-09-01
 
 ### Fixed

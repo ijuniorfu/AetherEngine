@@ -115,6 +115,27 @@ Non-streamable codecs route through `AudioBridge` in one of two modes (`LoadOpti
 
 Two bridge lifecycle invariants (issue #99): the encoder PTS counter re-bases onto the first fed packet's (gate-shifted) source PTS on every session start and producer restart, so bridged audio always shares the video's output timeline, including a `load(startPosition:)` resume that anchors mid-file (a 0-based bridge timeline puts the audio track a full resume-offset away from video inside the same fragments, which AVPlayer silently discards). And the EOF tail flush leaves the encoder in FFmpeg's terminal draining state, so the bridge latches that and rebuilds the encoder on the next restart; a VOD pump that still dies with `muxerFailed` gets a bounded producer rebuild instead of stranding the session.
 
+### Track language on the native path
+
+AVFoundation reads a track's language from the master playlist, not from the media, so the audio the
+engine muxes into its single variant is also declared there: one URI-less
+`EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",LANGUAGE="<iso 639-2/T>",DEFAULT=YES,AUTOSELECT=YES` plus
+`AUDIO="aud"` on the variant (RFC 8216 4.3.4.2.1, the URI is absent precisely because the audio is
+inside the variant). AVPlayer then exposes it as a one-option audible `AVMediaSelection` group and
+labels it from `LANGUAGE`, which is what a system audio menu shows. Measured on macOS 26: the same
+fMP4 whose audio `mdhd` reads `deu` reports `AVAssetTrack.languageCode == nil` and no audible group
+at all when the master does not declare the rendition, while the identical `mdhd` read from a
+progressive `.mp4` reports `deu`. The `mdhd` is written too (the track is that language whoever
+reads it), it just is not what the label comes from. The rendition is advertised only when the audio
+actually reached the variant, so an audio cascade that fell through to video-only never names a
+group its segments do not carry (AE#458).
+
+Source labels are resolved to ISO 639-2/T through ICU, which covers every language it knows plus
+BCP-47 subtags (`pt-BR` becomes `por`) and rejects free text such as `English` or a track title, in
+front of a twenty-row table for the ISO 639-2/B bibliographic codes ICU does not resolve and
+Matroska routinely writes (`ger`, `fre`, `cze`). A label that resolves to nothing writes nothing, so
+an untagged source keeps the master it had before.
+
 ### Dolby Atmos
 
 EAC3+JOC packets are stream-copied through the muxer untouched, on every output route. AVPlayer reads the segment, recognises JOC from the `dec3` box (`numDepSub=1`, `depChanLoc=0x0100`), and lets the downstream renderer decide: over HDMI it tunnels out as Dolby MAT 2.0 and the AVR lights up the Atmos indicator; over AirPods it renders spatially; over plain Bluetooth A2DP / LE it downmixes the bed channels to stereo natively. The route never changes the engine's decision (a JOC track is signaled in the playlist as `ec-3`, the same CODECS string as a non-JOC EAC3 5.1 track, so AVPlayer accepts it everywhere and the bitstream is never re-encoded for a route reason). The engine emits an explicit `[HLSVideoEngine] EAC3+JOC Atmos: stream-copy engaged; ...` diagnostic on every Atmos session.

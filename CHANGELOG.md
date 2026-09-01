@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.58.0] - 2026-09-01
+
 ### Added
 
 - **`LoadOptions.forceDolbyVisionOnNonDVDisplay` (experimental, default off, AE#455).** On a display
@@ -19,7 +23,13 @@ the public-API contract.
   the per-frame RPU to the pixels before they leave the device, where the default route hands the
   panel the HDR10 base layer and its single static grade. The bitstream is untouched; what changes is
   the container's claim about it. Profile 8.1 only, ignored on a display that does Dolby Vision, and
-  reachable from `aetherctl serve|validate|segverify --no-dv --force-dv`.
+  reachable from `aetherctl serve|validate|segverify --no-dv --force-dv`. Device-verified against
+  Dolby's own test kit, which ships the same graded content as Profile 5 and as 8.1: on an Apple TV
+  4K (tvOS 26.6) at a Samsung HDR10+ panel without Dolby Vision, the 8.1 with the opt-in renders like
+  the genuine P5 and the default route does not, so the composition really does engage rather than
+  the `dvh1` track merely being tone-mapped as PQ. It stays opt-in because that is one panel and one
+  OS version, and a decoder reading the container's profile instead of the RPU would show a green /
+  violet cast over the whole picture.
 
 ## [6.57.1] - 2026-08-31
 

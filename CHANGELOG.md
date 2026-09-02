@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.62.3] - 2026-09-02
+
 ### Fixed
 
 - **A run that does not belong to a placement no longer answers for it, and a composition nobody

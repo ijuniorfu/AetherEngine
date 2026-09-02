@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.65.0] - 2026-09-02
+
 ### Added
 
 - **The video-only audio drop is a typed, published fact (AE#462).** `$audioDelivery` publishes an

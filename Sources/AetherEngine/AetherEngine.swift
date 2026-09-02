@@ -81,10 +81,18 @@ public final class AetherEngine: ObservableObject {
         didSet { recomputePlaybackPhase() }
     }
 
-    /// Where the loopback segment cache holds picture right now, on the same presentation axis
-    /// `seek(to:)` uses. An empty array is the nil-equivalent. Residency is not a promise that a seek
-    /// inside a range will be instant; the player may still need to re-anchor and decode at the target.
+    /// Where the loopback segment cache holds picture right now, on the same 0-based display axis as
+    /// `currentTime`, `duration` and `seek(to:)`. An empty array is the nil-equivalent, and live
+    /// sessions publish one always: their rewind depth is `clock.seekableLiveRange`, a different
+    /// contract. Residency is not a promise that a seek inside a range will be instant; the player may
+    /// still need to re-anchor and decode at the target.
     @Published public internal(set) var residentRanges: [ClosedRange<Double>] = []
+
+    /// The same spans as `residentRanges`, unfolded, on the producer's playlist axis. Held because the
+    /// fold onto the display axis moves when the producer publishes a new shift, and a shift change is
+    /// not a cache change: without the raw spans the band would keep the retired epoch's offset until
+    /// the next segment happened to land.
+    var residentPlaylistRanges: [ClosedRange<Double>] = []
 
     /// True from seek entry until physical landing, covering programmatic seeks, native AVKit scrubs and
     /// seeks the session could not take yet (#127/#178 stash). Unlike `state == .seeking` (optimistically
@@ -1296,18 +1304,48 @@ public final class AetherEngine: ObservableObject {
         didSet {
             oldValue?.setResidentRangesObserver(nil)
             guard let session = nativeVideoSession else {
+                residentPlaylistRanges = []
                 residentRanges = []
                 return
             }
             session.setResidentRangesObserver { [weak self, weak session] ranges in
                 Task { @MainActor in
                     guard let self, let session, self.nativeVideoSession === session else { return }
-                    self.residentRanges = ranges
+                    self.residentPlaylistRanges = ranges
+                    self.republishResidentRanges()
                 }
             }
-            residentRanges = session.residentRanges()
+            residentPlaylistRanges = []
+            residentRanges = []
+            // Ask for the first snapshot instead of reading it here: this didSet runs on the main actor
+            // right after `start()`, so a synchronous read would take the session's restart lock and the
+            // cache's condition on main while the producer is already storing into both (AE#422).
+            session.noteResidentSetChanged()
         }
     }
+
+    /// Fold the cache's playlist-axis spans onto the published display axis, the same way
+    /// `onSeekStateChanged` folds a scrub target (#38). The two axes differ by
+    /// `playlistShiftSeconds - sourcePresentationOrigin`, which is not zero on the very path this
+    /// feature serves: AE#270 anchors the origin on the container's start while the shift also carries
+    /// the producer's drift, and that drift grows with each restart. Publishing plan seconds raw would
+    /// hand a host a band that sits beside its own scrubber.
+    func republishResidentRanges() {
+        residentRanges = residentPlaylistRanges.compactMap { range in
+            let lower = displaySeconds(forPlaylistSeconds: range.lowerBound)
+            let upper = displaySeconds(forPlaylistSeconds: range.upperBound)
+            return lower <= upper ? lower...upper : nil
+        }
+    }
+
+    /// A playlist-axis second on the published display axis. Seam-aware like the clock fold: bytes
+    /// below a seam were muxed by the previous producer and keep folding with its shift.
+    func displaySeconds(forPlaylistSeconds seconds: Double) -> Double {
+        let shift = presentationAxis.shiftSeconds(atItemSeconds: seconds) ?? playlistShiftSeconds
+        return PresentationAxis.display(sourcePTS: seconds + shift,
+                                        origin: displayOrigin(forShift: shift))
+    }
+
     /// AE#446 round 2: polls for the source coming back after a window was closed with ENDLIST.
     /// Cancelled on stop; see `handleLiveOutageWindowExhausted`.
     var liveOutageResumeWatcher: Task<Void, Never>?
@@ -3153,6 +3191,7 @@ public final class AetherEngine: ObservableObject {
             : nil
         state = .loading
         isBuffering = false
+        residentPlaylistRanges = []
         residentRanges = []
         readerStall = .flowing
         clock.currentTime = 0
@@ -5902,6 +5941,7 @@ public final class AetherEngine: ObservableObject {
         clock.sourceTime = 0
         clock.bufferedPosition = 0
         isBuffering = false
+        residentPlaylistRanges = []
         residentRanges = []
         readerStall = .flowing
         // Hard-clear in-flight seek state: late callbacks are dropped by generation guards, but isSeeking

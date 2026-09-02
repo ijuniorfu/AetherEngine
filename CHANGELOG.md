@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **The segment cache states where it holds picture (AE#468, PR by @sitepilotusa).**
+  `AetherEngine.$residentRanges` publishes the loopback cache's resident spans as disjoint
+  ascending ranges on the `currentTime` axis, so a host can mark a timeline with what the session
+  can actually serve. AVPlayer's `loadedTimeRanges` cannot answer this: a measured session held 64
+  segments over more than four minutes across several islands while AVPlayer exposed roughly twelve
+  seconds around the playhead and forgot a seeked-ahead island as soon as the playhead left it. The
+  spans are folded from the producer's playlist axis onto the published display axis the same way a
+  scrub target is (AE#270 makes those two differ by the producer's drift), coalesced to at most four
+  updates a second, and cleared on `load()` and teardown. Live publishes an empty array always: its
+  rewind depth is `clock.seekableLiveRange`, which answers a different question. Residency is not a
+  promise that a seek inside a span is instant.
 
 ## [6.66.0] - 2026-09-02
 

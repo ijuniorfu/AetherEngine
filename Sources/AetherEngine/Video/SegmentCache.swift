@@ -280,24 +280,26 @@ final class SegmentCache: @unchecked Sendable {
         }
 
         condition.lock()
-        let residentBefore = Set(entries.keys)
         // store racing close() must not resurrect bookkeeping; entry would point into deleted sessionDir.
         guard !closed else {
             condition.unlock()
             try? FileManager.default.removeItem(at: fileURL)
             return
         }
+        // A re-store of a resident index changes bytes, not residency; only an insertion or an
+        // eviction moves the set, and both are already known here without walking it.
+        var residentSetChanged = false
         if writeOK {
             if let oldBytes = entryBytes[index] {
                 _totalBytes -= oldBytes
             }
-            entries[index] = fileURL
+            residentSetChanged = entries.updateValue(fileURL, forKey: index) == nil
             entryBytes[index] = data.count
             _totalBytes += data.count
             if index > _highestStoredIndex { _highestStoredIndex = index }
         }
         let doomed = pruneOutsideWindow()
-        let residentSetChanged = residentBefore != Set(entries.keys)
+        if !doomed.isEmpty { residentSetChanged = true }
         condition.broadcast()
         condition.unlock()
         for url in doomed { try? FileManager.default.removeItem(at: url) }
@@ -330,17 +332,17 @@ final class SegmentCache: @unchecked Sendable {
         }
 
         condition.lock()
-        let residentBefore = Set(entries.keys)
         guard !closed else {
             condition.unlock()
             try? FileManager.default.removeItem(at: fileURL)
             return
         }
+        var residentSetChanged = false
         if renameOK {
             if let oldBytes = entryBytes[index] {
                 _totalBytes -= oldBytes
             }
-            entries[index] = fileURL
+            residentSetChanged = entries.updateValue(fileURL, forKey: index) == nil
             entryBytes[index] = byteCount
             _totalBytes += byteCount
             if index > _highestStoredIndex { _highestStoredIndex = index }
@@ -352,7 +354,7 @@ final class SegmentCache: @unchecked Sendable {
             videoReaches[index] = videoReach
         }
         let doomed = pruneOutsideWindow()
-        let residentSetChanged = residentBefore != Set(entries.keys)
+        if !doomed.isEmpty { residentSetChanged = true }
         condition.broadcast()
         condition.unlock()
         for url in doomed { try? FileManager.default.removeItem(at: url) }
@@ -363,6 +365,7 @@ final class SegmentCache: @unchecked Sendable {
         condition.lock()
         closed = true
         let dir = sessionDir
+        let hadEntries = !entries.isEmpty
         entries.removeAll(keepingCapacity: false)
         entryBytes.removeAll(keepingCapacity: false)
         videoReaches.removeAll(keepingCapacity: false)
@@ -375,6 +378,9 @@ final class SegmentCache: @unchecked Sendable {
 
         releaseLiveMarker()
         try? FileManager.default.removeItem(at: dir)
+        // A closed cache holds nothing, and that is a resident-set change like any other. The engine
+        // clears its published band on teardown anyway; this keeps the cache honest on its own.
+        if hadEntries { onResidentSetChanged?() }
     }
 
     // MARK: - Reader side

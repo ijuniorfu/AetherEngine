@@ -758,6 +758,10 @@ extension AetherEngine {
                 // is still on screen those differ, and the picture is what the clock has to describe.
                 let activeShift = self.presentationAxis.shiftSeconds(atItemSeconds: self.nativeClockSeconds) ?? seconds
                 self.playlistShiftSeconds = activeShift
+                // The cache did not move, but the fold onto the display axis did. Re-publish the band
+                // from the raw spans so it does not carry the retired epoch's offset until the next
+                // segment lands (AE#468 follow-up).
+                self.republishResidentRanges()
                 // AE#422: read off-main before building the line (see `avPlayerBufferAheadSeconds`).
                 let avBufAhead = await self.avPlayerBufferAheadSeconds()
                 // Re-fold immediately so currentTime doesn't lag the next periodic tick (origin-corrected).

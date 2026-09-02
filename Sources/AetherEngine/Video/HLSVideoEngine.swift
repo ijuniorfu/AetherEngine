@@ -113,7 +113,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let observer = residentRangesObserver
         residentRangesPublishLock.unlock()
 
-        observer?(residentRanges())
+        observer?(residentPlaylistRanges())
 
         residentRangesPublishLock.lock()
         residentRangesPublishTask = nil
@@ -2126,20 +2126,30 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// On-disk segment bytes (freshly stat-ed). Used by `aetherctl live --report-cache-bytes`.
     var segmentCacheDiskBytes: Int64 { subsystemSnapshot().cache?.diskBytes() ?? 0 }
 
-    /// Presentation-axis spans currently backed by the VOD segment cache. Live returns no claim:
-    /// its DVR history is a different contract, expressed by `seekableLiveRange` at the engine layer.
-    func residentRanges() -> [ClosedRange<Double>] {
+    /// Spans currently backed by the VOD segment cache, on the **playlist axis** the plan is cut on,
+    /// which is the axis `segmentIndexForPlaylistTime` reads and NOT the 0-based display axis the
+    /// engine publishes. `AetherEngine` folds them onto that axis the same way it folds a scrub
+    /// target (#38); naming the axis here is what keeps the fold from being forgotten. Live returns
+    /// no claim: its DVR history is a different contract, expressed by `seekableLiveRange` at the
+    /// engine layer.
+    ///
+    /// The cache read stays OUTSIDE `restartLock` like every other forwarder above: the plan is a
+    /// COW array, so snapshotting it is a retain, and nesting the cache's condition under the
+    /// restart lock would add a lock order this file does not otherwise have.
+    func residentPlaylistRanges() -> [ClosedRange<Double>] {
         restartLock.lock()
-        defer { restartLock.unlock() }
-        guard !isLiveSession, let cache, !segmentPlan.isEmpty else { return [] }
-        return cache.residentIndexRanges().compactMap { indexes in
-            guard indexes.lowerBound >= 0, indexes.upperBound < segmentPlan.count else { return nil }
-            let lower = segmentPlan[indexes.lowerBound].startSeconds
+        let live = isLiveSession
+        let cacheRef = cache
+        let plan = segmentPlan
+        restartLock.unlock()
+        guard !live, let cacheRef, !plan.isEmpty else { return [] }
+        return cacheRef.residentIndexRanges().compactMap { indexes in
+            guard indexes.lowerBound >= 0, indexes.upperBound < plan.count else { return nil }
+            let lower = plan[indexes.lowerBound].startSeconds
             let upperIndex = indexes.upperBound + 1
-            let upper = upperIndex < segmentPlan.count
-                ? segmentPlan[upperIndex].startSeconds
-                : segmentPlan[indexes.upperBound].startSeconds
-                    + segmentPlan[indexes.upperBound].durationSeconds
+            let upper = upperIndex < plan.count
+                ? plan[upperIndex].startSeconds
+                : plan[indexes.upperBound].startSeconds + plan[indexes.upperBound].durationSeconds
             return lower...upper
         }
     }

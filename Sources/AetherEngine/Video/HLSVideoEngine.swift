@@ -80,8 +80,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// The 2026-09-02 field session retained 64 segments spanning more than four minutes. Cache
     /// mutations can arrive much faster than a host timeline needs to redraw, so fold them into at
     /// most four snapshots a second while preserving every final resident shape.
+    ///
+    /// The fold is timed on a private-queue `DispatchSourceTimer`, not on `Task.sleep` in a detached
+    /// task. The cooperative pool is capped at the core count and never overcommits, and this engine's
+    /// own reader work blocks threads in it (AE#422), so a delayed job there arrives when a thread
+    /// frees up rather than when it was due: `SlowServeSignal` records a `userInitiated` `asyncAfter`
+    /// that did not fire within 15 s on a loaded CI runner. A band is wanted exactly while the engine
+    /// is busiest, which is precisely when that queue is worst.
     private let residentRangesPublishLock = NSLock()
-    private var residentRangesPublishTask: Task<Void, Never>?
+    private let residentRangesPublishQueue = DispatchQueue(
+        label: "aether.residentranges.publish", qos: .utility)
+    private var residentRangesPublishTimer: DispatchSourceTimer?
     private var residentRangesPublishPending = false
     private var residentRangesObserver: (@Sendable ([ClosedRange<Double>]) -> Void)?
 
@@ -96,15 +105,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
     func noteResidentSetChanged() {
         residentRangesPublishLock.lock()
         residentRangesPublishPending = true
-        guard residentRangesPublishTask == nil else {
+        guard residentRangesPublishTimer == nil else {
             residentRangesPublishLock.unlock()
             return
         }
-        residentRangesPublishTask = Task.detached(priority: .utility) { [weak self] in
-            try? await Task.sleep(for: .milliseconds(250))
-            self?.publishResidentRanges()
-        }
+        let timer = DispatchSource.makeTimerSource(queue: residentRangesPublishQueue)
+        timer.schedule(deadline: .now() + .milliseconds(250), repeating: .never,
+                       leeway: .milliseconds(10))
+        timer.setEventHandler { [weak self] in self?.publishResidentRanges() }
+        residentRangesPublishTimer = timer
         residentRangesPublishLock.unlock()
+        timer.resume()
+    }
+
+    /// Drops a fold that has not fired yet. The engine clears its published band on teardown, so a
+    /// snapshot that lands after this would describe a cache that is already gone.
+    private func cancelResidentRangesPublish() {
+        residentRangesPublishLock.lock()
+        let timer = residentRangesPublishTimer
+        residentRangesPublishTimer = nil
+        residentRangesPublishPending = false
+        residentRangesPublishLock.unlock()
+        timer?.cancel()
     }
 
     private func publishResidentRanges() {
@@ -116,9 +138,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         observer?(residentPlaylistRanges())
 
         residentRangesPublishLock.lock()
-        residentRangesPublishTask = nil
+        let fired = residentRangesPublishTimer
+        residentRangesPublishTimer = nil
         let publishAgain = residentRangesPublishPending
         residentRangesPublishLock.unlock()
+        fired?.cancel()
         if publishAgain { noteResidentSetChanged() }
     }
 
@@ -2282,6 +2306,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     }
 
     public func stop() {
+        cancelResidentRangesPublish()
         // Sodalite#32: drop the tap routes first so a pump still draining its last packets no-ops
         // instead of decoding into stores being torn down.
         subtitleTapLock.lock()

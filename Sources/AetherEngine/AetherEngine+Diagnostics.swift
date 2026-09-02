@@ -94,11 +94,14 @@ extension AetherEngine {
     /// itself.
     /// Samples taken once the request behind the placement has been answered.
     static let placementVerificationAttempts = 6
-    /// Hard cap while it has NOT been. A deep re-aim makes the producer scan seconds of source before
-    /// its first segment lands, and an empty buffer says nothing about a placement whose bytes have
-    /// not gone out yet.
-    static let placementVerificationMaxAttempts = 40
+    /// How long to keep waiting while it has NOT been. A deep re-aim makes the producer scan seconds
+    /// of source before its first segment lands, and an empty buffer says nothing about a placement
+    /// whose bytes have not gone out yet. The #93 slow-serve window reaches 25 to 50 s in the worst
+    /// case, so the wait outlasts the sampling rate: the first samples are 250 ms apart, and once the
+    /// answer is overdue they drop to one a second for the rest of it.
+    static let placementVerificationWaitSeconds = 30.0
     static let placementVerificationIntervalMS = 250
+    static let placementVerificationSlowIntervalMS = 1000
 
     func verifyPlacementAgainstLoadedRanges(session: HLSVideoEngine) {
         placementVerificationTask?.cancel()
@@ -106,8 +109,13 @@ extension AetherEngine {
         placementVerificationTask = Task { @MainActor [weak self, weak session] in
             var samplesSinceAnswered = 0
             var lastRanges: [(Double, Double)] = []
-            for _ in 0..<Self.placementVerificationMaxAttempts {
-                try? await Task.sleep(for: .milliseconds(Self.placementVerificationIntervalMS))
+            var waited = 0.0
+            while waited < Self.placementVerificationWaitSeconds {
+                let intervalMS = samplesSinceAnswered > 0 || waited < 2.0
+                    ? Self.placementVerificationIntervalMS
+                    : Self.placementVerificationSlowIntervalMS
+                waited += Double(intervalMS) / 1000
+                try? await Task.sleep(for: .milliseconds(intervalMS))
                 guard !Task.isCancelled, let self, let session else { return }
                 let ranges = await self.avPlayerLoadedRanges()
                 guard !Task.isCancelled, let pending = session.pendingPlacement else { return }

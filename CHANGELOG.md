@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.63.0] - 2026-09-02
+
 ### Added
 
 - **A session-preserving reload that changes a `LoadOption` (AE#460).**

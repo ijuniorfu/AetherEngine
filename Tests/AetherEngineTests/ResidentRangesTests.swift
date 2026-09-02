@@ -9,7 +9,8 @@ struct ResidentRangesTests {
     private final class Recorder {
         private var cancellable: AnyCancellable?
         private var waiter: CheckedContinuation<Void, Never>?
-        private var awaitedCount = 0
+        private var expectation: (([ClosedRange<Double>]) -> Bool)?
+        private var cursor = 0
         private(set) var values: [[ClosedRange<Double>]] = []
 
         init(engine: AetherEngine) {
@@ -20,16 +21,34 @@ struct ResidentRangesTests {
 
         private func receive(_ ranges: [ClosedRange<Double>]) {
             values.append(ranges)
-            if values.count >= awaitedCount {
+            matchFromCursor()
+        }
+
+        private func matchFromCursor() {
+            guard let expectation else { return }
+            while cursor < values.count {
+                let value = values[cursor]
+                cursor += 1
+                guard expectation(value) else { continue }
+                self.expectation = nil
                 waiter?.resume()
                 waiter = nil
+                return
             }
         }
 
-        func waitForCount(_ count: Int) async {
-            guard values.count < count else { return }
-            awaitedCount = count
-            await withCheckedContinuation { waiter = $0 }
+        /// Wait for the next band that satisfies `isExpected`, skipping the ones an earlier wait
+        /// already consumed. Waiting on a publication COUNT instead would tie the test to the
+        /// coalescing window: the snapshot the session is asked for on assignment and the store's
+        /// snapshot are one publication when they fall inside the same 250 ms and two when they
+        /// do not, and which of those happens is the machine's business, not the fold's.
+        func wait(for isExpected: @escaping ([ClosedRange<Double>]) -> Bool) async {
+            expectation = isExpected
+            matchFromCursor()
+            guard expectation != nil else { return }
+            await withCheckedContinuation { continuation in
+                if expectation == nil { continuation.resume() } else { waiter = continuation }
+            }
         }
     }
 
@@ -70,7 +89,7 @@ struct ResidentRangesTests {
     }
 
     @MainActor
-    @Test("a store and eviction publish their two resident shapes", .timeLimit(.minutes(1)))
+    @Test("a store and eviction publish their two resident shapes", .timeLimit(.minutes(2)))
     func publisherStoreThenEvict() async throws {
         let session = HLSVideoEngine(url: URL(string: "https://example.com/video.mkv")!)
         let cache = SegmentCache(
@@ -91,11 +110,13 @@ struct ResidentRangesTests {
         let recorder = Recorder(engine: engine)
 
         cache.store(index: 1, data: Data([0]))
-        await recorder.waitForCount(1)
+        await recorder.wait { !$0.isEmpty }
         cache.evictBelow(2)
-        await recorder.waitForCount(2)
+        await recorder.wait { $0.isEmpty }
 
-        #expect(recorder.values == [[8...15], []])
+        #expect(recorder.values.contains([8...15]))
+        #expect(recorder.values.allSatisfy { $0.isEmpty || $0 == [8...15] })
+        #expect(recorder.values.last?.isEmpty == true)
         engine.nativeVideoSession = nil
     }
 

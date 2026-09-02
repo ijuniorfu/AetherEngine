@@ -73,6 +73,7 @@ func printUsage() {
       aetherctl play [--seconds N] [--live] [--fast-zap] [--live-start-immediately] [--dvr-window N] [--subs <codec-or-lang>]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
+                 [--reload-applying <key>=<value>]... [--reload-applying-at <ms>]
                  [--sequential-origin] [--declared-duration S]
              [--max-concurrent-requests N]
                      [--audio-stats] [--host-calls play,extractor,setrate,reloadlive,seekback,seekfar] <url>
@@ -87,6 +88,11 @@ func printUsage() {
                       --teletext-page fixes the caption page at load, while
                       --switch-teletext-page changes it on the playing channel
                       (default +20 s, i.e. after --subs has a track showing);
+                      --reload-applying corrects a LoadOption on the playing
+                      session through #460's session-preserving reload, repeatable;
+                      keys header.<Name>, audio-bridge, preferred-audio, is-live
+                      (is-live is there to show the refusal: a field that names the
+                      session is refused, not silently ignored), default +20 s;
                       --sequential-origin declares a fake-range origin (one unranged
                       GET, no ranged probes) and needs --declared-duration on VOD
                       since the tail estimate is skipped)
@@ -622,6 +628,44 @@ if first == "play" {
         return TeletextPageSwitchRequest(page: page,
                                         delayMilliseconds: parts.count == 2 ? (Int(parts[1]) ?? 20_000) : 20_000)
     }
+    // #460: `--reload-applying <key>=<value>`, repeatable, with one shared delay. The delay is a
+    // separate flag rather than teletext's `@ms` suffix because a header value can carry an `@`.
+    // Default +20 s for the same reason the teletext switch uses it: the correction has to land on
+    // a session that is already playing.
+    var optionChanges: [LoadOptionChange] = []
+    while let spec = takeStringFlag("--reload-applying", from: &rest) {
+        guard let eq = spec.firstIndex(of: "=") else {
+            print("ERROR: --reload-applying expects <key>=<value>, got '\(spec)'")
+            exit(64)
+        }
+        let key = String(spec[..<eq]).trimmingCharacters(in: .whitespaces)
+        let value = String(spec[spec.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+        if key.hasPrefix("header.") {
+            optionChanges.append(.header(name: String(key.dropFirst("header.".count)), value: value))
+        } else if key == "audio-bridge" {
+            guard let mode = AudioBridgeMode(rawValue: value) else {
+                print("ERROR: --reload-applying audio-bridge takes \(AudioBridgeMode.allCases.map(\.rawValue).joined(separator: "|")), got '\(value)'")
+                exit(64)
+            }
+            optionChanges.append(.audioBridgeMode(mode))
+        } else if key == "preferred-audio" {
+            optionChanges.append(.preferredAudioLanguages(
+                value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }))
+        } else if key == "is-live" {
+            guard let flag = Bool(value) else {
+                print("ERROR: --reload-applying is-live takes true|false, got '\(value)'")
+                exit(64)
+            }
+            optionChanges.append(.isLive(flag))
+        } else {
+            print("ERROR: --reload-applying key '\(key)' is not one of header.<Name>, audio-bridge, preferred-audio, is-live")
+            exit(64)
+        }
+    }
+    let optionCorrectionDelay = takeIntFlag("--reload-applying-at", from: &rest) ?? 20_000
+    let optionCorrection: LoadOptionCorrectionRequest? = optionChanges.isEmpty
+        ? nil
+        : LoadOptionCorrectionRequest(changes: optionChanges, delayMilliseconds: optionCorrectionDelay)
     // AE#363: LoadOptions.httpHeaders, repeatable as `--header "Name: Value"`. Header-enforcing
     // origins (IPTV STB profiles, Referer-locked CDNs) had no CLI harness at all, so neither the
     // AVPlayer bypass nor the ingest reader could be driven against one from here.
@@ -649,6 +693,7 @@ if first == "play" {
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, pictureProbe: pictureProbe, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,
+                 optionCorrection: optionCorrection,
                  sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests,
                  declaredDuration: declaredDuration,
                  httpHeaders: playHeaders))

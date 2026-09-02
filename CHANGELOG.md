@@ -10,7 +10,33 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **A session-preserving reload that changes a `LoadOption` (AE#460).**
+  `reloadAtCurrentPosition(applying:)` is the rebuild the engine already performs, with the options
+  it replays taken from the host instead of from the session. Correcting an option mid-session used
+  to mean a fresh `load()`, and a fresh load is not the same rebuild: it cannot reach
+  `subtitleSessionCarryover` or `isLiveRejoin`, both settable only from inside the engine, so the
+  id-exact external-subtitle registry, every mid-session `addExternalSubtitleTrack`, the host's
+  explicit subtitle authority (subtitles explicitly OFF included) and the live rejoin contract were
+  wiped and re-derived by auto-selection. The correction bought the viewer a visible restart and
+  lost session state on the way. AN OPTION THAT NAMES THE SESSION IS NOT AN OPTION IT CAN BE
+  CORRECTED ON: `isLive`, `audioOnly`, `nativeRemoteHLS` and `sequentialOrigin` each open the source
+  on a different pipeline, and the engine writes the last two itself, so a change to one is refused
+  by name (`AetherEngineError.loadIdentityNotCorrectable`) rather than half-applied. Both refusals,
+  that one and `sessionNotReloadable`, are raised before any teardown, so a refused correction
+  leaves the session playing untouched, and both are all-or-nothing. The change is installed into
+  `loadedOptions` before the rebuild, which is what makes the internal reopens that follow (an audio
+  switch, a background reload) replay it instead of reverting to the load-time value, and it is also
+  what covers the custom-source branch, which reads those fields one at a time and never takes a
+  struct. `sessionReloadRefusal` answers "would a reload rebuild anything" without attempting one,
+  which is the question the plain `reloadAtCurrentPosition()`'s silent return never let a host ask.
+  Verified against real media with a header-logging origin: `play --header "X-Auth: stale"
+  --reload-applying header.X-Auth=fresh` served three requests carrying the stale token, then three
+  carrying the fresh one, with the transport running straight through the rebuild (resumed at
+  10.90 s from 9.90 s, no rebuffer), while `--reload-applying is-live=true` was refused by name and
+  the session played on. New CLI lever `--reload-applying <key>=<value>` / `--reload-applying-at
+  <ms>`. Reported by @cmcpherson274.
 
 ## [6.62.3] - 2026-09-02
 

@@ -89,6 +89,9 @@ extension AetherEngine {
             // makes AVPlayer let go of an item's media is the one that replaces the item, so the
             // correction rides the session-preserving reload #460 built, which is also the spelling
             // this was filed as an alternative for.
+            // Written onto the session that is running, not just carried in the options the reload
+            // replays: if the reload below cannot happen (live without a DVR window), this is what
+            // makes the next producer the session builds for its own reasons cut with the new value.
             nativeVideoSession?.audioDelaySeconds = clamped
             EngineLog.emit(
                 "[AetherEngine] AE#464: audio delay = \(Self.ms(clamped)) on the loopback path, "

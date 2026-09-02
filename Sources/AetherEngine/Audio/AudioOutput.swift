@@ -143,7 +143,29 @@ final class AudioOutput: @unchecked Sendable {
         let offset = presentationOffset
         lock.unlock()
         guard offset != .zero else { return sampleBuffer }
+        let shifted = Self.retimed(sampleBuffer, by: offset)
 
+        // Release-visible, once per offset change: an offset that was set and an offset that is being
+        // DELIVERED are different claims, and without this line the difference is only measurable with
+        // a capture card. The two timestamps are the whole proof.
+        if !loggedOffsetInEffect, shifted !== sampleBuffer {
+            loggedOffsetInEffect = true
+            let source = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+            EngineLog.emit(
+                "[AudioOutput] AE#464 audio delay in effect: "
+                + String(format: "%+.0f ms", offset.seconds * 1000)
+                + String(format: " (sample at %.3fs delivered at %.3fs)", source, source + offset.seconds),
+                category: .swPlayback
+            )
+        }
+        return shifted
+    }
+
+    /// The timing half, pure so the shift can be checked without a renderer. Every timing entry moves
+    /// by `offset`, presentation and decode alike; an entry with no valid presentation stamp is left
+    /// alone rather than given one.
+    static func retimed(_ sampleBuffer: CMSampleBuffer, by offset: CMTime) -> CMSampleBuffer {
+        guard offset != .zero else { return sampleBuffer }
         var count: CMItemCount = 0
         guard CMSampleBufferGetSampleTimingInfoArray(sampleBuffer,
                                                      entryCount: 0,
@@ -170,20 +192,6 @@ final class AudioOutput: @unchecked Sendable {
                                                     sampleTimingArray: &timings,
                                                     sampleBufferOut: &shifted) == noErr,
               let shifted else { return sampleBuffer }
-
-        // Release-visible, once per offset change: an offset that was set and an offset that is being
-        // DELIVERED are different claims, and without this line the difference is only measurable with
-        // a capture card. The two timestamps are the whole proof.
-        if !loggedOffsetInEffect {
-            loggedOffsetInEffect = true
-            let source = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
-            EngineLog.emit(
-                "[AudioOutput] AE#464 audio delay in effect: "
-                + String(format: "%+.0f ms", offset.seconds * 1000)
-                + String(format: " (sample at %.3fs delivered at %.3fs)", source, source + offset.seconds),
-                category: .swPlayback
-            )
-        }
         return shifted
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import CoreMedia
 import Testing
 import AetherLibavutil
@@ -121,6 +122,78 @@ struct Issue464PlacementRationaleTests {
         let stepBack = sanitizer.sanitize(streamIndex: audio, pts: 43200, dts: 43200)   // -100 ms @48k
         #expect(stepBack.dts == 48001, "the backwards step was clamped, not honoured")
         #expect(stepBack.pts >= stepBack.dts)
+    }
+}
+
+/// The software path's shift, on a real CMSampleBuffer.
+@Suite("AE#464 sample retiming")
+struct Issue464SampleRetimingTests {
+
+    private func makeBuffer(pts: CMTime, samples: Int = 1024, sampleRate: Int32 = 48000) -> CMSampleBuffer? {
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: Float64(sampleRate),
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4,
+            mChannelsPerFrame: 1, mBitsPerChannel: 32, mReserved: 0)
+        var format: CMAudioFormatDescription?
+        guard CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault,
+                                             asbd: &asbd,
+                                             layoutSize: 0, layout: nil,
+                                             magicCookieSize: 0, magicCookie: nil,
+                                             extensions: nil,
+                                             formatDescriptionOut: &format) == noErr,
+              let format else { return nil }
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault,
+                                                 memoryBlock: nil,
+                                                 blockLength: samples * 4,
+                                                 blockAllocator: kCFAllocatorDefault,
+                                                 customBlockSource: nil,
+                                                 offsetToData: 0,
+                                                 dataLength: samples * 4,
+                                                 flags: kCMBlockBufferAssureMemoryNowFlag,
+                                                 blockBufferOut: &block) == noErr,
+              let block else { return nil }
+        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: sampleRate),
+                                        presentationTimeStamp: pts,
+                                        decodeTimeStamp: .invalid)
+        var out: CMSampleBuffer?
+        guard CMSampleBufferCreate(allocator: kCFAllocatorDefault,
+                                   dataBuffer: block, dataReady: true,
+                                   makeDataReadyCallback: nil, refcon: nil,
+                                   formatDescription: format,
+                                   sampleCount: CMItemCount(samples),
+                                   sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+                                   sampleSizeEntryCount: 0, sampleSizeArray: nil,
+                                   sampleBufferOut: &out) == noErr else { return nil }
+        return out
+    }
+
+    @Test("a positive offset moves the delivered stamp later, and the payload is untouched")
+    func shiftsLater() throws {
+        let source = CMTime(value: 48000, timescale: 48000)   // 1.000 s
+        let buffer = try #require(makeBuffer(pts: source))
+        let shifted = AudioOutput.retimed(buffer, by: CMTime(seconds: 0.2, preferredTimescale: 90000))
+
+        let out = CMSampleBufferGetPresentationTimeStamp(shifted).seconds
+        #expect(abs(out - 1.2) < 0.0001, "delivered 200 ms later, got \(out)")
+        #expect(CMSampleBufferGetNumSamples(shifted) == CMSampleBufferGetNumSamples(buffer))
+        #expect(abs(CMSampleBufferGetPresentationTimeStamp(buffer).seconds - 1.0) < 0.0001,
+                "the source buffer is not mutated: the audio tap is handed that one")
+    }
+
+    @Test("a negative offset moves it earlier")
+    func shiftsEarlier() throws {
+        let buffer = try #require(makeBuffer(pts: CMTime(value: 48000, timescale: 48000)))
+        let shifted = AudioOutput.retimed(buffer, by: CMTime(seconds: -0.15, preferredTimescale: 90000))
+        #expect(abs(CMSampleBufferGetPresentationTimeStamp(shifted).seconds - 0.85) < 0.0001)
+    }
+
+    @Test("a zero offset hands back the very same buffer, so the common case costs no copy")
+    func zeroIsFree() throws {
+        let buffer = try #require(makeBuffer(pts: CMTime(value: 48000, timescale: 48000)))
+        #expect(AudioOutput.retimed(buffer, by: .zero) === buffer)
     }
 }
 

@@ -144,6 +144,11 @@ final class SoftwarePlaybackHost {
     /// engine's pick (#133 live-TS by-type fallback).
     private(set) var audioStreamIndex: Int32 = -1
 
+    /// AE#464: the host's audio presentation offset in seconds, positive = audio later. Kept here as
+    /// well as on the decoder so a decoder opened later in the session (an audio-track switch, a
+    /// rebuild) starts out carrying it rather than at zero.
+    private(set) var audioDelaySeconds: Double = 0
+
     /// AE#462: how this host delivers audio, as a typed fact for the engine's published
     /// `audioDelivery`. Set once the audio decoder has been given its chance.
     private(set) var audioDelivery: AudioDelivery = .none
@@ -731,6 +736,7 @@ final class SoftwarePlaybackHost {
                         NSLocalizedDescriptionKey: "audio pipeline forced to fail (TEST-ONLY)"])
                 }
                 try aDec.open(stream: aStream)
+                aDec.setDeliveryOffset(seconds: self.audioDelaySeconds)   // AE#464
                 self.audioDecoder = aDec
                 self.audioStreamIndex = resolvedAudioIdx
                 let atb = aStream.pointee.time_base
@@ -933,6 +939,17 @@ final class SoftwarePlaybackHost {
         if clockArmed {
             audioOutput?.setRate(newRate)
         }
+    }
+
+    /// AE#464: set the audio presentation offset. Positive delivers audio later relative to video.
+    ///
+    /// Only the stamp changes; nothing is flushed here. The samples already decoded (up to
+    /// `AudioLookaheadPolicy.targetLeadSeconds` of them on the decoupled VOD arm) still carry the
+    /// previous offset, so a caller that wants the change to be audible now re-anchors at the
+    /// playhead afterwards. `AetherEngine.setAudioDelay` does exactly that.
+    func setAudioDelay(_ seconds: Double) {
+        audioDelaySeconds = seconds
+        audioDecoder?.setDeliveryOffset(seconds: seconds)
     }
 
     func setResumeRate(_ rate: Float) {

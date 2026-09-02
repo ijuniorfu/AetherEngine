@@ -557,6 +557,17 @@ public struct LoadOptions: Sendable, Equatable {
     /// waypoint; the host resumes later with `play()`. Same declared-vs-real family as #122/#123 (#124).
     public var autoplay: Bool = true
 
+    /// AE#464: audio presentation offset for this session, in seconds. Positive presents audio
+    /// LATER relative to video, negative earlier. Default 0.
+    ///
+    /// A lip-sync correction belongs to the viewer's chain, not to the file, so this is the value a
+    /// host sets once per setup and the engine honours for the session (and across the rebuilds a
+    /// session makes on its own). Applied on `.loopback` and `.software`; on `.remoteBypass` and
+    /// audio-only sessions the engine does not hold the timestamps and says so rather than pretending.
+    /// Clamped to `AudioDelayPolicy.maxAbsSeconds`. Correct it mid-session with
+    /// `AetherEngine.setAudioDelay(_:)`, which is the same value seen from the other end.
+    public var audioDelaySeconds: Double = 0
+
     /// Teletext caption page for `dvb_teletext` subtitle decode. nil (default) = libzvbi auto-detect
     /// (`txt_page=subtitle`); an explicit page (e.g. 801 for AU) targets channels whose caption page
     /// libzvbi does not flag as a subtitle page. Only affects teletext streams (#107).
@@ -643,6 +654,7 @@ public struct LoadOptions: Sendable, Equatable {
         forwardBufferSegments: Int? = nil,
         autoplay: Bool = true,
         teletextPage: Int? = nil,
+        audioDelaySeconds: Double = 0,
         deinterlaceMode: DeinterlaceMode = .auto,
         deinterlaceFieldRate: DeinterlaceFieldRate = .field,
         preferredDecodePath: DecodePath = .automatic
@@ -680,6 +692,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.forwardBufferSegments = forwardBufferSegments
         self.autoplay = autoplay
         self.teletextPage = teletextPage
+        self.audioDelaySeconds = audioDelaySeconds
         self.deinterlaceMode = deinterlaceMode
         self.deinterlaceFieldRate = deinterlaceFieldRate
         self.preferredDecodePath = preferredDecodePath

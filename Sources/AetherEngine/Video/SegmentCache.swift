@@ -515,6 +515,25 @@ final class SegmentCache: @unchecked Sendable {
         }
     }
 
+    /// Drop every segment at or above `cutoff` (AE#464). The mirror of `evictBelow`, for the case
+    /// where the cut segments are not stale by age but by CONTENT: an audio-delay change makes every
+    /// segment ahead of the playhead carry the wrong offset, and without dropping them the restart
+    /// that follows would serve them straight back out of the cache.
+    func evictFrom(_ cutoff: Int) {
+        condition.lock()
+        var doomed: [URL] = []
+        for (k, url) in entries where k >= cutoff {
+            _totalBytes -= entryBytes[k] ?? byteSize(of: url)
+            entryBytes.removeValue(forKey: k)
+            entries.removeValue(forKey: k)
+            doomed.append(url)
+        }
+        condition.unlock()
+        for url in doomed {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
     /// Authoritative disk footprint via fresh stat (not _totalBytes accumulator); diagnostics path.
     func diskBytes() -> Int64 {
         condition.lock()

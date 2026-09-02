@@ -38,6 +38,11 @@ final class AudioDecoder: @unchecked Sendable {
     /// (which clicks at every frame for non-integer-ms frame durations like 1536-sample AC-3 @ 44.1 kHz).
     private var clock = AudioClockAnchor()
 
+    /// AE#464: host audio offset in seconds, added to the PTS a buffer is DELIVERED on while the
+    /// gapless clock above keeps running on the source axis. Set only by `SoftwarePlaybackHost`;
+    /// an audio-only session leaves it at 0, having no video for audio to be early or late against.
+    private var deliveryOffset: CMTime = .zero
+
     #if DEBUG
     private var _loggedZeroConvert = false
     #endif
@@ -248,6 +253,16 @@ final class AudioDecoder: @unchecked Sendable {
         return results
     }
 
+    /// AE#464: set the audio presentation offset. Positive delivers audio later. Takes effect on the
+    /// next buffer built; the caller flushes the renderer when it wants the change to be prompt.
+    func setDeliveryOffset(seconds: Double) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        deliveryOffset = seconds == 0
+            ? .zero
+            : CMTime(seconds: seconds, preferredTimescale: 90000)
+    }
+
     func close() {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -413,12 +428,20 @@ final class AudioDecoder: @unchecked Sendable {
         // success below, so a dropped buffer never advances the clock.
         let (outPTS, reanchor) = clock.resolve(startPTS: startPTS, sampleRate: sampleRate)
 
+        // AE#464: the host's offset rides on the DELIVERED timestamp only. Adding it to `startPTS`
+        // above instead would hand the gapless predictor a step it reads as container rounding
+        // (anything under its 100 ms discontinuity threshold is absorbed into the running sample
+        // count and never heard), and would move the PTS the session arms its clock on, taking the
+        // reported position and the subtitle axis with it. Here, the clock stays on the source axis
+        // and only the presentation moves.
+        let deliveredPTS = deliveryOffset == .zero ? outPTS : CMTimeAdd(outPTS, deliveryOffset)
+
         // Single timing entry: CoreMedia treats `duration` as per-SAMPLE, so LPCM must be 1/sampleRate. Stamping
         // the buffer total made GetDuration report totalSamples^2/sampleRate (~22s for 1024 samples), wedging
         // AudioPlaybackHost's buffer-ahead gate after one packet.
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: sampleRate),
-            presentationTimeStamp: outPTS,
+            presentationTimeStamp: deliveredPTS,
             decodeTimeStamp: .invalid
         )
 

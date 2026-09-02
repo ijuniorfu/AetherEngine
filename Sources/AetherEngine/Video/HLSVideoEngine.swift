@@ -581,6 +581,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// `stop()` on the main thread is never blocked behind a restart's 5 s waitForFinish.
     let restartLock = NSLock()
 
+    /// AE#464: the host's audio presentation offset, in seconds, that `makeProducer` hands to every
+    /// muxer it builds. Changing it is only meaningful together with a re-cut at the playhead, which
+    /// is what `AetherEngine.setAudioDelay` performs; setting it alone would leave the already-cut
+    /// segments carrying the old value.
+    var audioDelaySeconds: Double = 0
+
     /// Serializes restart requests among themselves. Held across waits (unlike `restartLock`);
     /// only other restarts contend on it.
     private let restartGate = NSLock()
@@ -2366,6 +2372,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // AE#366: once one producer has searched the whole source for an audio frame and come
             // back empty, later ones must not repeat the search per revive attempt.
             audioMoovPrimeKnownUnobtainable: sessionAudioMoovPrimeUnobtainable,
+            // AE#464: read here rather than pushed, so every producer this session builds (seek
+            // restart, live reopen, #99 revive) cuts with the offset currently in force.
+            audioDelaySeconds: audioDelaySeconds,
             epoch: nextProducerEpoch()
         )
         // #240: threaded onto every producer (initial + restart), like the wedge-detector providers
@@ -3346,6 +3355,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Segment index whose plan span covers `seconds` on the AVPlayer/playlist axis (the same axis
     /// `segmentStartSecondsLocked` uses). Last segment whose `startSeconds <= seconds`, clamped. Used to
     /// re-anchor the producer on AVPlayer's real position after a backpressure wedge (#65). Thread-safe.
+    /// AE#464: install a new audio offset and drop the cut segments that carry the old one.
+    ///
+    /// Returns the segment index the re-cut starts at, which is the one covering `playlistSeconds`
+    /// (inclusive: the segment being played was cut with the previous offset like every one after
+    /// it). Eviction is the half that is easy to forget: without it the restart that follows would be
+    /// served its own stale output straight back out of the cache, and the change would be inaudible
+    /// until playback walked past everything already cut.
+    func applyAudioDelay(_ seconds: Double, recuttingFromPlaylistTime playlistSeconds: Double) -> Int {
+        restartLock.lock()
+        audioDelaySeconds = seconds
+        restartLock.unlock()
+        let idx = segmentIndexForPlaylistTime(playlistSeconds)   // takes restartLock itself
+        cache?.evictFrom(idx)
+        return idx
+    }
+
     func segmentIndexForPlaylistTime(_ seconds: Double) -> Int {
         restartLock.lock()
         defer { restartLock.unlock() }

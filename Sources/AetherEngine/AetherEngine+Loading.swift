@@ -716,6 +716,8 @@ extension AetherEngine {
             declaredDurationSeconds: loadedOptions.declaredDurationSeconds,
             forwardBufferSegments: loadedOptions.forwardBufferSegments
         )
+        // AE#464: every producer this session builds reads it off the session. Set before start().
+        session.audioDelaySeconds = loadedOptions.audioDelaySeconds
         // #240: the pump claims the source link through this gate while it is fetching, so the
         // subtitle side readers can stay out of its way. Set before start().
         session.sideReaderLinkGate = sideReaderLinkGate
@@ -1576,6 +1578,7 @@ extension AetherEngine {
         // of such a wiring work in isolation, which is why a dead sink here reads as a working one.
         softwareCancellables.removeAll()
         let host = SoftwarePlaybackHost()
+        host.setAudioDelay(loadedOptions.audioDelaySeconds)   // AE#464: before the decoder opens
         host.deinterlaceConfig = DeinterlaceConfig(
             mode: loadedOptions.deinterlaceMode,
             fieldRate: loadedOptions.deinterlaceFieldRate

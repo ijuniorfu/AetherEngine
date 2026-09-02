@@ -322,6 +322,17 @@ final class MP4SegmentMuxer {
             // time_base, because that is the base the packets arrive in.
             audioDelayTicks = Self.audioDelayTicks(seconds: audioDelaySeconds,
                                                    audioTimeBase: muxerAudioTimeBase)
+            if audioDelayTicks != 0 {
+                // Release-visible: which muxer carries which offset is the only way to tell "the host
+                // set it" from "the segments being served were cut with it", and a restart is what
+                // moves the session from one to the other.
+                EngineLog.emit(
+                    "[MP4SegmentMuxer] AE#464 cutting seg\(initialSegmentIndex)+ with audio delay "
+                    + String(format: "%+.0f ms", audioDelaySeconds * 1000)
+                    + " (\(audioDelayTicks) ticks @ \(muxerAudioTimeBase.den)/\(muxerAudioTimeBase.num))",
+                    category: .session
+                )
+            }
         }
         // Bound is in the muxer's rewritten output video TB: packets reach writePacket already rescaled
         // to muxerVideoTimeBase, so the window math must use it (not the source TB). Latched here, after

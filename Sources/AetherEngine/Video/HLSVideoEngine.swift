@@ -582,10 +582,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     let restartLock = NSLock()
 
     /// AE#464: the host's audio presentation offset, in seconds, that `makeProducer` hands to every
-    /// muxer it builds. Changing it is only meaningful together with a re-cut at the playhead, which
-    /// is what `AetherEngine.setAudioDelay` performs; setting it alone would leave the already-cut
-    /// segments carrying the old value.
-    var audioDelaySeconds: Double = 0
+    /// muxer it builds. A muxer's offset is fixed for its life, so setting this alone changes nothing
+    /// that has already been cut; `AetherEngine.setAudioDelay` writes it as part of a reload, which is
+    /// what actually replaces the segments and the item holding them.
+    public var audioDelaySeconds: Double = 0
 
     /// Serializes restart requests among themselves. Held across waits (unlike `restartLock`);
     /// only other restarts contend on it.
@@ -3355,22 +3355,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Segment index whose plan span covers `seconds` on the AVPlayer/playlist axis (the same axis
     /// `segmentStartSecondsLocked` uses). Last segment whose `startSeconds <= seconds`, clamped. Used to
     /// re-anchor the producer on AVPlayer's real position after a backpressure wedge (#65). Thread-safe.
-    /// AE#464: install a new audio offset and drop the cut segments that carry the old one.
-    ///
-    /// Returns the segment index the re-cut starts at, which is the one covering `playlistSeconds`
-    /// (inclusive: the segment being played was cut with the previous offset like every one after
-    /// it). Eviction is the half that is easy to forget: without it the restart that follows would be
-    /// served its own stale output straight back out of the cache, and the change would be inaudible
-    /// until playback walked past everything already cut.
-    func applyAudioDelay(_ seconds: Double, recuttingFromPlaylistTime playlistSeconds: Double) -> Int {
-        restartLock.lock()
-        audioDelaySeconds = seconds
-        restartLock.unlock()
-        let idx = segmentIndexForPlaylistTime(playlistSeconds)   // takes restartLock itself
-        cache?.evictFrom(idx)
-        return idx
-    }
-
     func segmentIndexForPlaylistTime(_ seconds: Double) -> Int {
         restartLock.lock()
         defer { restartLock.unlock() }

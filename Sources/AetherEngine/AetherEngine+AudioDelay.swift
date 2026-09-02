@@ -24,13 +24,24 @@ extension AetherEngine {
     /// **What it costs, per route.** The offset moves audio at the last place the engine still holds
     /// its timestamps, and on both routes the media between there and the speaker is already
     /// committed to the previous value: up to `AudioLookaheadPolicy.targetLeadSeconds` of decoded
-    /// audio on `.software`, and the segments AVPlayer has already fetched on `.loopback`, whose cut
+    /// audio on `.software`, and on `.loopback` the segments AVPlayer has already fetched, whose cut
     /// audio cannot be re-timed in place (the seam would gain a gap or an overlap of exactly the
     /// change, and a change that moves audio earlier is eaten by the muxer's strictly-increasing DTS
-    /// rule). So a change is applied by re-anchoring at the playhead, which costs what a seek to the
-    /// current position costs and is the reason this is not free the way `setRate` is. A session that
-    /// cannot seek (live without a DVR window) keeps the value and lets it arrive at the next seam
-    /// the session makes on its own, rather than being denied it.
+    /// rule). So a change is brought to the playhead rather than left to arrive when that media
+    /// drains, and what that costs differs:
+    ///
+    /// - `.software`: a seek to the current position. Measured on a 30 fps H.264 fixture: set at
+    ///   t=4.90 s, landed at 4.90 s, the new offset delivered on the next buffer.
+    /// - `.loopback`: the session-preserving reload (#460). A seek is not enough and measuring it is
+    ///   what settled this: seeking to the position AVPlayer already holds is a buffer hit, so it
+    ///   plays its old-offset segments out regardless, and dropping those segments under it only
+    ///   turns the hand-over into a rebuffer (6 s measured). Replacing the item is the one thing that
+    ///   makes AVPlayer let go. Measured on the same fixture: about 0.3 s of held picture, position
+    ///   preserved to the sample (7.80 s to 7.80 s).
+    ///
+    /// This is why it is not free the way `setRate` is. A session that cannot re-anchor (live without
+    /// a DVR window) keeps the value and lets it arrive at the next seam the session makes on its
+    /// own, rather than being denied it.
     ///
     /// On `.remoteBypass` AVPlayer owns the whole media selection and the engine never sees the
     /// timestamps, and an audio-only session has no video for audio to be early or late against. Both
@@ -60,32 +71,45 @@ extension AetherEngine {
             )
 
         case .sampleTimestamps:
+            // The renderer takes the new stamp on the next buffer. What is already decoded still
+            // carries the old one, so re-anchor to bring the change to the playhead: on this path
+            // that is a flush and a demuxer reposition, and it lands inside a seek.
             softwareHost?.setAudioDelay(clamped)
             EngineLog.emit(
                 "[AetherEngine] AE#464: audio delay = \(Self.ms(clamped)) on the software path",
                 category: .engine
             )
-            recutForAudioDelay(clamped)
+            reanchorForAudioDelay(clamped) { await self.seek(to: $0, origin: .host) }
 
         case .segmentTimestamps:
-            guard let session = nativeVideoSession else { return }
-            let idx = session.applyAudioDelay(clamped, recuttingFromPlaylistTime: currentTime)
+            // A seek is NOT enough here, and measuring it is what settled the shape: seeking to the
+            // position AVPlayer is already at is a buffer hit, so it holds on to the segments cut
+            // with the old offset and plays them out anyway. Dropping them under it does not help
+            // either; it just turns the hand-over into a rebuffer (measured: 6 s). The one call that
+            // makes AVPlayer let go of an item's media is the one that replaces the item, so the
+            // correction rides the session-preserving reload #460 built, which is also the spelling
+            // this was filed as an alternative for.
+            nativeVideoSession?.audioDelaySeconds = clamped
             EngineLog.emit(
                 "[AetherEngine] AE#464: audio delay = \(Self.ms(clamped)) on the loopback path, "
-                + "segments from \(idx) dropped to be re-cut",
+                + "re-cutting from the playhead",
                 category: .engine
             )
-            reanchorProducerForAudioDelay(at: idx, session: session)
-            recutForAudioDelay(clamped)
+            reanchorForAudioDelay(clamped) { _ in try? await self.reloadAtCurrentPosition() }
         }
     }
 
-    /// Bring the change to the playhead instead of waiting for the media already committed to the old
-    /// value to drain. Deliberately the ordinary seek: it is the one path that makes AVPlayer let go
-    /// of what it has buffered and the software host flush what it has decoded, and both routes need
-    /// exactly that. Live without a DVR window has no position to return to, so the value simply
+    /// Bring the change to the playhead instead of leaving it to arrive when the media already
+    /// committed to the old value drains. What that costs differs per route, which is why the caller
+    /// passes the re-anchor in: a flush and a reposition on the software path, a whole item on the
+    /// loopback one. Live without a DVR window has no position to return to, so the value simply
     /// stands from the next seam the session makes on its own.
-    private func recutForAudioDelay(_ delay: Double) {
+    ///
+    /// Neither route asks for the producer restart directly. A restart raised while no seek of the
+    /// engine's own is in flight is reported as a user scrub (`setNativeScrubSeek`), which opened a
+    /// second seek ticket aimed at the re-cut segment's START and left it stalled for the rest of the
+    /// session, with `phase` stuck at `seeking`.
+    private func reanchorForAudioDelay(_ delay: Double, _ reanchor: @escaping (Double) async -> Void) {
         guard Self.audioDelayRecutIsPossible(state: state, isLive: isLive, hasLiveWindow: liveWindow != nil) else {
             EngineLog.emit(
                 "[AetherEngine] AE#464: audio delay = \(Self.ms(delay)) stands, but this session cannot "
@@ -96,17 +120,7 @@ extension AetherEngine {
         }
         let position = currentTime
         Task { @MainActor in
-            await self.seek(to: position, origin: .host)
-        }
-    }
-
-    /// Rebuild the producer at the playhead so the segments the seek is about to ask for are cut by a
-    /// muxer carrying the new offset. Authoritative for the same reason the seek-deadline re-anchor
-    /// is: a stale in-flight scrub target must not win the coalescer and leave the producer cutting
-    /// somewhere else. `requestRestart` does blocking teardown, so it runs off-main.
-    private func reanchorProducerForAudioDelay(at index: Int, session: HLSVideoEngine) {
-        Task.detached {
-            session.requestRestart(at: index, authoritative: true)
+            await reanchor(position)
         }
     }
 

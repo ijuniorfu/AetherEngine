@@ -124,36 +124,6 @@ struct Issue464PlacementRationaleTests {
     }
 }
 
-/// Dropping the cut segments that carry the previous offset.
-@Suite("AE#464 segment eviction from the playhead")
-struct Issue464EvictFromTests {
-
-    @Test("evictFrom drops the playhead segment and everything after it, and keeps the past")
-    func evictsForwardInclusive() {
-        let c = SegmentCache(forwardWindow: 20, backwardWindow: 20)
-        defer { c.close() }
-        for i in 0..<6 { c.store(index: i, data: Data(repeating: 0xAA, count: 100)) }
-        #expect(c.count == 6)
-
-        c.evictFrom(3)
-
-        #expect(c.peek(index: 2) != nil, "already played: cut with the old offset, never served again")
-        #expect(c.peek(index: 3) == nil, "the playhead segment itself carries the old offset too")
-        #expect(c.peek(index: 5) == nil)
-        #expect(c.count == 3)
-        #expect(c.totalBytes == 300, "byte accounting follows the eviction")
-    }
-
-    @Test("evicting from beyond the top is a no-op rather than an error")
-    func evictBeyondTop() {
-        let c = SegmentCache(forwardWindow: 20, backwardWindow: 20)
-        defer { c.close() }
-        c.store(index: 0, data: Data(repeating: 0xAA, count: 100))
-        c.evictFrom(99)
-        #expect(c.count == 1)
-    }
-}
-
 /// Whether a change can be brought to the playhead at all.
 @MainActor
 @Suite("AE#464 re-anchor eligibility")

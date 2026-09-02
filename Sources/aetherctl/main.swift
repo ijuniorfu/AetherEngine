@@ -73,6 +73,7 @@ func printUsage() {
       aetherctl play [--seconds N] [--live] [--fast-zap] [--live-start-immediately] [--dvr-window N] [--subs <codec-or-lang>]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
+                 [--audio-delay <ms>] [--switch-audio-delay <ms>[@ms]]
                  [--reload-applying <key>=<value>]... [--reload-applying-at <ms>]
                  [--drop-audio]
                  [--sequential-origin] [--declared-duration S]
@@ -640,6 +641,19 @@ if first == "play" {
         return TeletextPageSwitchRequest(page: page,
                                         delayMilliseconds: parts.count == 2 ? (Int(parts[1]) ?? 20_000) : 20_000)
     }
+    // AE#464: `--audio-delay <ms>` is the load option, `--switch-audio-delay <ms>[@ms]` is the
+    // runtime setter. Same 20 s default as the teletext switch and for the same reason: it has to
+    // land on a session that is playing, or it only re-proves the load option.
+    let audioDelayMs = takeIntFlag("--audio-delay", from: &rest) ?? 0
+    let audioDelaySwitch: AudioDelaySwitchRequest? = takeStringFlag("--switch-audio-delay", from: &rest).flatMap { spec in
+        let parts = spec.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let ms = Int(parts[0]) else {
+            print("ERROR: --switch-audio-delay takes <ms>[@ms], got '\(spec)'")
+            exit(64)
+        }
+        return AudioDelaySwitchRequest(milliseconds: ms,
+                                       delayMilliseconds: parts.count == 2 ? (Int(parts[1]) ?? 20_000) : 20_000)
+    }
     // #460: `--reload-applying <key>=<value>`, repeatable, with one shared delay. The delay is a
     // separate flag rather than teletext's `@ms` suffix because a header value can carry an `@`.
     // Default +20 s for the same reason the teletext switch uses it: the correction has to land on
@@ -711,6 +725,7 @@ if first == "play" {
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, pictureProbe: pictureProbe, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,
+                 audioDelayMs: audioDelayMs, audioDelaySwitch: audioDelaySwitch,
                  optionCorrection: optionCorrection,
                  sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests,
                  declaredDuration: declaredDuration,
@@ -764,6 +779,10 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     let throttleKbps = takeIntFlag("--throttle-kbps", from: &rest)
     // --start-position: anchor the first producer at a resume position like load(startPosition:) (#99); serve only.
     let startPosition = takeDoubleFlag("--start-position", from: &rest)
+    // AE#464: park the server with an audio offset already in the muxer, so the delivered offset can
+    // be read straight off the segments (ffprobe the audio and video first-packet PTS) instead of
+    // being judged by ear.
+    let serveAudioDelayMs = takeIntFlag("--audio-delay", from: &rest) ?? 0
     rejectStrayFlags(rest, subcommand: first)
     guard let urlArg = rest.first else {
         print("ERROR: \(first) requires a <url> argument")
@@ -782,7 +801,8 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
         exit(runProbe(url: url))
     case "serve":
         runServe(url: url, dvModeAvailable: dvModeAvailable, forceDVWithoutDisplay: forceDV,
-                 nativeSubsIndex: nativeSubsIndex, startPosition: startPosition)
+                 nativeSubsIndex: nativeSubsIndex, startPosition: startPosition,
+                 audioDelayMs: serveAudioDelayMs)
     case "validate":
         exit(runValidate(url: url, dvModeAvailable: dvModeAvailable, forceDVWithoutDisplay: forceDV))
     case "swdecode":

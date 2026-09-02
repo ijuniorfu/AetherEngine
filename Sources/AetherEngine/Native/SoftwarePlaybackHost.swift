@@ -736,7 +736,6 @@ final class SoftwarePlaybackHost {
                         NSLocalizedDescriptionKey: "audio pipeline forced to fail (TEST-ONLY)"])
                 }
                 try aDec.open(stream: aStream)
-                aDec.setDeliveryOffset(seconds: self.audioDelaySeconds)   // AE#464
                 self.audioDecoder = aDec
                 self.audioStreamIndex = resolvedAudioIdx
                 let atb = aStream.pointee.time_base
@@ -768,6 +767,7 @@ final class SoftwarePlaybackHost {
 
         // AudioOutput owns the AVSampleBufferRenderSynchronizer (master clock). Created unconditionally: video-only previously got no clock (frozen frame, currentTime=0). Layer attached in play() after the engine hangs it in the view hierarchy (attaching free-floating fails FigVideoQueueRemote -12080 on tvOS 26+).
         self.audioOutput = AudioOutput()
+        self.audioOutput?.setPresentationOffset(seconds: audioDelaySeconds)   // AE#464
 
         // Reset the live feeder state for the new session.
         resetFeederState()
@@ -949,7 +949,7 @@ final class SoftwarePlaybackHost {
     /// playhead afterwards. `AetherEngine.setAudioDelay` does exactly that.
     func setAudioDelay(_ seconds: Double) {
         audioDelaySeconds = seconds
-        audioDecoder?.setDeliveryOffset(seconds: seconds)
+        audioOutput?.setPresentationOffset(seconds: seconds)
     }
 
     func setResumeRate(_ rate: Float) {

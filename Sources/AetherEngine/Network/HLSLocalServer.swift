@@ -117,6 +117,11 @@ protocol HLSSegmentProvider: AnyObject {
     /// which first segment, so the item's axis is a statement rather than a later reconstruction.
     func noteServedLiveRejoinPlacement(timeOffset: Double, firstVisible: Int)
 
+    /// AE#446 round 5: tell the provider which segment this build listed first, so the item loading it
+    /// gets its axis from the manifest that placed it rather than from a later reconstruction. Every
+    /// live build, not only the ones that also carry a rejoin placement.
+    func noteServedLiveItemAxis(firstVisible: Int)
+
     /// Upper bound on how long a blocking reload may hold before the 503. Production providers derive
     /// it from the sealed TARGETDURATION (3 x TD, the HOLD-BACK depth) so a fastZap session (TD=2)
     /// times out in 6 s instead of 18 s — a hold that outlives AVPlayer's forward buffer guarantees
@@ -149,6 +154,7 @@ extension HLSSegmentProvider {
     var liveTargetSegmentDuration: Double? { nil }
     var liveRejoinStart: (segmentIndex: Int, secondsIntoSegment: Double)? { nil }
     func noteServedLiveRejoinPlacement(timeOffset: Double, firstVisible: Int) {}
+    func noteServedLiveItemAxis(firstVisible: Int) {}
     var liveBlockingReloadEnabled: Bool { true }
     var liveTargetDurationFloorSeconds: Double? { nil }
     func liveTargetDurationSeconds(maxSegmentDuration: Double) -> Int {
@@ -1419,6 +1425,12 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         lines.append("#EXT-X-TARGETDURATION:\(targetDuration)")
         lines.append("#EXT-X-MEDIA-SEQUENCE:\(firstVisible)")
+        // AE#446 round 5: the axis this build places the item on, stated where it is known exactly.
+        // MEDIA-SEQUENCE above is the same fact addressed by index; this records the seconds it stands
+        // for, and only an item's FIRST playlist decides (the latch is armed once per item attach).
+        if typeIsLive || liveOutage {
+            provider.noteServedLiveItemAxis(firstVisible: firstVisible)
+        }
         if typeIsLive || liveOutage {
             // RFC 8216 §6.2.2: EXT-X-DISCONTINUITY-SEQUENCE must advance when discontinuity-tagged segments slide out of the window; omitting it shifts AVPlayer's discontinuity numbering one window after each program boundary.
             lines.append("#EXT-X-DISCONTINUITY-SEQUENCE:\(snapshot.discontinuitySequence)")

@@ -483,6 +483,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#454 round 2: what the playlist that carried the placement actually STATED, and the axis it
     /// stated it on. See `noteServedLiveRejoinPlacement`.
     private var _servedLiveRejoinPlacement: (timeOffset: Double, playlistStartOutputSeconds: Double)?
+    /// AE#446 round 5: the axis of the playlist the item currently under the host loaded, stated by
+    /// the build that served it. Armed (cleared) once per item attach, then first build wins. See
+    /// `noteServedLiveItemAxis`.
+    private var _servedLiveItemAxisOutputSeconds: Double?
     private var refreshCounter: Int = 0
     /// EXT-X-MEDIA-SEQUENCE first index; monotonically advancing, stays 0 for VOD.
     private var _liveFirstVisible: Int = 0
@@ -1704,6 +1708,45 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _servedLiveRejoinPlacement
+    }
+
+    /// AE#446 round 5: a fresh item is about to attach, so the axis the last one came up on is spent.
+    ///
+    /// Called from the one funnel every attach passes through (`NativeAVPlayerHost.load`, which every
+    /// in-place swap delegates to), so a swap path added later inherits this without remembering to.
+    func armLiveItemAxisStatement() {
+        stateLock.lock()
+        _servedLiveItemAxisOutputSeconds = nil
+        stateLock.unlock()
+    }
+
+    /// AE#446 round 5: record the axis this build served, for the item that is loading its first
+    /// playlist right now.
+    ///
+    /// An item's zero is the first segment ITS playlist listed, and the build that lists it is the
+    /// one party that knows the number exactly. The alternative is a difference between two
+    /// independently sampled quantities (the cache's resident floor and the item's own reported
+    /// seekable start), which is only as good as the older sample and is latched for the item's whole
+    /// life: measured against a device on 6.60.0 it read 0.05s for an item whose playlist began at
+    /// exactly 0.00s (AE#446, cmcpherson274), and on 6.57.0 the same construction read 0 for an item
+    /// whose playlist began 6.76s in (AE#454 round 2).
+    ///
+    /// First build wins, because an item's zero is the FIRST playlist it loaded and later builds of a
+    /// sliding window state a smaller offset against the very same content.
+    func noteServedLiveItemAxis(firstVisible: Int) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard _servedLiveItemAxisOutputSeconds == nil else { return }
+        guard firstVisible >= 0, firstVisible < segments.count else { return }
+        _servedLiveItemAxisOutputSeconds = segments[firstVisible].startSeconds
+    }
+
+    /// AE#446 round 5: where the playlist the current item loaded begins, on the producer's output
+    /// axis, or nil when no build has served this item yet.
+    var servedLiveItemAxisOutputSeconds: Double? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _servedLiveItemAxisOutputSeconds
     }
 
     /// AE#454: the placement is spent once the item that asked for it is running. Left armed, the next

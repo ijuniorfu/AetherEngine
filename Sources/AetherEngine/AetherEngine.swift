@@ -684,6 +684,9 @@ public final class AetherEngine: ObservableObject {
     /// has slid, which an in-place swap does routinely. Measured rather than assumed; see
     /// `measureLiveItemAxisOffset`. 0 on every path where the question does not arise.
     var liveItemAxisOffsetSeconds: Double = 0
+    /// AE#446 round 5: the item generation the axis latch was armed for, recorded at the attach that
+    /// armed it. A stated axis is only this item's if the arm that cleared the latch was its own.
+    var liveItemAxisArmedGeneration: Int = -1
     /// The item generation `liveItemAxisOffsetSeconds` was measured for.
     var liveItemAxisOffsetGeneration: Int = -1
     /// AE#454 round 2: the item generation whose axis the playlist has already stated, so the
@@ -5707,6 +5710,7 @@ public final class AetherEngine: ObservableObject {
         liveItemAxisOffsetGeneration = -1
         liveRejoinPlacementGeneration = -1
         liveItemAxisStatedGeneration = -1
+        liveItemAxisArmedGeneration = -1
         liveAcceptedItemGeneration = -1
 
         // Shut down cache-backed scrub-thumbnail FrameExtractors with the session.

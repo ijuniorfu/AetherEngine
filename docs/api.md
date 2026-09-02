@@ -132,7 +132,7 @@ Two refusals, both raised BEFORE any teardown, so a refused correction leaves th
 | Thrown | When |
 | --- | --- |
 | `AetherEngineError.loadIdentityNotCorrectable(fields:)` | the closure changed `isLive`, `audioOnly`, `nativeRemoteHLS` or `sequentialOrigin`. These name the session rather than tune it (each opens the source on a different pipeline, and the engine writes the last two itself), so changing one is a different item, not a correction of this one. Load the source again. |
-| `AetherEngineError.sessionNotReloadable(_:)` | there is no session, or the source is a custom `IOReader` that reported itself non-seekable and cannot be reopened at the current position. |
+| `AetherEngineError.sessionNotReloadable(_:)` | there is no session, or the source is a custom `IOReader` that reported itself non-seekable and cannot be reopened at the current position. It carries a `SessionReloadRefusal` (`.noActiveSession` / `.customSourceNotSeekable`) saying which. |
 
 Both are all-or-nothing: a correction refused for one field installs none of it.
 
@@ -147,8 +147,8 @@ language lists have nothing to decide on that path anyway.
 
 Unlike `reloadAtCurrentPosition()`, which returns silently when there is nothing to rebuild, this one
 throws, because a host correcting a session has to tell "corrected" from "did nothing" to decide
-whether to fall through to a fresh load. `sessionReloadRefusal` answers the same question about
-either reload without attempting one.
+whether to fall through to a fresh load. `sessionReloadRefusal` returns the same `SessionReloadRefusal` for
+either reload without attempting one, and nil when a rebuild would happen.
 
 ### What must be set before `load()`
 

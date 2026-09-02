@@ -12,6 +12,29 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.62.2] - 2026-09-02
+
+### Fixed
+
+- **Every live item's axis is stated by the playlist it loads (AE#446).** A live item's zero is the
+  first segment ITS playlist listed, and the build that lists it is the one party that knows that
+  number exactly. AE#454 round 2 replaced the engine's reconstruction with that statement, but gated
+  it on the item having carried a rejoin PLACEMENT, which is an unrelated condition. Everything else
+  stayed on the reconstruction: the session's own first item, the #130 media fallback (documented to
+  run after the window slid), the #35 gate reloads, an AirPlay hop, and the rejoin branch whose
+  target had been evicted, which arms no placement and therefore had none. That reconstruction is a
+  difference between two independently sampled quantities, the cache's resident floor and the item's
+  own reported seekable start, so it is only as good as the older sample and it is latched for the
+  item's whole life: reported from a device and a simulator on 6.60.0, a start item whose playlist
+  begins at exactly 0.00 s reconstructed 0.05 s and carried it for the session, and on 6.57.0 the
+  same construction read 0 for an item whose playlist began 6.76 s in. Every live build now states
+  the axis it places the item on (`MEDIA-SEQUENCE` already carries the same fact by index, this
+  records the seconds it stands for), armed once per item attach through the one funnel every attach
+  passes, so a swap path added later inherits it. The statement also reports what the reconstruction
+  it replaces would have said, which is what makes the error measurable rather than arguable: on the
+  live-only freeze leg the start item's reconstruction has no reading at all at the instant the
+  manifest states its axis, so it could only ever have latched from a later sample.
+
 ## [6.62.1] - 2026-09-02
 
 ### Fixed

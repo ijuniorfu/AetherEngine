@@ -115,6 +115,25 @@ Non-streamable codecs route through `AudioBridge` in one of two modes (`LoadOpti
 
 Two bridge lifecycle invariants (issue #99): the encoder PTS counter re-bases onto the first fed packet's (gate-shifted) source PTS on every session start and producer restart, so bridged audio always shares the video's output timeline, including a `load(startPosition:)` resume that anchors mid-file (a 0-based bridge timeline puts the audio track a full resume-offset away from video inside the same fragments, which AVPlayer silently discards). And the EOF tail flush leaves the encoder in FFmpeg's terminal draining state, so the bridge latches that and rebuilds the encoder on the next restart; a VOD pump that still dies with `muxerFailed` gets a bounded producer rebuild instead of stranding the session.
 
+### Audio a build has no decoder for
+
+AC-4 (ATSC 3.0 / NextGen TV) and MPEG-H 3D Audio have no decoder in the bundled FFmpeg, and there is
+nothing to switch on: FFmpeg carries codec ids for both so a container can be demuxed, but
+`libavcodec/allcodecs.c` names neither. The AC-4 decoder patches have sat out of tree for years and
+the format is Dolby patent-encumbered; MPEG-H has an upstream wrapper around Fraunhofer's `mpeghdec`,
+whose licence is not LGPL-redistributable. Apple's own stack does not fill the gap either: there is no
+AC-4 format constant in CoreAudio.
+
+Such a track is not merely silent, it is expensive. `has_codec_parameters` fails an audio stream with
+no sample rate, and that value can only come from the container or from opening a decoder, so
+`find_stream_info` reads to the full probe budget before failing open with the track missing anyway.
+On a live source that budget is spent at the wire rate, which is where Sodalite#100's minute-long
+tuning indicator came from. The demuxer therefore parks a stream whose codec has no decoder AND whose
+parameters the container left unset out of the probe's way, and restores it immediately after, so the
+open costs what it would have without the track and the caller still sees the track in
+`audioTracks`. A host with its own metadata (Jellyfin names a live channel's audio codec in
+PlaybackInfo without opening a tuner) can do better still and refuse the channel with a real sentence.
+
 ### Track language on the native path
 
 AVFoundation reads a track's language from the master playlist, not from the media, so the audio the

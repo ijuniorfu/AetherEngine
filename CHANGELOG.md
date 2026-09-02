@@ -10,7 +10,23 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **An audio track with no decoder no longer costs the whole probe budget (AE#466).** An ATSC 3.0
+  channel carries AC-4, nothing in this build decodes it, and the tune sat at `containerOpened` for
+  most of a minute with no picture, no error and no way out but backing out (Sodalite#100).
+  `has_codec_parameters` fails an audio stream with no sample rate, and that value can only come from
+  the container or from opening a decoder, so `try_decode_frame` gave up on the first packet while the
+  outer `find_stream_info` loop kept reading regardless: its only exit is every stream resolving. One
+  such stream therefore cost the entire 50 MB / 60 s budget and then failed open with the track
+  missing anyway, and a live source cannot be read ahead of, so that budget was spent in wall-clock
+  seconds. A stream whose codec has no decoder AND whose parameters the container left unset is now
+  parked out of the probe's way and restored immediately after, the same lever the attached-picture
+  fix uses (#75). Measured on a synthetic 120 s transport stream: 1,572,864 bytes read before,
+  262,144 after, the latter being what the same stream costs with no AC-4 track at all. Deliberately
+  narrow: a stream still being identified, one the container already described, and video (the native
+  path decodes formats libavcodec was not built with) are all left alone, and a live MPEG-TS AAC
+  stream keeps its downstream codecpar repair because AAC has a decoder.
 
 ## [6.62.0] - 2026-09-02
 

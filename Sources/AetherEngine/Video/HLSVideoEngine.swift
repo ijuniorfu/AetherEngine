@@ -3119,6 +3119,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
         provider?.servedLiveRejoinPlacement
     }
 
+    /// AE#446 round 5: a fresh item is attaching, so the axis the last one came up on is spent.
+    /// See `VideoSegmentProvider.armLiveItemAxisStatement`.
+    func armLiveItemAxisStatement() { provider?.armLiveItemAxisStatement() }
+
+    /// See `VideoSegmentProvider.servedLiveItemAxisOutputSeconds`.
+    var servedLiveItemAxisOutputSeconds: Double? { provider?.servedLiveItemAxisOutputSeconds }
+
     /// #178: called by the engine when a NEW user seek is dispatched. A recovery re-anchor still
     /// holding the coalescer's authoritative slot belongs to the superseded seek; left in place it
     /// would drop the new seek's segment-driven restart and land the producer on the stale

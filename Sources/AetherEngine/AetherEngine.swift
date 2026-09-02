@@ -549,7 +549,7 @@ public final class AetherEngine: ObservableObject {
     /// Exposed for diagnostic overlays; hosts should not branch on it. Branch on `videoRoute` instead,
     /// which also separates the two native pipelines (#321).
     @Published public internal(set) var playbackBackend: PlaybackBackend = .none {
-        didSet { recomputeVideoRoute() }
+        didSet { recomputeVideoRoute(); recomputeAudioDelivery() }
     }
 
     /// Pipeline actually serving this session (#321), including the reroutes the host never asked for.
@@ -567,6 +567,42 @@ public final class AetherEngine: ObservableObject {
         videoRoute = next
         if next != .none {
             EngineLog.emit("[AetherEngine] #321: effective video route = \(next.rawValue)", category: .engine)
+        }
+    }
+
+    /// How this session's audio reaches the renderer (AE#462), above all whether a source that HAS
+    /// audio is playing video-only because no pipeline could be built for it (`.droppedNoPipeline`,
+    /// the value a fallback ladder demotes on). Derived from `playbackBackend` + `loadedOptions` +
+    /// the live pipeline's own classification, so it cannot drift from the running session.
+    @Published public internal(set) var audioDelivery: AudioDelivery = .none
+
+    /// The classification the pipeline serving this session made about itself, or nil while none is
+    /// live. Read through the backend rather than by probing all four hosts, so a host left behind by
+    /// a teardown cannot answer for the session that replaced it.
+    private var livePipelineAudioDelivery: (loopback: AudioDelivery?,
+                                            software: AudioDelivery?,
+                                            audioOnly: AudioDelivery?) {
+        (loopback: nativeVideoSession?.audioDelivery,
+         software: softwareHost?.audioDelivery,
+         // Neither audio-only host can reach video-only: AVPlayer owns the selection on the native
+         // one, and the software one throws out of its load when the decoder does not open.
+         audioOnly: audioAVPlayerHost != nil ? .playerManaged : (audioHost != nil ? .decoded : nil))
+    }
+
+    /// Idempotent for the same reason as the route above. Logged on every change, including the drop
+    /// to `.none`, so a diagnostic pull answers "did this session deliver audio" without the reader
+    /// having to reconstruct it from the cascade's own lines.
+    func recomputeAudioDelivery() {
+        let pipeline = livePipelineAudioDelivery
+        let next = AudioDelivery.derive(backend: playbackBackend,
+                                        nativeRemoteHLS: loadedOptions.nativeRemoteHLS,
+                                        loopbackSession: pipeline.loopback,
+                                        softwareHost: pipeline.software,
+                                        audioOnlyHost: pipeline.audioOnly)
+        guard audioDelivery != next else { return }
+        audioDelivery = next
+        if next != .none {
+            EngineLog.emit("[AetherEngine] AE#462: audio delivery = \(next.rawValue)", category: .engine)
         }
     }
 
@@ -1124,6 +1160,18 @@ public final class AetherEngine: ObservableObject {
         forceSoftwarePathForTesting = on
     }
 
+    /// TEST-ONLY: makes every audio pipeline fail to build, so the AE#462 video-only drop is
+    /// reachable without a source whose codec this FFmpeg build has no decoder for. Honored by the
+    /// loopback cascade and by `SoftwarePlaybackHost`'s decoder open. Set only via
+    /// `setForceAudioPipelineFailureForTesting(_:)` from `aetherctl`.
+    nonisolated(unsafe) static var forceAudioPipelineFailureForTesting = false
+
+    /// TEST-ONLY. Flip the forced audio-pipeline failure for the `aetherctl play --drop-audio`
+    /// harness; not for app use.
+    public nonisolated static func setForceAudioPipelineFailureForTesting(_ on: Bool) {
+        forceAudioPipelineFailureForTesting = on
+    }
+
     /// TEST-ONLY: routes a loopback session behind its MASTER playlist regardless of codec, panel and
     /// subtitle state, so the harness can exercise the route a real host actually takes.
     ///
@@ -1555,7 +1603,7 @@ public final class AetherEngine: ObservableObject {
     /// Read by AetherEngine+FrameExtractor. Every internal reroute (#154, #168, #199, #246, #268) reaches
     /// the published route through this property, so its writes feed `recomputeVideoRoute` (#321).
     private(set) var loadedOptions: LoadOptions = .init() {
-        didSet { recomputeVideoRoute() }
+        didSet { recomputeVideoRoute(); recomputeAudioDelivery() }
     }
 
     /// #364: the one narrow write into `loadedOptions` outside a load, so a mid-session teletext page
@@ -3860,9 +3908,12 @@ public final class AetherEngine: ObservableObject {
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: detectedCodecID, isSoftware: true
                 )
+                // AE#462: the host's own resolved index, not the engine's pick. The pick says which
+                // track was ASKED for; only the host knows whether a decoder opened for it, and this
+                // label claimed one for a session that had dropped its audio and gone video-only.
                 activeAudioDecoder = Self.softwareAudioDecoderLabel(
                     audioTracks: probedAudioTracks,
-                    activeIndex: resolvedInitialAudio
+                    activeIndex: softwareHost?.audioStreamIndex ?? -1
                 )
                 presentCurrentLayer()
                 // #124: a paused mount skips autostart; loadSoftware's host.$isReady settles .paused.

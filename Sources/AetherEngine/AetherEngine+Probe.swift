@@ -560,8 +560,11 @@ extension AetherEngine {
         return "VideoToolbox \(name) (HW)"
     }
 
-    /// User-facing label for the active audio decoder on the SW path (libavcodec -> CoreAudio). nil when no audio track.
-    static func softwareAudioDecoderLabel(
+    /// User-facing label for the active audio decoder on the SW path (libavcodec -> CoreAudio). nil when
+    /// no audio track. AE#462: `activeIndex` is the HOST's resolved index, never the engine's pick. The
+    /// pick says which track was asked for; a session whose decoder refused to open serves none, and
+    /// this label used to name one for it.
+    nonisolated static func softwareAudioDecoderLabel(
         audioTracks: [TrackInfo],
         activeIndex: Int32
     ) -> String? {

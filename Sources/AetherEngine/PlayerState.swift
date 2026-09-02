@@ -75,6 +75,81 @@ public enum VideoRoute: String, Sendable, Equatable {
     }
 }
 
+/// How the session's audio reaches the renderer, as a typed fact (AE#462).
+///
+/// The reason this exists is `.droppedNoPipeline`. A source whose audio can neither stream-copy into
+/// fMP4 nor go through the bridge plays video-only: `state` reaches `.playing`, nothing failed by the
+/// error taxonomy's lights, and before this the only account was a log line. A host with a fallback
+/// ladder (a server-side transcode, a second player) could reconstruct the drop from a non-empty
+/// `audioTracks` paired with a nil `activeAudioDecoder`, which was an undocumented pairing of two
+/// publishers that broke in both directions: it read as a drop where a probe had merely failed to list
+/// the tracks, and it read as healthy on the software path, whose label is built from the probe rather
+/// than from the decoder that was opened. `audioDelivery` is the fact itself, published where the
+/// pipelines decide it. **A host with a ladder should demote on `.droppedNoPipeline`**, the way it
+/// demotes on `PlaybackErrorKind.audioBridgeProducedNoOutput`, which is the same user outcome reached
+/// through a bridge that WAS built and then decoded nothing.
+///
+/// Not a `PlaybackErrorKind`: `publishError` makes a failure terminal by moving `state` to `.error`,
+/// and `errorInfo` is cleared by the state's own move away from it. Video-only playback is neither
+/// terminal nor an error for every host, so carrying it there would break the invariant that ties
+/// those two publishers together.
+///
+/// Derived from `playbackBackend`, the session's effective options and the live pipeline's own
+/// classification, never assigned on its own, so it cannot drift from the running session (the
+/// `videoRoute` arrangement, #321). Raw values are API, like `PlaybackErrorKind`'s.
+///
+/// The pair with `activeAudioDecoder` still holds and is now honest on both paths: that publisher
+/// names the pipeline for a human, this one classifies it for a ladder.
+public enum AudioDelivery: String, Sendable, Equatable, CaseIterable {
+    /// No session: pre-load, or torn down.
+    case none
+    /// The source carries no audio stream (or none was selected). Silence is the source's, not the
+    /// engine's, and no ladder rung can change it.
+    case noAudioInSource
+    /// The source's audio bitstream is muxed into fMP4 unchanged: Atmos, DTS-HD and every other
+    /// bitstream reach the renderer exactly as authored.
+    case streamCopy
+    /// The audio is decoded and re-encoded (FLAC or E-AC-3) for the fMP4 pipeline, because its codec
+    /// is not fMP4-legal or AVPlayer rejects it there. Lossless for the bed channels; object metadata
+    /// in a TrueHD-MAT or JOC bitstream does not survive the PCM intermediate.
+    case bridged
+    /// libavcodec decodes the audio and the engine renders it itself (the software path and the
+    /// software audio-only host).
+    case decoded
+    /// The source HAS audio and none of it could be delivered: no libavcodec decoder for it, or the
+    /// bridge could not be built or could not write its header. The session plays video-only and
+    /// silently. This is the one value a fallback ladder acts on.
+    case droppedNoPipeline
+    /// AVFoundation owns the audio: the remote-HLS bypass and the native audio-only host both hand
+    /// the source to AVPlayer, which does its own media selection. The engine has no pipeline of its
+    /// own to classify and does not guess on AVFoundation's behalf.
+    case playerManaged
+
+    /// Single point where a backend, the session's remote-HLS bit and a pipeline's own classification
+    /// become one published fact.
+    ///
+    /// The routing bits alone can never produce `.droppedNoPipeline`: the drop is only ever reported
+    /// by the pipeline that dropped, about itself.
+    static func derive(backend: PlaybackBackend,
+                       nativeRemoteHLS: Bool,
+                       loopbackSession: AudioDelivery?,
+                       softwareHost: AudioDelivery?,
+                       audioOnlyHost: AudioDelivery?) -> AudioDelivery {
+        switch backend {
+        case .none, .aether:
+            return .none
+        case .native:
+            // The bypass has no HLSVideoEngine to ask, and a leftover fact from the session before a
+            // reroute must not answer for it.
+            return nativeRemoteHLS ? .playerManaged : (loopbackSession ?? .none)
+        case .software:
+            return softwareHost ?? .none
+        case .audio:
+            return audioOnlyHost ?? .none
+        }
+    }
+}
+
 /// What playback is doing right now, as one observable (#85). Derived from `state`, `isBuffering`,
 /// `isSeeking`, and the reader network phase, so it can never desync from them. Observe `$playbackPhase`
 /// instead of stitching `state == .loading` + `$isBuffering` + `$isSeeking` together, and instead of

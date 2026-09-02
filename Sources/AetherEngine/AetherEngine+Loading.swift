@@ -2046,8 +2046,9 @@ extension AetherEngine {
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: preservedVideoCodec, isSoftware: true
                 )
+                // AE#462: the rebuilt host's own resolved index (see the load site).
                 activeAudioDecoder = Self.softwareAudioDecoderLabel(
-                    audioTracks: audioTracks, activeIndex: audioStreamIndex ?? -1
+                    audioTracks: audioTracks, activeIndex: softwareHost?.audioStreamIndex ?? -1
                 )
                 presentCurrentLayer()
                 softwareHost?.play()

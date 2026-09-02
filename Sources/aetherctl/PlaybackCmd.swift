@@ -37,6 +37,7 @@ enum LoadOptionChange {
     case header(name: String, value: String)
     case audioBridgeMode(AudioBridgeMode)
     case preferredAudioLanguages([String])
+    case decodePath(DecodePath)
     case isLive(Bool)
 
     var label: String {
@@ -44,6 +45,7 @@ enum LoadOptionChange {
         case .header(let name, _): return "httpHeaders[\(name)]"
         case .audioBridgeMode(let mode): return "audioBridgeMode=\(mode.rawValue)"
         case .preferredAudioLanguages(let langs): return "preferredAudioLanguages=\(langs.joined(separator: ","))"
+        case .decodePath(let path): return "preferredDecodePath=\(path.rawValue)"
         case .isLive(let value): return "isLive=\(value)"
         }
     }
@@ -53,6 +55,7 @@ enum LoadOptionChange {
         case .header(let name, let value): options.httpHeaders[name] = value
         case .audioBridgeMode(let mode): options.audioBridgeMode = mode
         case .preferredAudioLanguages(let langs): options.preferredAudioLanguages = langs
+        case .decodePath(let path): options.preferredDecodePath = path
         case .isLive(let value): options.isLive = value
         }
     }
@@ -77,7 +80,10 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
             triggerThresholdMB: censusThresholdMB ?? 32,
             triggerPollHz: censusHz ?? 8)
     }
-    if forceSoftware { AetherEngine.setForceSoftwarePathForTesting(true) }
+    // AE#461: `play --sw` drives `LoadOptions.preferredDecodePath`, the shipping per-session lever,
+    // rather than the process-global test hook it used before. The hook forces every session on the
+    // engine, so it could never exercise the thing a host actually calls.
+    if forceSoftware { print("[aetherctl] decode path: preferredDecodePath=.software (#461)") }
     if let audioSwitch {
         print("[aetherctl] audio switch: selectAudioTrack(index: \(audioSwitch.index)) "
               + "\(audioSwitch.delayMilliseconds) ms after the load returns")
@@ -87,7 +93,7 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
     // CFRunLoopRun, not a blocking semaphore: AetherEngine is @MainActor, so parking the main thread would deadlock the executor.
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, pictureProbe: pictureProbe, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, declaredDuration: declaredDuration, httpHeaders: httpHeaders)
+        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, forceSoftware: forceSoftware, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, pictureProbe: pictureProbe, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, declaredDuration: declaredDuration, httpHeaders: httpHeaders)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -272,7 +278,7 @@ private func seekIntentDrill(
 }
 
 @MainActor
-private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, pictureProbe: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:]) async -> Int32 {
+private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware: Bool = false, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, pictureProbe: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:]) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -360,7 +366,8 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         maxConcurrentSourceRequests: maxConcurrentRequests,
         declaredDurationSeconds: declaredDuration,
         externalSubtitles: sidecars,
-        teletextPage: teletextPage
+        teletextPage: teletextPage,
+        preferredDecodePath: forceSoftware ? .software : .automatic
     )
     // #311: installed BEFORE the load on purpose. The engine holds it and arms the host it builds,
     // which is the documented usage and the part a host would otherwise have to re-do per load.

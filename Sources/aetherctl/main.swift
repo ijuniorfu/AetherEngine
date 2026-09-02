@@ -90,7 +90,8 @@ func printUsage() {
                       (default +20 s, i.e. after --subs has a track showing);
                       --reload-applying corrects a LoadOption on the playing
                       session through #460's session-preserving reload, repeatable;
-                      keys header.<Name>, audio-bridge, preferred-audio, is-live
+                      keys header.<Name>, audio-bridge, preferred-audio,
+                      decode-path, is-live
                       (is-live is there to show the refusal: a field that names the
                       session is refused, not silently ignored), default +20 s;
                       --sequential-origin declares a fake-range origin (one unranged
@@ -651,6 +652,12 @@ if first == "play" {
         } else if key == "preferred-audio" {
             optionChanges.append(.preferredAudioLanguages(
                 value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }))
+        } else if key == "decode-path" {
+            guard let path = DecodePath(rawValue: value) else {
+                print("ERROR: --reload-applying decode-path takes \(DecodePath.allCases.map(\.rawValue).joined(separator: "|")), got '\(value)'")
+                exit(64)
+            }
+            optionChanges.append(.decodePath(path))
         } else if key == "is-live" {
             guard let flag = Bool(value) else {
                 print("ERROR: --reload-applying is-live takes true|false, got '\(value)'")
@@ -658,7 +665,7 @@ if first == "play" {
             }
             optionChanges.append(.isLive(flag))
         } else {
-            print("ERROR: --reload-applying key '\(key)' is not one of header.<Name>, audio-bridge, preferred-audio, is-live")
+            print("ERROR: --reload-applying key '\(key)' is not one of header.<Name>, audio-bridge, preferred-audio, decode-path, is-live")
             exit(64)
         }
     }

@@ -205,6 +205,17 @@ public enum LiveJoinProfile: Sendable, Equatable {
 }
 
 /// Options for `AetherEngine.load(url:options:)`. All flags default to safe values.
+/// Which playback host serves a session's video (#461). See `LoadOptions.preferredDecodePath`.
+public enum DecodePath: String, Sendable, Equatable, CaseIterable {
+    /// The engine routes: codec support, the VideoToolbox capability probe, declared interlace,
+    /// source seekability. The default, and right for every session that does not have evidence
+    /// the engine cannot have.
+    case automatic
+    /// Serve this source through `SoftwarePlaybackHost`, whatever the routing concluded. Scoped to
+    /// the session; it does not touch any other session on the shared engine.
+    case software
+}
+
 public struct LoadOptions: Sendable, Equatable {
     /// Diagnostic lever: omit BT.2020 / transfer / YCbCr matrix from AVDisplayCriteria so AVPlayer re-reads color from the bitstream. Default off.
     public var omitCriteriaColorExtensions: Bool
@@ -486,6 +497,33 @@ public struct LoadOptions: Sendable, Equatable {
     /// rate). See `DeinterlaceFieldRate`.
     public var deinterlaceFieldRate: DeinterlaceFieldRate = .field
 
+    /// AE#461: which decode path this session runs on when the host needs to overrule the engine's
+    /// own routing. `.automatic` (default) leaves the routing alone. `.software` serves the source
+    /// through `SoftwarePlaybackHost` (libavcodec / dav1d) whatever the routing concluded, scoped to
+    /// this session, and without costing the source anything: seeks, the mid-session audio switch and
+    /// the title switch all still work, unlike the forward-only reader that was previously the only
+    /// way onto that host.
+    ///
+    /// The lever exists because `VTCapabilityProbe.canHardwareDecode` FAILS OPEN by design (four
+    /// classes it cannot classify keep the native path), which is the right default and occasionally
+    /// wrong: if VideoToolbox then cannot build a decoder for what arrives, the item reaches
+    /// `readyToPlay` and renders nothing. In-band parameter sets (`hev1` / `avc1` with an empty
+    /// config record) are the class where the deciding evidence genuinely is not present at load
+    /// time, and a stream whose parameter sets turn undecodable mid-play has no other in-place
+    /// answer. Pair with `reloadAtCurrentPosition(applying:)` (#460) to correct a running session.
+    ///
+    /// One-way on purpose: there is no `.native`. Every route the engine sends to software it sends
+    /// there because the native path cannot serve it (AV1 without hardware decode, VP9, a
+    /// forward-only source, MVC carriage), so forcing native past those buys a black screen.
+    ///
+    /// `.software` does not suspend the guards downstream of the routing decision, and must not: a
+    /// source whose only signal is IPT-PQ-c2 (Dolby Vision HEVC P5, AV1 P10.0) still fails the load
+    /// with `dolbyVisionUnplayableOnSoftwarePath` rather than decoding as YCbCr and rendering
+    /// green/purple, and a demuxed-audio live source still fails rather than playing silent.
+    /// `nativeRemoteHLS` is a different route entirely (AVPlayer plays the remote playlist, nothing
+    /// is demuxed), so this has nothing to act on there and the engine says so in the log.
+    public var preferredDecodePath: DecodePath = .automatic
+
     /// ENGINE-INTERNAL: marks this load as a live REJOIN (`reloadAtCurrentPosition`). Not settable from the public initializer. When true, the native load path skips its explicit initial seek so AVPlayer picks edge-minus-holdback (see `LiveReloadPolicy`); without it the reloaded item can wedge in `waitingToPlay` against Jellyfin's re-served backlog. Meaningful only when `isLive` is true.
     var isLiveRejoin: Bool = false
 
@@ -531,7 +569,8 @@ public struct LoadOptions: Sendable, Equatable {
         autoplay: Bool = true,
         teletextPage: Int? = nil,
         deinterlaceMode: DeinterlaceMode = .auto,
-        deinterlaceFieldRate: DeinterlaceFieldRate = .field
+        deinterlaceFieldRate: DeinterlaceFieldRate = .field,
+        preferredDecodePath: DecodePath = .automatic
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
@@ -568,6 +607,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.teletextPage = teletextPage
         self.deinterlaceMode = deinterlaceMode
         self.deinterlaceFieldRate = deinterlaceFieldRate
+        self.preferredDecodePath = preferredDecodePath
     }
 }
 

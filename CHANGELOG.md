@@ -10,7 +10,46 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A run that does not belong to a placement no longer answers for it, and a composition nobody
+  holds is rolled back (AE#418).** Two failures of the same shape, both measured with the picture as
+  witness (`play --picture-probe`). ROUND 4 IDENTIFIED A PLACEMENT'S RUN BY ASKING WHICH RUN WAS NEW,
+  against a baseline of what the item held when the placement was recorded, and during a seek burst
+  that is a different question with a different answer. On the fixture over a throttled origin
+  (`--seek-every 1 --seek-count 4 --seek-pattern 70,53,71,54`) a placement predicting its seam at
+  item 53.000 had its own run in hand for four samples (`[53.083-70.035]`, one lead above the seam)
+  and every one was refused for opening below an overlapping baseline; the fifth sample found a later
+  seek's run at `[74.208-86.099]`, which is new by every baseline test, and adopting it published a
+  21 s error against a picture that read -10.125 for the rest of the session. The same test on a
+  60 s-drought fixture adopted a run 41.667 s away for a segment whose bytes were nowhere near it.
+  A placed segment's first sample goes to its advertised start read through the base its timeline
+  carries, so THE RUN THAT ANSWERS A PLACEMENT IS THE ONE THAT OPENS WHERE ITS SEGMENT BEGINS, either
+  through the axis in force or, on a timeline AVPlayer threw away, through no axis at all (measured:
+  a seek 35 s out of the buffer opens `[52.000-75.969]` for an advertised 52.000, base 0.000, and
+  that 10.3 s correction is right). That is an identity, not a yardstick: the run is picked by where
+  it opens and the base is then read off it, residual and all, so the reading that round 5 called
+  unmeasurable turns out to open on its seam to the millisecond.
+- **A placement whose bytes never reached AVPlayer no longer keeps its composition (AE#418).**
+  `opened no run of its own to measure` covered two different events and kept the composed axis for
+  both: a placement that happened and cannot be read, and a placement that never happened. Reported
+  from a Mac Catalyst session, a composition worth -28.028 s stood for 4.5 s over a segment whose
+  producer was torn down with it discarded (`seg-738.m4s partial at teardown ... not adopted`), and
+  the next measurable placement found the axis 33 ms from where it had stood before. The axis is a
+  statement about bytes in AVPlayer's timeline, so bytes nobody holds never moved it: a placement
+  with no reading is now kept only while its request is still being answered, or when AVPlayer holds
+  what it placed, and rolled back otherwise. The local server reports what became of every media
+  segment request for that (a 503 is a retry, not an answer), which is also what keeps a deep re-aim
+  from being mistaken for a placement that never landed.
+- **One reading is a sample, not a measurement (AE#418).** Round 6 read the presentation-lead
+  coefficient off a placement instead of assuming it, and then let the LAST reading set it for the
+  session. Readings resolve the base to whole frames, so on a source whose lead is one frame every
+  frame of reading noise is a whole unit of coefficient: nine readings on the reporter's asset came
+  back 0, +-1 and +-2 frames, and one stray took a settled session the full clamp, three leads in a
+  step. The session now holds what its readings AGREE on (their median, an even count holding what
+  the odd one before it settled on), and only a reading taken from the placement's own run teaches it
+  at all, since a timeline AVPlayer rebuilt puts the segment on a base that has nothing to do with a
+  lead. Every sample is logged with the standing value, including the ones that are outvoted.
 
 ## [6.62.2] - 2026-09-02
 

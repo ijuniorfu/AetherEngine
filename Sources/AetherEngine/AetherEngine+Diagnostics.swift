@@ -92,28 +92,52 @@ extension AetherEngine {
     /// first range that happened to hold the playhead is what let a stale run be reported as a
     /// confirmation, one to two frames at a time, until the accumulated difference exceeded the check
     /// itself.
+    /// Samples taken once the request behind the placement has been answered.
     static let placementVerificationAttempts = 6
+    /// Hard cap while it has NOT been. A deep re-aim makes the producer scan seconds of source before
+    /// its first segment lands, and an empty buffer says nothing about a placement whose bytes have
+    /// not gone out yet.
+    static let placementVerificationMaxAttempts = 40
     static let placementVerificationIntervalMS = 250
 
     func verifyPlacementAgainstLoadedRanges(session: HLSVideoEngine) {
         placementVerificationTask?.cancel()
         guard session.hasPlacementAwaitingMeasurement else { return }
         placementVerificationTask = Task { @MainActor [weak self, weak session] in
-            guard let baseline = await self?.avPlayerLoadedRanges() else { return }
-            for _ in 0..<Self.placementVerificationAttempts {
+            var samplesSinceAnswered = 0
+            var lastRanges: [(Double, Double)] = []
+            for _ in 0..<Self.placementVerificationMaxAttempts {
                 try? await Task.sleep(for: .milliseconds(Self.placementVerificationIntervalMS))
                 guard !Task.isCancelled, let self, let session else { return }
                 let ranges = await self.avPlayerLoadedRanges()
-                guard !Task.isCancelled else { return }
-                let clock = self.nativeClockSeconds
-                guard let start = HLSVideoEngine.freshRunStart(
-                    ranges: ranges, baseline: baseline, itemClock: clock)
-                else { continue }
-                session.reconcileAxisWithObservedPlacement(observedItemStart: start, itemClock: clock)
-                return
+                guard !Task.isCancelled, let pending = session.pendingPlacement else { return }
+                lastRanges = ranges
+                // AE#418 round 7: the run that opens where this placement's segment begins is its own,
+                // through the axis the timeline carried or, on a timeline AVPlayer rebuilt, through no
+                // axis at all. Asked as "which run is new here", a later seek's run answers for it
+                // (measured against the picture: 21 s of error, and 41.667 s on the wide fixture).
+                if let run = HLSVideoEngine.placementRunStart(
+                    ranges: ranges, predictedSeam: pending.seam, rawSeam: pending.rawSeam) {
+                    session.reconcileAxisWithObservedPlacement(
+                        observedItemStart: run.start, itemClock: self.nativeClockSeconds,
+                        source: run.source)
+                    return
+                }
+                switch session.pendingPlacementDelivery {
+                case .some(false):
+                    // The response failed, so these bytes are never arriving.
+                    samplesSinceAnswered = Self.placementVerificationAttempts
+                case .some(true):
+                    samplesSinceAnswered += 1
+                case .none:
+                    break
+                }
+                if samplesSinceAnswered >= Self.placementVerificationAttempts { break }
             }
-            guard !Task.isCancelled else { return }
-            session?.reportPlacementUnreadable()
+            guard !Task.isCancelled, let session, let pending = session.pendingPlacement else { return }
+            session.resolveUnreadablePlacement(
+                heldInBuffer: HLSVideoEngine.placementIsHeld(ranges: lastRanges, seam: pending.seam),
+                answered: session.pendingPlacementDelivery != nil)
         }
     }
 

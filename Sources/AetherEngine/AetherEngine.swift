@@ -1612,6 +1612,11 @@ public final class AetherEngine: ObservableObject {
     /// which is the same defect `matchContentEnabled` had before the replay existed.
     func setLoadedTeletextPage(_ page: Int?) { loadedOptions.teletextPage = page }
 
+    /// AE#464: the third narrow write into `loadedOptions`, same reason as the teletext page. The
+    /// value has to live where the session's own rebuilds replay it from, or a lip-sync correction
+    /// would be lost at the next audio-track switch or background return.
+    func setLoadedAudioDelay(_ seconds: Double) { loadedOptions.audioDelaySeconds = seconds }
+
     /// AE#460: the second narrow write into `loadedOptions` outside a load, for a host correction
     /// that a session-preserving reload is about to rebuild on. Installed before the rebuild rather
     /// than carried through it, because only the URL branch passes a struct into `load`: the

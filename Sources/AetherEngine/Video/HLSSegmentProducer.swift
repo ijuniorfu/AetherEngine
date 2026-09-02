@@ -716,6 +716,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// 0 disables the park (live, and any host that never opted in stays far below its budget anyway).
     private let prefetchDiskBudgetBytes: Int
 
+    /// AE#464: the host's audio offset this producer's muxers write. Fixed for the producer's life;
+    /// a new value arrives as a new producer (see `MP4SegmentMuxer.audioDelaySeconds`).
+    private let audioDelaySeconds: Double
+
     /// #65 stall diag: only log a park once it exceeds ~2 segment durations of zero playback progress, so normal
     /// backpressure (releases within one segment) stays silent and a real wedge surfaces its frozen tuple.
     private static let backpressureWedgeLogThresholdSeconds = 12
@@ -1362,9 +1366,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         prefetchDiskBudgetBytes: Int = 0,
         audioMoovPrimeFrame: [UInt8]? = nil,
         audioMoovPrimeKnownUnobtainable: Bool = false,
+        audioDelaySeconds: Double = 0,
         epoch: UInt64 = 0
     ) throws {
         self.epoch = epoch
+        self.audioDelaySeconds = audioDelaySeconds
         self.audioMoovPrimeFrame = audioMoovPrimeFrame
         self.audioMoovPrimeKnownUnobtainable = audioMoovPrimeKnownUnobtainable
         self.capturesAudioPrimeFrames =
@@ -1994,6 +2000,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // AE#222 + mid-session rotation: the last frame a muxer accepted, or the host's
                 // construction-time prime while no muxer has accepted one yet.
                 audioMoovPrimeFrame: audioMoovPrimeFrame,
+                audioDelaySeconds: audioDelaySeconds,
                 onInitCaptured: { [weak self] initBytes in
                     guard let self = self else { return }
                     if versionedInit {

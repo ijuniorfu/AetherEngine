@@ -144,6 +144,11 @@ final class SoftwarePlaybackHost {
     /// engine's pick (#133 live-TS by-type fallback).
     private(set) var audioStreamIndex: Int32 = -1
 
+    /// AE#464: the host's audio presentation offset in seconds, positive = audio later. Kept here as
+    /// well as on the decoder so a decoder opened later in the session (an audio-track switch, a
+    /// rebuild) starts out carrying it rather than at zero.
+    private(set) var audioDelaySeconds: Double = 0
+
     /// AE#462: how this host delivers audio, as a typed fact for the engine's published
     /// `audioDelivery`. Set once the audio decoder has been given its chance.
     private(set) var audioDelivery: AudioDelivery = .none
@@ -762,6 +767,7 @@ final class SoftwarePlaybackHost {
 
         // AudioOutput owns the AVSampleBufferRenderSynchronizer (master clock). Created unconditionally: video-only previously got no clock (frozen frame, currentTime=0). Layer attached in play() after the engine hangs it in the view hierarchy (attaching free-floating fails FigVideoQueueRemote -12080 on tvOS 26+).
         self.audioOutput = AudioOutput()
+        self.audioOutput?.setPresentationOffset(seconds: audioDelaySeconds)   // AE#464
 
         // Reset the live feeder state for the new session.
         resetFeederState()
@@ -933,6 +939,17 @@ final class SoftwarePlaybackHost {
         if clockArmed {
             audioOutput?.setRate(newRate)
         }
+    }
+
+    /// AE#464: set the audio presentation offset. Positive delivers audio later relative to video.
+    ///
+    /// Only the stamp changes; nothing is flushed here. The samples already decoded (up to
+    /// `AudioLookaheadPolicy.targetLeadSeconds` of them on the decoupled VOD arm) still carry the
+    /// previous offset, so a caller that wants the change to be audible now re-anchors at the
+    /// playhead afterwards. `AetherEngine.setAudioDelay` does exactly that.
+    func setAudioDelay(_ seconds: Double) {
+        audioDelaySeconds = seconds
+        audioOutput?.setPresentationOffset(seconds: seconds)
     }
 
     func setResumeRate(_ rate: Float) {

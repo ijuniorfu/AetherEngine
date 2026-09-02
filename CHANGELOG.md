@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.62.1] - 2026-09-02
+
 ### Fixed
 
 - **An audio track with no decoder no longer costs the whole probe budget (AE#466).** An ATSC 3.0

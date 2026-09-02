@@ -602,6 +602,25 @@ extension AetherEngine {
         return caps.supportsHDR10 ? .hdr10 : .sdr
     }
 
+    /// The format to publish as `videoFormat`: what the panel is presenting, not what the file carries
+    /// (`sourceVideoFormat` is that). One funnel for both the load-time answer and the late one the #459
+    /// playback probe can produce seconds later, so the two cannot drift apart.
+    ///
+    /// The HDR10+ carry-over exists because the two can arrive in either order. `handleHDR10PlusDetected`
+    /// upgrades a `videoFormat` that already reads `.hdr10`, and on a panel whose answer is still pending
+    /// the label reads `.sdr` when the T.35 payload lands, so the upgrade is skipped and the evidence
+    /// survives in `sourceVideoFormat` alone. Republishing the bare effective format would then relabel a
+    /// proven HDR10+ session "HDR10+ -> HDR10", trading one wrong arrow for a quieter one.
+    nonisolated static func presentedVideoFormat(
+        effectiveFormat: VideoFormat,
+        panelPresentsHDR: Bool,
+        sourceVideoFormat: VideoFormat
+    ) -> VideoFormat {
+        guard effectiveFormat != .sdr, panelPresentsHDR else { return .sdr }
+        if effectiveFormat == .hdr10, sourceVideoFormat == .hdr10Plus { return .hdr10Plus }
+        return effectiveFormat
+    }
+
     private nonisolated static func streamHasDV(stream: UnsafeMutablePointer<AVStream>) -> Bool {
         let nb = Int(stream.pointee.codecpar.pointee.nb_coded_side_data)
         guard nb > 0, let sideData = stream.pointee.codecpar.pointee.coded_side_data else {

@@ -1564,6 +1564,14 @@ public final class AetherEngine: ObservableObject {
     /// which is the same defect `matchContentEnabled` had before the replay existed.
     func setLoadedTeletextPage(_ page: Int?) { loadedOptions.teletextPage = page }
 
+    /// AE#460: the second narrow write into `loadedOptions` outside a load, for a host correction
+    /// that a session-preserving reload is about to rebuild on. Installed before the rebuild rather
+    /// than carried through it, because only the URL branch passes a struct into `load`: the
+    /// custom-source branch reaches `reloadWithAudioOverride`, which reads these fields one by one.
+    /// Callers go through `reloadAtCurrentPosition(applying:)`, which refuses the load-identity
+    /// fields first; this setter does not re-check them.
+    func applySessionOptionCorrection(_ options: LoadOptions) { loadedOptions = options }
+
     #if DEBUG
     /// Test-only: install LoadOptions without a load (#88 unit tests exercise selection gating).
     func setLoadedOptionsForTesting(_ options: LoadOptions) { loadedOptions = options }
@@ -6121,6 +6129,13 @@ public enum AetherEngineError: Error, LocalizedError {
     /// the software path would decode it as YCbCr (green/purple cast), so the load fails instead.
     /// AV1 P10.0 requires hardware AV1 decode; HEVC P5 requires a seekable source for the native path.
     case dolbyVisionUnplayableOnSoftwarePath(profile: String)
+    /// AE#460: `reloadAtCurrentPosition(applying:)` was handed a change to a `LoadOptions` field
+    /// that names the session rather than tunes it. The session is untouched and still playing;
+    /// changing these means loading the source again.
+    case loadIdentityNotCorrectable(fields: [String])
+    /// AE#460: this session cannot be rebuilt in place. Read `sessionReloadRefusal` to ask the same
+    /// question without attempting the reload.
+    case sessionNotReloadable(SessionReloadRefusal)
 
     public var errorDescription: String? {
         switch self {
@@ -6130,6 +6145,13 @@ public enum AetherEngineError: Error, LocalizedError {
             return "HLS playlist supplied to the raw live path. Use LoadOptions.nativeRemoteHLS or HLSLiveIngestReader for m3u8 sources."
         case .dolbyVisionUnplayableOnSoftwarePath(let profile):
             return "Dolby Vision Profile \(profile) has no compatible base layer and cannot be color-correctly decoded on the software playback path"
+        case .loadIdentityNotCorrectable(let fields):
+            let named = "LoadOptions." + fields.joined(separator: ", LoadOptions.")
+            return fields.count == 1
+                ? "\(named) names the session and cannot be changed by a session-preserving reload; load the source again to change it"
+                : "\(named) name the session and cannot be changed by a session-preserving reload; load the source again to change them"
+        case .sessionNotReloadable(let refusal):
+            return "The session cannot be rebuilt at its current position: \(refusal)"
         }
     }
 }

@@ -105,6 +105,51 @@ iOS 26's Automatic Subtitles (show when muted, on skip back, on a language misma
 
 Read `audioTapHasDeliverySource` synchronously after installing: false means the stream will finish without yielding (no session, a video-only source, a backend with no tap path), which is the moment to fail loudly rather than await an empty stream.
 
+### Correcting a `LoadOption` without restarting the item
+
+`reloadAtCurrentPosition(applying:)` is the session-preserving rebuild with the options it replays
+taken from the host rather than from the session (#460).
+
+```swift
+try await player.reloadAtCurrentPosition { $0.httpHeaders["Authorization"] = "Bearer \(fresh)" }
+```
+
+The closure is seeded with the options the session is CURRENTLY running on, which is not always what
+was passed to `load`: the engine rewrites its own routing fields on a reroute. Change what needs
+correcting and leave the rest alone. The change is installed into the session before the rebuild, so
+every internal reopen that follows (an audio switch, a background reload) replays the correction
+instead of reverting to the load-time value.
+
+A fresh `load()` is not the same thing, which is the whole reason this exists. `load` cannot reach
+`subtitleSessionCarryover` or `isLiveRejoin`, both settable only from inside the engine, so it wipes
+the id-exact external-subtitle registry, every mid-session `addExternalSubtitleTrack`, the host's
+explicit subtitle authority (subtitles explicitly OFF included) and the live rejoin contract, and
+re-derives them by auto-selection. This reload keeps all of it, at the same teardown cost the plain
+`reloadAtCurrentPosition()` already pays.
+
+Two refusals, both raised BEFORE any teardown, so a refused correction leaves the session playing:
+
+| Thrown | When |
+| --- | --- |
+| `AetherEngineError.loadIdentityNotCorrectable(fields:)` | the closure changed `isLive`, `audioOnly`, `nativeRemoteHLS` or `sequentialOrigin`. These name the session rather than tune it (each opens the source on a different pipeline, and the engine writes the last two itself), so changing one is a different item, not a correction of this one. Load the source again. |
+| `AetherEngineError.sessionNotReloadable(_:)` | there is no session, or the source is a custom `IOReader` that reported itself non-seekable and cannot be reopened at the current position. |
+
+Both are all-or-nothing: a correction refused for one field installs none of it.
+
+**Where a correction lands.** A URL source rebuilds through the full `load`, so every field applies.
+A custom `IOReader` source rebuilds through the narrower reopen that keeps the retained reader, and
+that path replays `loadedOptions` field by field instead of passing a struct through `load`: the
+routing, probe-budget, live-join, deinterlace and subtitle-preparation fields all apply there, but
+the four consumed by `load` itself (`preferredAudioLanguages`, `externalSubtitles`,
+`maxConcurrentSourceRequests`, `autoplay`) are installed and take effect at the next load. The
+custom reload carries the session's explicit audio pick and its own subtitle re-arm, so the two
+language lists have nothing to decide on that path anyway.
+
+Unlike `reloadAtCurrentPosition()`, which returns silently when there is nothing to rebuild, this one
+throws, because a host correcting a session has to tell "corrected" from "did nothing" to decide
+whether to fall through to a fresh load. `sessionReloadRefusal` answers the same question about
+either reload without attempting one.
+
 ### What must be set before `load()`
 
 | Set before the load | Why |

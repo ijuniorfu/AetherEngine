@@ -22,6 +22,12 @@ protocol HLSSegmentProvider: AnyObject {
     /// has gone is answered with an error response rather than the bytes the bookkeeping promised.
     func mediaSegmentURL(at index: Int) -> URL?
 
+    /// AE#418 round 7: what became of a media-segment request. `delivered` is true once the whole
+    /// response went out; false when it was refused or the write failed on a client that hung up.
+    /// The axis is a statement about bytes in AVPlayer's timeline, so a placement composed from a
+    /// request needs to know whether that request was answered. Default ignores it.
+    func didServeMediaSegment(index: Int, delivered: Bool)
+
     var segmentCount: Int { get }
     func segmentDuration(at index: Int) -> Double
 
@@ -132,6 +138,7 @@ protocol HLSSegmentProvider: AnyObject {
 extension HLSSegmentProvider {
     func mediaSegment(at index: Int, onSlow: (@Sendable () -> Void)?) -> Data? { mediaSegment(at: index) }
     func mediaSegmentURL(at index: Int) -> URL? { nil }
+    func didServeMediaSegment(index: Int, delivered: Bool) {}
     var staticMasterPlaylistBody: String? { nil }
     var firstVisibleSegmentIndex: Int { 0 }
     func segmentIsDiscontinuous(at index: Int) -> Bool { false }
@@ -850,12 +857,29 @@ final class HLSLocalServer: @unchecked Sendable {
                 stateLock.lock(); servedMediaBytes = true; stateLock.unlock()
                 let indexStr = normalizedPath.dropFirst(4).dropLast(4)
                 if let index = Int(indexStr), index >= 0 {
+                    // AE#418 round 7: every exit from this branch says what became of the request, so
+                    // a placement composed from it can tell "not delivered yet" from "never arriving".
+                    func delivered(_ ok: Bool) -> Bool {
+                        provider?.didServeMediaSegment(index: index, delivered: ok)
+                        return ok
+                    }
+                    func refused(_ responseWritten: Bool) -> Bool {
+                        provider?.didServeMediaSegment(index: index, delivered: false)
+                        return responseWritten
+                    }
                     // File-backed fast path: stream page cache -> socket without Data materialization.
                     if let url = provider?.mediaSegmentURL(at: index) {
-                        return send200File(fd: fd, path: normalizedPath,
-                                            fileURL: url,
-                                            contentType: "video/mp4",
-                                            segmentIndex: index)
+                        let outcome = send200File(fd: fd, path: normalizedPath,
+                                                  fileURL: url,
+                                                  contentType: "video/mp4",
+                                                  segmentIndex: index)
+                        // A cache entry can outlive its file, and that answer is a retriable 503: the
+                        // request is not answered yet, so it says nothing about the placement.
+                        switch outcome.body {
+                        case .segment: return delivered(outcome.writeSucceeded)
+                        case .refusal: return refused(outcome.writeSucceeded)
+                        case .retry: return outcome.writeSucceeded
+                        }
                     }
                     // #93 round 3: a serve outliving the provider's slow threshold (wedge-window
                     // restart, 25-50 s worst case) emits response headers NOW as a chunked
@@ -880,13 +904,13 @@ final class HLSLocalServer: @unchecked Sendable {
                                 "[HLSLocalServer] seg\(index): early-header serve missed; "
                                 + "closing connection for AVPlayer retry",
                                 category: .hlsServer)
-                            return false
+                            return refused(false)
                         }
-                        return sendChunkedBody(fd: fd, path: normalizedPath, data: data)
+                        return delivered(sendChunkedBody(fd: fd, path: normalizedPath, data: data))
                     }
                     if let data, !data.isEmpty {
-                        return send200(fd: fd, path: normalizedPath, data: data,
-                                       contentType: "video/mp4")
+                        return delivered(send200(fd: fd, path: normalizedPath, data: data,
+                                                 contentType: "video/mp4"))
                     }
                     let providerCount = provider?.segmentCount ?? -1
                     let reason = "segment[\(index)] empty (segmentCount=\(providerCount))"
@@ -894,11 +918,13 @@ final class HLSLocalServer: @unchecked Sendable {
                         index: index, segmentCount: providerCount, hasData: false) {
                     case .serve:
                         // Unreachable: hasData is false here.
-                        return send404(fd: fd, path: normalizedPath, reason: reason)
+                        return refused(send404(fd: fd, path: normalizedPath, reason: reason))
                     case .retryLater:
+                        // A 503 is retriable, so the request is not answered yet; the placement waits
+                        // for the retry rather than concluding from it.
                         return send503(fd: fd, path: normalizedPath, reason: reason)
                     case .notFound:
-                        return send404(fd: fd, path: normalizedPath, reason: reason)
+                        return refused(send404(fd: fd, path: normalizedPath, reason: reason))
                     }
                 }
                 return send404(fd: fd, path: normalizedPath,
@@ -990,8 +1016,13 @@ final class HLSLocalServer: @unchecked Sendable {
         return writeAll(fd: fd, data: data, path: path)
     }
 
+    /// What a file-backed serve answered with, alongside whether the write went through. AE#418
+    /// round 7 needs the two apart: a 503 for a cache entry whose file is gone is a request still
+    /// waiting for its retry, and a write that succeeded on it delivered no segment.
+    enum FileServeBody { case segment, refusal, retry }
+
     private func send200File(fd: Int32, path: String, fileURL: URL, contentType: String,
-                             segmentIndex: Int? = nil) -> Bool {
+                             segmentIndex: Int? = nil) -> (body: FileServeBody, writeSucceeded: Bool) {
         let fsAttrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
         let fileSize = (fsAttrs?[.size] as? Int) ?? 0
         if fileSize == 0 {
@@ -1004,9 +1035,9 @@ final class HLSLocalServer: @unchecked Sendable {
                Self.classifySegmentResponse(index: segmentIndex,
                                             segmentCount: provider?.segmentCount ?? -1,
                                             hasData: false) == .retryLater {
-                return send503(fd: fd, path: path, reason: reason)
+                return (.retry, send503(fd: fd, path: path, reason: reason))
             }
-            return send404(fd: fd, path: path, reason: reason)
+            return (.refusal, send404(fd: fd, path: path, reason: reason))
         }
 
         let headerData = Self.responseHeader(status: "200 OK", contentLength: fileSize, contentType: contentType)
@@ -1015,10 +1046,10 @@ final class HLSLocalServer: @unchecked Sendable {
                        category: .hlsServer, level: .verbose)
 
         guard writeAll(fd: fd, data: headerData, path: "\(path) [header]") else {
-            return false
+            return (.segment, false)
         }
-        return streamFileToSocket(fileURL: fileURL, socketFd: fd, path: path,
-                           expectedLength: fileSize)
+        return (.segment, streamFileToSocket(fileURL: fileURL, socketFd: fd, path: path,
+                                             expectedLength: fileSize))
     }
 
     private func send404(fd: Int32, path: String, reason: String) -> Bool {

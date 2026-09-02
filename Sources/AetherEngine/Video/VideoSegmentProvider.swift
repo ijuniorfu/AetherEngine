@@ -392,6 +392,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#418: fired with the index AVPlayer just placed into its timeline. What that segment
     /// carries below its advertised start is what moves the axis every consumer folds with.
     private let segmentPlacedHandler: (@Sendable (Int) -> Void)?
+    /// AE#418 round 7: what the server made of that request. Set alongside the placed handler.
+    private let segmentServedHandler: (@Sendable (Int, Bool) -> Void)?
     /// Sodalite#32 Phase 2: tap-fed stores can carry raw ASS event lines (the overlay renders the
     /// styling); the WebVTT rendition must serve plain text, so strip at build time.
     private let stripASSMarkupInVTT: Bool
@@ -566,7 +568,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         nativeSubtitleDefaultOrdinal: Int = 0,
         nativeSubtitleWholeProgram: Bool = false,
         currentShiftSeconds: @escaping @Sendable () -> Double = { 0 },
-        segmentPlacedHandler: (@Sendable (Int) -> Void)? = nil
+        segmentPlacedHandler: (@Sendable (Int) -> Void)? = nil,
+        segmentServedHandler: (@Sendable (Int, Bool) -> Void)? = nil
     ) {
         self.cache = cache
         self.segments = segments
@@ -603,6 +606,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.nativeSubtitleWholeProgram = nativeSubtitleWholeProgram
         self.currentShiftSeconds = currentShiftSeconds
         self.segmentPlacedHandler = segmentPlacedHandler
+        self.segmentServedHandler = segmentServedHandler
     }
 
     /// Append a finalized live segment. Index must equal segments.count; out-of-order ignored.
@@ -1015,6 +1019,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         /// Folded again after that re-anchor, which is the repair reproducing its own trigger. No
         /// further attempt changes the outcome, so the source fails instead of freezing.
         case fail
+    }
+
+    /// AE#418 round 7: the server's account of a media-segment response, forwarded to the session so
+    /// a placement can tell a request still being answered from one that never will be.
+    func didServeMediaSegment(index: Int, delivered: Bool) {
+        segmentServedHandler?(index, delivered)
     }
 
     /// AE#418 round 2: whether this request puts a segment into AVPlayer's timeline anew.

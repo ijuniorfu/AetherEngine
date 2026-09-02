@@ -12,6 +12,37 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.62.0] - 2026-09-02
+
+### Fixed
+
+- **A panel parked in HDR is asked again once frames are running (AE#459).** An Apple TV whose
+  output format is fixed to HDR labelled every HDR10+/DV session "HDR -> SDR" and was served
+  media-direct with no HDR signaling, because `currentPanelIsHDR()` answers from
+  `UIScreen.currentEDRHeadroom` and that value is a transition artifact: raised around a
+  dynamic-range switch, decayed back to 1.00 while the panel keeps presenting HDR. Every reading it
+  got was taken around the display-criteria write, which is the one moment a panel already parked in
+  HDR has nothing to report. No transition means the live reading is 1.00, and the
+  `panelProvenToEngageHDR` latch that covers a decayed reading is armed only by such a reading, so
+  both terms of `panelPresentsHDR` were dead for that configuration and it read SDR forever. A
+  bounded probe (250 ms, 12 s) now re-asks the panel once frames are on screen, through the same
+  `observeHeadroom` funnel, so one reading latches the proof for every later load in the process. It
+  samples during steady playback rather than across a mode switch, so it is less exposed to a switch
+  transient than the load-time reads are, and it does not re-route the running session: the proof
+  makes the next load route correctly on its own. Device measurement behind the window (Apple TV 4K
+  3rd gen, tvOS 26.5, HDR10 panel, one title twice): output fixed to 4K HDR reads headroom 1.20 at
+  t+2.5s and 1.00 at t+20s, output fixed to 4K SDR reads a flat 1.00, so the rise comes with HDR
+  content reaching the screen rather than with an HDMI mode switch and separates the two setups
+  `AVPlayer.eligibleForHDRPlayback` conflates. A window that closes with no reading is logged with
+  its max headroom and sample count, which is the one thing no log line could report before. The
+  first HDR load of a process on such a panel still routes media-direct, since no proof can exist
+  before any playback; its label corrects itself within seconds.
+- **The published video format has one funnel (AE#459).** `presentedVideoFormat` now produces the
+  label at load time and after a late proof, so the two cannot drift, and it carries the HDR10+
+  upgrade across: T.35 detection fires while the label still reads SDR and `handleHDR10PlusDetected`
+  only upgrades an `.hdr10` label, so republishing the bare effective format would have relabelled a
+  proven HDR10+ session "HDR10+ -> HDR10".
+
 ## [6.61.0] - 2026-09-01
 
 ### Fixed

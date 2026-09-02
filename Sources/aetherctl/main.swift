@@ -74,6 +74,7 @@ func printUsage() {
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
                  [--reload-applying <key>=<value>]... [--reload-applying-at <ms>]
+                 [--drop-audio]
                  [--sequential-origin] [--declared-duration S]
              [--max-concurrent-requests N]
                      [--audio-stats] [--host-calls play,extractor,setrate,reloadlive,seekback,seekfar] <url>
@@ -87,6 +88,9 @@ func printUsage() {
                       applying a language preference just after play, default +20 ms;
                       --teletext-page fixes the caption page at load, while
                       --switch-teletext-page changes it on the playing channel
+                      --drop-audio forces the audio pipeline to fail (AE#462), so
+                      the video-only drop and its published audioDelivery can be
+                      observed without a source this build cannot decode
                       (default +20 s, i.e. after --subs has a track showing);
                       --reload-applying corrects a LoadOption on the playing
                       session through #460's session-preserving reload, repeatable;
@@ -565,6 +569,13 @@ if first == "play" {
     let seekCount = takeIntFlag("--seek-count", from: &rest)
     let mallocCensus = takeFlag("--malloc-census", from: &rest)
     let playForceSW = takeFlag("--sw", from: &rest)
+    // AE#462: force the audio pipeline to fail so the video-only drop is observable end to end.
+    // There is no fixture for it: the drop needs a codec this build has no decoder for (AC-4 is the
+    // realistic one), and a threshold that plausible is worth less than the real published value.
+    if takeFlag("--drop-audio", from: &rest) {
+        AetherEngine.setForceAudioPipelineFailureForTesting(true)
+        print("[aetherctl] TEST-ONLY: audio pipeline forced to fail (AE#462 video-only drop)")
+    }
     let censusThresholdMB = takeIntFlag("--census-threshold-mb", from: &rest)
     let censusHz = takeDoubleFlag("--census-hz", from: &rest)
     // Slow-CDN simulation, same hook as `serve` / `seektest`: a local file lets the producer race

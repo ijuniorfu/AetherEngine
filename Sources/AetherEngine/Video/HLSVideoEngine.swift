@@ -375,6 +375,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// nil when no audio pipeline is live.
     public internal(set) var audioPipelineDescription: String?
 
+    /// AE#462: the same cascade result as a typed fact, so a host can act on it. The label above is
+    /// for a human and cannot separate the two ways of ending up with no pipeline: a source that has
+    /// no audio track and a source whose audio could not be delivered both leave it nil, and only the
+    /// second is a reason for a fallback ladder to demote. Set at each of the cascade's three exits.
+    public internal(set) var audioDelivery: AudioDelivery = .none
+
     /// Producer's `videoShiftPts` in seconds, updated on every gate open. AVPlayer clock =
     /// `source_pts - playlistShiftSeconds`. Lock-guarded: written on pump thread, read on others.
     public var playlistShiftSeconds: Double {

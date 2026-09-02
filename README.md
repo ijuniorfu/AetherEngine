@@ -185,6 +185,15 @@ player.$videoRoute     // pipeline actually serving the session: .remoteBypass (
                        // bypass and the loopback, mid-session too. Branch on this where behaviour
                        // differs per pipeline, above all who draws subtitles: on .remoteBypass
                        // AVPlayer renders the origin's renditions, elsewhere the host renders.
+player.$audioDelivery  // how the audio reaches the renderer: .streamCopy / .bridged / .decoded /
+                       // .noAudioInSource / .playerManaged (AVFoundation owns it) / .none, and
+                       // .droppedNoPipeline: the source HAS audio and none of it could be
+                       // delivered (no decoder in this build, or the bridge could not be built),
+                       // so the session plays video-only and silently. That is the value a
+                       // fallback ladder demotes on, the same way it demotes on the
+                       // PlaybackErrorKind.audioBridgeProducedNoOutput at the other end of the
+                       // cascade. Classify on this; $activeAudioDecoder is the label for a human
+                       // and cannot separate a source without audio from one that lost it.
 player.$hasFirstFrameReadyForDisplay
                        // the running path has a first frame ready for display, for the media THIS
                        // load opened: the edge a black cover comes off on. readyToPlay is not that

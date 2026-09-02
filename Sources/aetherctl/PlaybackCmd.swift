@@ -543,6 +543,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     // internal reroute can have moved this run off the route the flags asked for.
     print("backend=\(engine.playbackBackend.rawValue) route=\(engine.videoRoute.rawValue) "
           + "duration=\(String(format: "%.1f", engine.duration))s isLive=\(engine.isLive)")
+    // AE#462: the typed delivery next to the human label, because they answer different questions:
+    // the label names the pipeline, the delivery says whether there is one at all.
+    print("audio delivery=\(engine.audioDelivery.rawValue) "
+          + "pipeline=\(engine.activeAudioDecoder ?? "none") tracks=\(engine.audioTracks.count)")
     if frameTimes {
         if let timebase = engine.softwarePresentationTimebase {
             print(String(format: "  timebase: present, time=%.3fs rate=%.2f", timebase.time.seconds, timebase.rate))

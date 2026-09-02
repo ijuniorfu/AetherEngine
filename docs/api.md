@@ -191,6 +191,46 @@ Three properties worth knowing:
   demuxes and decodes nothing, so there is no decode path to prefer. The engine logs that it
   ignored the preference rather than letting it look applied.
 
+### Reading whether the audio was delivered
+
+`$audioDelivery` publishes an `AudioDelivery`: how this session's audio reaches the renderer, as a
+typed fact rather than as something to reconstruct (AE#462).
+
+| Value | Meaning |
+| --- | --- |
+| `.none` | no session |
+| `.noAudioInSource` | the source carries no audio track, or none was selected |
+| `.streamCopy` | the source bitstream is muxed into fMP4 unchanged (Atmos, DTS-HD and everything else reach the renderer as authored) |
+| `.bridged` | decoded and re-encoded to FLAC or E-AC-3 for the fMP4 pipeline; lossless for the bed channels, object metadata does not survive the PCM intermediate |
+| `.decoded` | libavcodec decodes and the engine renders it (the software path, the FFmpeg audio-only host) |
+| `.droppedNoPipeline` | the source HAS audio and none of it could be delivered: no decoder for it in this build, or the bridge could not be built or could not write its header. The session plays video-only and silently |
+| `.playerManaged` | AVFoundation owns the audio (the remote-HLS bypass, the native audio-only host). The engine has no pipeline of its own to classify and does not answer on AVFoundation's behalf |
+
+**`.droppedNoPipeline` is the one a fallback ladder acts on**, the same way it demotes on
+`PlaybackErrorKind.audioBridgeProducedNoOutput`. The two are the same user outcome from opposite
+ends of the cascade: that kind fails loudly when a bridge WAS built and then decoded nothing, this
+value reports a bridge that could never be built at all. Neither ends a ladder: re-serving the
+source with audio the pipeline can carry (a server-side transcode, a second player that decodes it
+itself) plays it.
+
+It is not a `PlaybackErrorKind` because that taxonomy is terminal: `state` moves to `.error` and
+`errorInfo` is cleared by the state's own move away from it. Video-only playback is neither
+terminal nor an error for every host.
+
+```swift
+player.$audioDelivery
+    .filter { $0 == .droppedNoPipeline }
+    .sink { _ in ladder.demote(reason: .silentVideo) }
+```
+
+`$activeAudioDecoder` is the same fact for a human ("Stream-copy (EAC3+JOC Atmos)",
+`"TrueHD → FLAC bridge"`, `"libavcodec AC3 → CoreAudio"`) and stays the right thing to show in a
+stats overlay. Do not classify on it: it cannot separate a source with no audio from a source whose
+audio was dropped, and before AE#462 it was outright wrong on the software path, where it was built
+from the probe's track list and so named a decoder that had refused to open. Both publishers are
+now written from the pipeline that serves the session, so `.droppedNoPipeline` and a nil label
+arrive together.
+
 ### What must be set before `load()`
 
 | Set before the load | Why |
@@ -347,12 +387,13 @@ Time lives on `player.clock`, a separate `ObservableObject`, so ~10 Hz ticks nev
 | `$hasFirstFrameReadyForDisplay` | The picture for **this** load is up. A picture, not motion: a live join presents its first frame and can then hold it bit-static for seconds while AVPlayer decides whether to start (AE#440), so a host dropping a spinner here drops it onto a frozen frame. Use `$playbackPhase` for "it is moving". Latched for the load, cleared at the next `load()` / `stop()`. Audio-only sessions never arm it. On an external screen (`isExternalPlaybackActive`) the local layer never reaches readiness, so the item's readiness is the honest edge and the flag latches there (#315). |
 | `$startupProgress` | `StartupProgress?` for a determinate loading bar. |
 | `$videoRoute` | `VideoRoute`: which pipeline is actually serving, one of `.none`, `.remoteBypass`, `.loopback`, `.software`, `.audio`. `LoadOptions.nativeRemoteHLS` is only the request; the carriage watchdog, the remembered verdict and the HLS reroutes move a session between routes, mid-session too. Branch on this, above all for who draws subtitles. |
+| `$audioDelivery` | `AudioDelivery`: how the audio reaches the renderer, one of `.none`, `.noAudioInSource`, `.streamCopy`, `.bridged`, `.decoded`, `.droppedNoPipeline`, `.playerManaged`. `.droppedNoPipeline` is a source that HAS audio playing video-only because no pipeline could be built for it: the value a fallback ladder demotes on. See [Reading whether the audio was delivered](#reading-whether-the-audio-was-delivered). |
 | `$videoFormat` | The format being presented: `.sdr`, `.hdr10`, `.hdr10Plus`, `.dolbyVision`, `.hlg`. |
 | `$sourceVideoFormat` | The format the **source** carries, before any panel-driven mapping. The pair is what an honest badge needs: HDR content on an SDR panel differs between the two. |
 | `$sourceDVProfile`, `$sourceVideoFrameRate`, `$sourceVideoBitrate` | Source detail for an info panel. |
 | `$sourceVideoCodecName` | The source video codec in the libavcodec spelling ("hevc", "h264", "av1"), nil when the source carries no video. The probe-free remote-HLS bypass maps it back from the item's video sample type, so the field answers on every route rather than going quiet on one of them. Not the same question as `$activeVideoDecoder`: a codec has several decoders, and which one runs depends on the hardware. |
 | `$sourceContainerFormat` | The container libavformat opened ("matroska,webm", "mpegts"), nil on the remote-HLS bypass, where AVFoundation opens the source and there is no libav context to ask. This is the container that ARRIVED, which on a remux or transcode session is not the one a host's library metadata describes. |
-| `$activeVideoDecoder`, `$activeAudioDecoder` | The decoder names actually in use, for a stats overlay. This is the honest "what is decoding this" surface; `playbackBackend` is not. |
+| `$activeVideoDecoder`, `$activeAudioDecoder` | The decoder names actually in use, for a stats overlay. This is the honest "what is decoding this" surface; `playbackBackend` is not. Show `$activeAudioDecoder`, classify on `$audioDelivery`: a label cannot separate a source without audio from a source whose audio was dropped. |
 | `$metadata` | `MediaMetadata` parsed at load (title / artist / album / cover). |
 | `$mediaChapters`, `$discChapters`, `$discTitles`, `$selectedDiscTitle` | Container chapters, and disc titles / chapters for DVD and Blu-ray ISO sources. |
 | `$currentAVPlayer`, `$currentAVPlayerItem` | The live AVFoundation objects, re-emitted on every reload. Both nil on `.software`, which renders into its own layer. A host that only ever hands `currentAVPlayer` to an `AVPlayerViewController` gets audio over an empty video plane on that route (#298). |

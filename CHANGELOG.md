@@ -10,7 +10,36 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **The video-only audio drop is a typed, published fact (AE#462).** `$audioDelivery` publishes an
+  `AudioDelivery`: `.streamCopy`, `.bridged`, `.decoded`, `.noAudioInSource`, `.playerManaged`, or
+  `.droppedNoPipeline`, the one a fallback ladder acts on. A source whose audio can neither
+  stream-copy into fMP4 nor go through the bridge plays video-only: `state` reaches `.playing`,
+  nothing failed by the error taxonomy's lights, and the only account was a log line. Hosts could
+  reconstruct the drop from a non-empty `audioTracks` paired with a nil `activeAudioDecoder`, an
+  undocumented pairing of two publishers that BROKE IN BOTH DIRECTIONS: it read as a drop where the
+  probe had merely failed to list the tracks, and it read as healthy on the software path, whose
+  label is built from the probe rather than from the decoder that was opened. Not a
+  `PlaybackErrorKind`, because that taxonomy is terminal (`publishError` moves `state` to `.error`
+  and `errorInfo` is cleared by the state's own move away from it) and video-only playback is
+  neither terminal nor an error for every host. It is the counterpart of
+  `audioBridgeProducedNoOutput`, which is the same user outcome from the other end of the cascade:
+  that kind fails loudly when a bridge WAS built and decoded nothing, this value reports one that
+  could never be built. Derived from `playbackBackend` + the session options + the live pipeline's
+  own classification, never assigned on its own, so it cannot drift from the running session.
+  Requested by @cmcpherson274.
+
+### Fixed
+
+- **The software path published a decoder label for audio it had dropped (AE#462).**
+  `activeAudioDecoder` was built from the PROBE's track list, so a session whose `AudioDecoder.open`
+  had refused the stream, gone video-only and set its audio index to -1 still published
+  `"libavcodec AC3 -> CoreAudio"`. It is now built from the host's own resolved index, which also
+  fixes the case the label got wrong the other way: the #133 live-TS by-type fallback resolves an
+  index the engine's pick does not know about. Measured in both arms on a forced drop
+  (`aetherctl play --sw --drop-audio`): `pipeline=libavcodec AAC -> CoreAudio` before,
+  `pipeline=none` after, with `audio delivery=droppedNoPipeline` in both.
 
 ## [6.64.0] - 2026-09-02
 

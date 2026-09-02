@@ -42,7 +42,7 @@ struct ResidentRangesTests {
         ]
     }
 
-    @Test("index islands map onto the seek presentation axis")
+    @Test("index islands map onto the playlist axis the plan is cut on")
     func mapping() {
         let session = HLSVideoEngine(url: URL(string: "https://example.com/video.mkv")!)
         let cache = SegmentCache(forwardWindow: 10, backwardWindow: 10)
@@ -51,7 +51,7 @@ struct ResidentRangesTests {
         session.cache = cache
         for index in [0, 1, 3] { cache.store(index: index, data: Data([0])) }
 
-        #expect(session.residentRanges() == [0...12, 20...30])
+        #expect(session.residentPlaylistRanges() == [0...12, 20...30])
     }
 
     @Test("live sessions do not publish VOD cache ranges")
@@ -66,7 +66,7 @@ struct ResidentRangesTests {
         session.cache = cache
         cache.store(index: 0, data: Data([0]))
 
-        #expect(session.residentRanges().isEmpty)
+        #expect(session.residentPlaylistRanges().isEmpty)
     }
 
     @MainActor
@@ -83,6 +83,10 @@ struct ResidentRangesTests {
         session.cache = cache
 
         let engine = try AetherEngine()
+        // A shift the fold has to survive end to end: with the plan seconds published raw this reads
+        // 5...12, which is the AE#468 follow-up defect and not what a host draws its scrubber on.
+        engine.sourcePresentationOrigin = 100
+        engine.playlistShiftSeconds = 103
         engine.nativeVideoSession = session
         let recorder = Recorder(engine: engine)
 
@@ -91,7 +95,60 @@ struct ResidentRangesTests {
         cache.evictBelow(2)
         await recorder.waitForCount(2)
 
-        #expect(recorder.values == [[5...12], []])
+        #expect(recorder.values == [[8...15], []])
         engine.nativeVideoSession = nil
+    }
+
+    /// AE#468 follow-up. The plan is cut on the playlist axis; `currentTime`, `duration` and
+    /// `seek(to:)` live on the 0-based display axis, and AE#270 made the two differ on exactly this
+    /// path (the origin is the container's start, the shift also carries the producer's drift).
+    /// Publishing plan seconds raw put the band beside the host's own scrubber.
+    @MainActor
+    @Test("the published band folds onto the display axis, not the plan's")
+    func foldsOntoDisplayAxis() throws {
+        let engine = try AetherEngine()
+        engine.sourcePresentationOrigin = 100
+        engine.playlistShiftSeconds = 102.5
+        engine.residentPlaylistRanges = [0...12, 20...30]
+
+        engine.republishResidentRanges()
+
+        #expect(engine.residentRanges == [2.5...14.5, 22.5...32.5])
+    }
+
+    /// The seam map decides the shift per position, so bytes below a seam keep folding with the
+    /// producer that muxed them, the same rule the clock fold follows.
+    @MainActor
+    @Test("a seam folds the spans below it with the retired producer's shift")
+    func foldsPerSeam() throws {
+        let engine = try AetherEngine()
+        engine.sourcePresentationOrigin = 0
+        engine.playlistShiftSeconds = 5
+        var map = PresentationAxisMap.anchored(shiftSeconds: 1)
+        map.appendSeam(shiftSeconds: 5, activatingAtItemSeconds: 20)
+        engine.setPresentationAxis(map)
+        engine.residentPlaylistRanges = [0...12, 20...30]
+
+        engine.republishResidentRanges()
+
+        #expect(engine.residentRanges == [1...13, 25...35])
+    }
+
+    /// A producer restart republishes the shift without touching the cache. The band has to re-fold
+    /// then, or it carries the retired epoch's offset until the next segment happens to land.
+    @MainActor
+    @Test("a shift change re-folds a band the cache did not touch")
+    func shiftChangeRefolds() throws {
+        let engine = try AetherEngine()
+        engine.sourcePresentationOrigin = 0
+        engine.playlistShiftSeconds = 0
+        engine.residentPlaylistRanges = [10...20]
+        engine.republishResidentRanges()
+        #expect(engine.residentRanges == [10...20])
+
+        engine.playlistShiftSeconds = 2
+        engine.republishResidentRanges()
+
+        #expect(engine.residentRanges == [12...22])
     }
 }

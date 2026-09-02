@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.64.0] - 2026-09-02
+
 ### Added
 
 - **A per-session escape onto the software decode path (AE#461).**

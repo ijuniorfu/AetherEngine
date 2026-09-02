@@ -414,10 +414,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var measuredLeadCoefficient: Double? {
         return Self.leadCoefficientEstimate(from: leadCoefficientSamples)
     }
-    /// AE#418 round 7: what the local server did with the request each placement was counted from.
-    /// `true` once its bytes went out, `false` when the response failed. A placement is a request that
-    /// was ANSWERED, and until it is answered there is nothing to conclude from an empty buffer.
-    private var segmentDeliveredByIndex: [Int: Bool] = [:]
+    /// AE#418 round 7: what the local server did with the request each placement was counted from,
+    /// stamped with the serial of the answer. `true` once its bytes went out, `false` when the
+    /// response failed. A placement is a request that was ANSWERED, and until it is answered there is
+    /// nothing to conclude from an empty buffer. The serial is what keeps an OLD answer for the same
+    /// index (a segment served once, seeked back to, and requested again) from answering for a
+    /// request still in flight.
+    private var segmentDeliveryByIndex: [Int: (serial: Int, delivered: Bool)] = [:]
+    private var segmentDeliverySerial = 0
     /// AE#418 round 5: whether any placement has established a mapping in this item's timeline. The
     /// first one does not compose onto anything (AVPlayer anchors the item on its first PRESENTED
     /// sample, measured base 0.000 on every arm of the fixture), every later one does.
@@ -2515,7 +2519,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let superseded = lastPublishedPlacement
         lastPublishedPlacement = PublishedPlacement(
             index: index, advertisedStart: plannedStart, worth: epochShift, assumedBase: base,
-            axisInForce: current, presentationLead: lead)
+            axisInForce: current, presentationLead: lead,
+            deliverySerialAtCompose: segmentDeliverySerial)
         hasComposedPlacement = true
         anchorShiftLock.unlock()
         if let superseded {
@@ -2693,6 +2698,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let axisInForce: Double
         /// What this epoch's gating sample is presented after its own decode time.
         let presentationLead: Double
+        /// AE#418 round 7: how many segment responses this session had completed when the placement
+        /// was composed, so a later answer can be told from the one before it.
+        let deliverySerialAtCompose: Int
     }
 
     /// Below this a re-publish moves nothing anyone can see, and publishing anyway would have the
@@ -2940,7 +2948,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         publishPlaylistShift(
             placement.axisInForce,
             seamItemSeconds: Self.seamItemSeconds(
-                advertisedStart: placement.advertisedStart, currentShift: placement.axisInForce))
+                advertisedStart: placement.advertisedStart, currentShift: placement.assumedBase))
     }
 
     /// AE#418 round 7: what the local server made of the request this placement was counted from. A
@@ -2949,20 +2957,29 @@ public final class HLSVideoEngine: @unchecked Sendable {
     func recordSegmentDelivery(index: Int, delivered: Bool) {
         guard !isLiveSession else { return }
         anchorShiftLock.lock()
-        if segmentDeliveredByIndex.count > 64 { segmentDeliveredByIndex.removeAll(keepingCapacity: true) }
-        segmentDeliveredByIndex[index] = delivered
+        segmentDeliverySerial += 1
+        if segmentDeliveryByIndex.count > 128 {
+            // Only the neighbourhood of what is being served can still be waited on; a placement is
+            // checked within seconds of its own request.
+            segmentDeliveryByIndex = segmentDeliveryByIndex.filter { abs($0.key - index) <= 64 }
+        }
+        segmentDeliveryByIndex[index] = (segmentDeliverySerial, delivered)
         anchorShiftLock.unlock()
     }
 
     /// Where a reading came from, which decides what it is allowed to teach.
     enum ReadingSource: Sendable { case ownRun, rebuiltTimeline }
 
-    /// nil while the request is still outstanding.
+    /// nil while the request behind the pending placement is still outstanding. An answer recorded
+    /// BEFORE that placement was composed belongs to an earlier request for the same index.
     var pendingPlacementDelivery: Bool? {
         anchorShiftLock.lock()
         defer { anchorShiftLock.unlock() }
-        guard let placement = lastPublishedPlacement else { return nil }
-        return segmentDeliveredByIndex[placement.index]
+        guard let placement = lastPublishedPlacement,
+              let answer = segmentDeliveryByIndex[placement.index],
+              answer.serial > placement.deliverySerialAtCompose
+        else { return nil }
+        return answer.delivered
     }
 
     /// Where the placement being checked says its bytes begin: through the base the composition

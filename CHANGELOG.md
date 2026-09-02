@@ -10,7 +10,33 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **A per-session escape onto the software decode path (AE#461).**
+  `LoadOptions.preferredDecodePath` (`.automatic` / `.software`) serves a source through
+  `SoftwarePlaybackHost` whatever the routing concluded, scoped to the session.
+  `VTCapabilityProbe.canHardwareDecode` FAILS OPEN BY DESIGN: four classes it cannot classify (no
+  extradata, Annex-B extradata, in-band parameter sets, a format-description build failure) keep the
+  native path, which is the right default and occasionally wrong. When VideoToolbox then cannot build
+  a decoder for what arrives, the item reaches `readyToPlay` and renders nothing, and the in-band
+  parameter-set class is where the deciding evidence genuinely is not present at load time. A live
+  load never reaches that gate at all, so a live session had no classification step and no escape.
+  The two levers that existed were both wrong for the job: `setForceSoftwarePathForTesting` is
+  process-global and drags every concurrent session on a shared engine, and the only per-session
+  route onto that host was presenting a custom `IOReader` whose seek fails, which reaches it by
+  costing the source its seeks, its mid-session audio switch, its title switch and
+  `reloadAtCurrentPosition` itself. ONE-WAY BY CONSTRUCTION: there is no `.native`, because every
+  route the engine sends to software it sends there because the native path cannot serve it, so
+  forcing native past that buys a black screen. It also does not suspend what the software path
+  cannot represent: an IPT-PQ-c2 source (Dolby Vision HEVC P5, AV1 P10.0) still fails with
+  `dolbyVisionUnplayableOnSoftwarePath` rather than rendering green/purple, and a demuxed-audio live
+  source still fails rather than playing silent. On `nativeRemoteHLS` there is no decode path to
+  prefer and the engine logs that it ignored the preference. Composes with #460: measured on a 300 s
+  H.264 fixture, a session dispatching `codec=27 -> native` took
+  `reloadAtCurrentPosition { $0.preferredDecodePath = .software }` at t=9.90 s and came back
+  `codec=27 -> software`, playing, at 10.81 s. `aetherctl play --sw` now drives the real option
+  instead of the test hook, and `--reload-applying decode-path=software` drives the correction.
+  Requested by @cmcpherson274.
 
 ## [6.63.0] - 2026-09-02
 

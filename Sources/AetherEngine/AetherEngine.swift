@@ -3153,6 +3153,17 @@ public final class AetherEngine: ObservableObject {
         // nativeRemoteHLS: skip probe + loopback; play HLS URL directly with AVPlayer (Jellyfin already serves HLS).
         // Routed before the probe because we never demux the m3u8.
         if options.nativeRemoteHLS {
+            // AE#461: the bypass demuxes nothing and builds no decoder of its own (AVPlayer plays the
+            // remote playlist), so a decode-path preference has nothing to act on here. Say so rather
+            // than let it look like it was applied.
+            if options.preferredDecodePath == .software {
+                EngineLog.emit(
+                    "[AetherEngine] #461: preferredDecodePath=.software ignored on the nativeRemoteHLS "
+                    + "bypass; AVPlayer plays the remote playlist and the engine decodes nothing. Drop "
+                    + "nativeRemoteHLS to reach a decode path the engine owns.",
+                    category: .engine
+                )
+            }
             // #316: this bypass returns before the probe path's registration, so a host that declared
             // sidecars at load time used to get nothing at all, silently. Seat them here instead.
             registerDeclaredExternalSubtitles(options)
@@ -3752,6 +3763,29 @@ public final class AetherEngine: ObservableObject {
                 EngineLog.emit("[AetherEngine] source is forward-only, forcing software path", category: .engine)
             }
         }
+        // AE#461: the host's own routing override, scoped to this session. Placed last among the
+        // routing decisions and before the guards below, because it is an override: it wins over
+        // what the engine concluded, and it does not get to suspend what the software path cannot
+        // represent. The two levers that existed before this were both wrong for the job: the test
+        // hook below is process-global (on a shared engine it drags every concurrent session with
+        // it), and the only per-session route onto the software host was presenting a reader that
+        // fails its seek, which costs the source its seeks, its audio switch, its title switch and
+        // `reloadAtCurrentPosition` itself. Unlike the #2 capability gate this is NOT VOD-only: a
+        // live load never reaches that gate at all, and a live session is exactly where a host has
+        // no second engine left to hand a struggling stream to.
+        if options.preferredDecodePath == .software {
+            // Stating the no-op matters here for the same reason it does for #364's teletext page:
+            // a host that asked for software and saw software cannot otherwise tell "the engine had
+            // already routed there" from "the request did not arrive".
+            EngineLog.emit(
+                useSoftwarePath
+                    ? "[AetherEngine] #461: host asked for the software path; the routing had already chosen it"
+                    : "[AetherEngine] #461: host asked for the software path, overriding the native route",
+                category: .engine
+            )
+        }
+        useSoftwarePath = VideoRoutingPolicy.usesSoftwarePath(
+            routedSoftware: useSoftwarePath, preferred: options.preferredDecodePath)
         // TEST-ONLY: forces SW path for aetherctl live --sw; unset in shipping builds.
         if Self.forceSoftwarePathForTesting {
             useSoftwarePath = true

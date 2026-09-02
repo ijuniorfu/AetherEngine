@@ -150,6 +150,47 @@ throws, because a host correcting a session has to tell "corrected" from "did no
 whether to fall through to a fresh load. `sessionReloadRefusal` returns the same `SessionReloadRefusal` for
 either reload without attempting one, and nil when a rebuild would happen.
 
+### Overriding the decode path
+
+`LoadOptions.preferredDecodePath` is the per-session escape onto `SoftwarePlaybackHost` (#461).
+
+```swift
+// at load
+options.preferredDecodePath = .software
+// or on a session that is already playing, through the #460 reload
+try await player.reloadAtCurrentPosition { $0.preferredDecodePath = .software }
+```
+
+`VTCapabilityProbe.canHardwareDecode` **fails open by design**: four classes it cannot classify
+(no extradata, Annex-B extradata, in-band parameter sets, a format-description build failure) keep
+the native path. That is the right default, and occasionally wrong. When VideoToolbox then cannot
+build a decoder for what arrives, the item reaches `readyToPlay` and renders nothing, and in-band
+parameter sets (`hev1` / `avc1` with an empty config record) are the class where the deciding
+evidence genuinely is not present at load time. A live load never reaches that gate at all: the
+capability check is VOD-only, so a live session keeps the native path with no classification step.
+
+Detecting the symptom is a host's own job and is not hard (`AVPlayerItemVideoOutput.hasNewPixelBuffer`
+against `softwareHostFramesEnqueued`, both already exposed). The escape was the missing half. Before
+this the two levers were `setForceSoftwarePathForTesting`, which is process-global and therefore
+drags every concurrent session on a shared engine, and presenting a custom `IOReader` whose seek
+fails, which reaches the software host by costing the source its seeks, its mid-session audio
+switch, its title switch and `reloadAtCurrentPosition` itself.
+
+Three properties worth knowing:
+
+- **One-way.** `DecodePath` has `.automatic` and `.software`, and no `.native`. Every route the
+  engine sends to software it sends there because the native path cannot serve it (AV1 without
+  hardware decode, VP9, a forward-only source, MVC carriage), so forcing native past those buys a
+  black screen. A host's evidence is only ever "this native session is not decoding".
+- **It does not suspend what the software path cannot represent.** A source whose only signal is
+  IPT-PQ-c2 (Dolby Vision HEVC Profile 5, AV1 Profile 10.0) still fails the load with
+  `dolbyVisionUnplayableOnSoftwarePath` rather than decoding as YCbCr and rendering green/purple,
+  and a demuxed-audio live source still fails rather than playing silent. An override says which
+  host serves the session, not what that host can do.
+- **`nativeRemoteHLS` is a different route.** AVPlayer plays the remote playlist and the engine
+  demuxes and decodes nothing, so there is no decode path to prefer. The engine logs that it
+  ignored the preference rather than letting it look applied.
+
 ### What must be set before `load()`
 
 | Set before the load | Why |
@@ -549,6 +590,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `omitCriteriaColorExtensions` | false | Diagnostic lever: leave colour out of `AVDisplayCriteria` so AVPlayer re-reads it from the bitstream. |
 | `keepDvh1TagWithoutDV` | false | Diagnostic lever: force dvh1 tags and a master playlist regardless of display capability. |
 | `forceDolbyVisionOnNonDVDisplay` | false | **Experimental (AE#455).** On a display with no Dolby Vision of its own, serve an HEVC Profile 8.1 source the way a Profile 5 source is served (`dvh1` sample entry, `dvcC` rewritten to profile 5 / compatibility 0, `CODECS="dvh1.05.LL"`), so AVPlayer composes the RPU itself instead of handing the panel the static-metadata HDR10 base layer. The bitstream is untouched; only the container's claim about it changes. Ignored on a display that does Dolby Vision, and Profile 8.1 only. See [formats.md](formats.md#dolby-vision-signaling) for what it buys and what it risks. |
+| `preferredDecodePath` | `.automatic` | A `DecodePath`. `.software` serves this source through `SoftwarePlaybackHost` whatever the routing concluded, scoped to this session and costing the source nothing (seeks, the audio switch and the title switch all keep working). The escape for the formats `VTCapabilityProbe` deliberately cannot classify, and for live, which never reaches that gate at all. One-way: there is no `.native`. See [Overriding the decode path](#overriding-the-decode-path). |
 | `deinterlaceMode` | `.auto` | A `DeinterlaceMode` for the software path: the Metal / VideoToolbox graph with a CPU bwdif fallback, or `.software` to force the CPU path. |
 | `deinterlaceFieldRate` | `.field` | A `DeinterlaceFieldRate`: the hardware deinterlacer emits one frame per field (25i to 50p) or per frame. The software fallback is always frame rate, because doubling a CPU bwdif is the wrong trade and a fallback should not change cost class. |
 | `probesize`, `maxAnalyzeDuration` | nil | Caller-bounded open-time probe budget (defaults 50 MB / 60 s). They fail **open**: an over-tight budget loads with late-resolving tracks silently missing rather than throwing, so validate track presence if you tighten them. Do not pass `0` for `maxAnalyzeDuration`; FFmpeg maps it to a shorter heuristic. |

@@ -188,7 +188,7 @@ enum SessionOptionCorrection {
         "nativeSubtitlePreferredLanguages", "sequentialOrigin", "maxConcurrentSourceRequests",
         "declaredDurationSeconds", "probesize", "maxAnalyzeDuration", "preferredAudioLanguages",
         "preferredSubtitleLanguages", "externalSubtitles", "forwardBufferSegments", "autoplay",
-        "teletextPage", "deinterlaceMode", "deinterlaceFieldRate", "isLiveRejoin",
-        "subtitleSessionCarryover",
+        "teletextPage", "deinterlaceMode", "deinterlaceFieldRate", "preferredDecodePath",
+        "isLiveRejoin", "subtitleSessionCarryover",
     ]
 }

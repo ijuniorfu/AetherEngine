@@ -12,6 +12,43 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.66.0] - 2026-09-02
+
+### Added
+
+- **A session-preserving audio delay for lip-sync correction (AE#464).** `setAudioDelay(_:)` plus
+  `LoadOptions.audioDelaySeconds`: positive presents audio later than video, clamped to +/-2 s, and
+  the value holds across the rebuilds a session makes on its own (reload at position, audio-track
+  switch, AirPlay LAN swap, background return) because it lives in the options those rebuilds
+  replay. Lip-sync error belongs to the viewer's chain rather than to the file, and AVFoundation
+  offers a host nothing to correct it with: `AVPlayerItem` carries no audio-delay control, and an
+  HLS-streamed asset vends no `AVAssetTrack` for an `AVAudioMix` to bind to. The offset is therefore
+  applied where the engine still holds the timestamps, which is a different place per route and on
+  both of them the LAST place rather than the obvious one. On `.software` it rides the delivered
+  sample's stamp inside `AudioOutput.enqueue`, downstream of the #95 audio tap (whose `sourceTime`
+  is the source axis and feeds transcription), downstream of the gapless `AudioClockAnchor` (which
+  reads anything under its 100 ms threshold as container rounding and would swallow a small nudge
+  whole), and downstream of the look-ahead's own lead bookkeeping. On `.loopback` it is written into
+  the audio track of the fMP4 segments, fixed per muxer, because two offsets in one output track are
+  not splicable: the seam gains a gap or an overlap of exactly the change, and a change that moves
+  audio earlier is clamped away by `OutputTimestampSanitizer`'s strictly-increasing DTS rule. Video
+  is never moved on either route, so `currentTime`, seeking and the subtitle axis are untouched by a
+  nudge. `.remoteBypass` and audio-only sessions keep the value for the next load and log the no-op
+  rather than pretending. Measured off the served segments with ffprobe: against a source alignment
+  of +21.8 ms, a +200 ms setting delivers +221.8 ms and a -150 ms setting delivers -128.2 ms, with
+  the video timestamp unchanged in every arm. Requested by @cmcpherson274.
+
+  Not free the way `setRate` is, and the cost is stated rather than hidden: the media between the
+  offset and the speaker is already committed to the previous value, so a change is brought to the
+  playhead. On `.software` that is a seek to the current position (measured: set at t=4.90 s, landed
+  at 4.90 s). On `.loopback` it is the session-preserving reload #460 added, because a seek is not
+  enough there: seeking to the position AVPlayer already holds is a buffer hit and plays the
+  old-offset segments out regardless, dropping those segments under it turns the hand-over into a
+  6 s rebuffer, and asking for the producer restart beside the seek is reported as a user scrub and
+  leaves a stalled seek ticket behind. Measured: about 0.3 s of held picture, position preserved
+  7.80 s to 7.80 s. A live session without a DVR window has no position to return to and takes the
+  new value at the next seam it makes on its own.
+
 ## [6.65.0] - 2026-09-02
 
 ### Added

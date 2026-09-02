@@ -136,6 +136,15 @@ Two refusals, both raised BEFORE any teardown, so a refused correction leaves th
 
 Both are all-or-nothing: a correction refused for one field installs none of it.
 
+**Where a correction lands.** A URL source rebuilds through the full `load`, so every field applies.
+A custom `IOReader` source rebuilds through the narrower reopen that keeps the retained reader, and
+that path replays `loadedOptions` field by field instead of passing a struct through `load`: the
+routing, probe-budget, live-join, deinterlace and subtitle-preparation fields all apply there, but
+the four consumed by `load` itself (`preferredAudioLanguages`, `externalSubtitles`,
+`maxConcurrentSourceRequests`, `autoplay`) are installed and take effect at the next load. The
+custom reload carries the session's explicit audio pick and its own subtitle re-arm, so the two
+language lists have nothing to decide on that path anyway.
+
 Unlike `reloadAtCurrentPosition()`, which returns silently when there is nothing to rebuild, this one
 throws, because a host correcting a session has to tell "corrected" from "did nothing" to decide
 whether to fall through to a fresh load. `sessionReloadRefusal` answers the same question about

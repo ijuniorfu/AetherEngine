@@ -1492,6 +1492,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
     }
 
     /// Returns absolute segment index for a live video packet; cuts on keyframes past targetSegmentDurationSeconds.
+    ///
+    /// AE#446 round 6: seg-0's recorded start is a PRESENTATION time, and the shift anchors the first
+    /// DECODE time at 0, so on a source with frame reordering the first segment of a live session
+    /// begins one presentation lead above zero rather than at 0.000 (`lead=` on the gate-open line).
+    /// That is the number the item's stated axis carries, and it is a property of the source: 0.033s
+    /// on a 60 fps `-bf 3` seed here, 0.050s on the reporter's broadcast TS, 0.000s on the bundled
+    /// seed, which is why a harness that only ran the bundled seed made zero look like a rule.
     private func liveVideoSegmentIndex(pts: Int64, isKeyframe: Bool) -> Int {
         let ptsSeconds = Double(pts) * sourceVideoTbSeconds
         if !liveFirstSegmentOpened {

@@ -51,6 +51,18 @@ final class OriginRequestBudget: @unchecked Sendable {
     private static let firstQuietPeriod: TimeInterval = 2
     private static let maximumQuietPeriod: TimeInterval = 15
     private static let quietSecondsToDisarm: TimeInterval = 60
+    /// Longest single wait a paced caller takes before re-reading the books. Only an injected clock
+    /// needs this to be shorter than the whole debt: a clock that moves without the wall clock
+    /// cannot shorten a wait that has already been entered.
+    private static let pacerWaitSliceSeconds: TimeInterval = 0.25
+
+    /// Test seam: caps the quiet period a refusal arms on THIS budget, and **zero leaves the pacer
+    /// unarmed entirely**. The ladder is wall-clock by design, so a suite whose subject is the
+    /// concurrency ceiling or the resolved-URL ladder would otherwise block a thread for 2 to 15 s
+    /// per refusal on a rule it is not testing, and five such tests were enough to starve unrelated
+    /// suites of threads on a CI runner. Pinned on `.shared` by those suites; the pacer's own tests
+    /// build their own instances and keep the shipped ladder.
+    var quietPeriodCapForTesting: TimeInterval?
 
     /// Scheme + host + port, matching `SuffixRangeSupport.originKey`. Deliberately NOT the full
     /// URL: a metered CDN hands out signed URLs with a rotating token, so a per-URL budget would
@@ -266,14 +278,18 @@ final class OriginRequestBudget: @unchecked Sendable {
         state.lastRefillAt = instant
     }
 
-    /// The caller already owns a concurrency slot. Hold it while the pacer waits: taking the slot
-    /// first keeps the two admission rules in one order, so two callers cannot each hold one gate
-    /// while waiting for the other. Polling is bounded and intentionally short so an injected test
-    /// clock can advance without making the test spend the production quiet period on wall time.
-    private func ticketAfterPacing(raw: String, label: String, started: DispatchTime,
-                                   timeout: TimeInterval, slotWaitedMs: Double) -> Ticket {
+    /// Wait until this origin's pacer allows one more request. Returns the milliseconds spent
+    /// waiting, or nil when `timeout` measured from `started` ran out first.
+    ///
+    /// **Nothing is held while this waits.** A pacer token is consumed, not held, so a caller
+    /// parked here occupies no slot. Waiting for the token INSIDE a slot (the shape this replaces)
+    /// turned a rate rule into a concurrency rule: on a single-slot origin one paced request parked
+    /// every other path behind it for the whole quiet period, and a suite full of readers doing that
+    /// blocked enough threads that unrelated tests could not get one.
+    private func waitForPacerToken(raw: String, label: String, started: DispatchTime,
+                                   timeout: TimeInterval) -> Double? {
         var pacingStarted: DispatchTime?
-        let poller = DispatchSemaphore(value: 0)
+        let sleeper = DispatchSemaphore(value: 0)
         while true {
             let instant = now()
             lock.lock()
@@ -284,11 +300,7 @@ final class OriginRequestBudget: @unchecked Sendable {
             guard let quietUntil = state.quietUntil else {
                 origins[key] = state
                 lock.unlock()
-                let waitedMs = slotWaitedMs > 0
-                    ? Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds)
-                        / 1_000_000
-                    : 0
-                return Ticket(key: raw, label: label, waitedMs: waitedMs, granted: true)
+                return pacedMilliseconds(since: pacingStarted, label: label, spent: false)
             }
 
             let waitNeeded: TimeInterval
@@ -300,42 +312,37 @@ final class OriginRequestBudget: @unchecked Sendable {
                     state.tokens -= 1
                     origins[key] = state
                     lock.unlock()
-                    let waitedMs = slotWaitedMs > 0 || pacingStarted != nil
-                        ? Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds)
-                            / 1_000_000
-                        : 0
-                    if let pacingStarted {
-                        let pacedMs = Self.elapsedSeconds(from: pacingStarted, to: DispatchTime.now())
-                            * 1_000
-                        EngineLog.emit(
-                            "[OriginBudget] \(label) paced \(Int(pacedMs))ms",
-                            category: .demux, level: .verbose)
-                    }
-                    return Ticket(key: raw, label: label, waitedMs: waitedMs, granted: true)
+                    return pacedMilliseconds(since: pacingStarted, label: label, spent: false)
                 }
                 waitNeeded = (1 - state.tokens) / Self.pacerRefillPerSecond
             }
             origins[key] = state
             lock.unlock()
 
-            let elapsed = Self.elapsedSeconds(from: started, to: DispatchTime.now())
-            let remaining = timeout - elapsed
+            let remaining = timeout - Self.elapsedSeconds(from: started, to: DispatchTime.now())
             guard remaining > 0 else {
-                let waitedMs = elapsed * 1_000
-                if let pacingStarted {
-                    let pacedMs = Self.elapsedSeconds(from: pacingStarted, to: DispatchTime.now())
-                        * 1_000
-                    EngineLog.emit(
-                        "[OriginBudget] \(label) paced \(Int(pacedMs))ms",
-                        category: .demux, level: .verbose)
-                }
-                return Ticket(key: raw, label: label, waitedMs: waitedMs, granted: false)
+                _ = pacedMilliseconds(since: pacingStarted, label: label, spent: true)
+                return nil
             }
 
-            let poll = min(remaining, max(0.001, min(waitNeeded, 0.01)))
             if pacingStarted == nil { pacingStarted = DispatchTime.now() }
-            _ = poller.wait(timeout: .now() + poll)
+            // One wait for as long as the pacer actually owes, rather than a 10 ms poll: the old
+            // shape woke a blocked thread up to a hundred times a second for a quiet period that
+            // reaches 15 s. The slice cap is what an injected test clock needs, since a clock that
+            // moves without the wall clock cannot shorten a wait already entered.
+            let slice = min(remaining, max(0.001, min(waitNeeded, Self.pacerWaitSliceSeconds)))
+            _ = sleeper.wait(timeout: .now() + slice)
         }
+    }
+
+    private func pacedMilliseconds(since pacingStarted: DispatchTime?, label: String,
+                                   spent: Bool) -> Double {
+        guard let pacingStarted else { return 0 }
+        let ms = Self.elapsedSeconds(from: pacingStarted, to: DispatchTime.now()) * 1_000
+        EngineLog.emit(
+            "[OriginBudget] \(label) paced \(Int(ms))ms" + (spent ? ", budget spent" : ""),
+            category: .demux, level: .verbose)
+        return ms
     }
 
     /// Take a slot for one request against `url`, waiting up to `timeout` when the origin is
@@ -350,6 +357,26 @@ final class OriginRequestBudget: @unchecked Sendable {
         guard let raw = Self.originKey(for: url) else { return nil }
 
         let started = DispatchTime.now()
+        // Rate before concurrency. The two rules bind different things and only this order lets a
+        // caller wait for the rate rule without holding the concurrency one.
+        guard let pacedMs = waitForPacerToken(raw: raw, label: label, started: started,
+                                              timeout: timeout) else {
+            // The pacer alone spent the caller's budget. Proceed uncounted-for, the same answer the
+            // slot timeout below gives, and stay honest about being on the link.
+            lock.lock()
+            let spentKey = headLocked(raw)
+            var spent = origins[spentKey] ?? OriginState()
+            spent.inflight += 1
+            spent.peakInflight = max(spent.peakInflight, spent.inflight)
+            origins[spentKey] = spent
+            lock.unlock()
+            let waitedMs = Self.elapsedSeconds(from: started, to: DispatchTime.now()) * 1_000
+            EngineLog.emit(
+                "[OriginBudget] \(label) proceeded without waiting the pacer out after "
+                + "\(Int(waitedMs))ms", category: .demux)
+            return Ticket(key: raw, label: label, waitedMs: waitedMs, granted: false)
+        }
+
         lock.lock()
         let key = headLocked(raw)
         var state = origins[key] ?? OriginState()
@@ -358,21 +385,22 @@ final class OriginRequestBudget: @unchecked Sendable {
             state.peakInflight = max(state.peakInflight, state.inflight)
             origins[key] = state
             lock.unlock()
-            return ticketAfterPacing(raw: raw, label: label, started: started,
-                                     timeout: timeout, slotWaitedMs: 0)
+            return Ticket(key: raw, label: label, waitedMs: pacedMs, granted: true)
         }
         let semaphore = DispatchSemaphore(value: 0)
         state.waiters.append(semaphore)
         origins[key] = state
         lock.unlock()
 
-        let signalled = semaphore.wait(timeout: .now() + timeout) == .success
+        // What the pacer already spent comes off the slot's budget, so the caller's total wait is
+        // the one figure it asked for rather than that figure per gate.
+        let slotBudget = max(0, timeout - Self.elapsedSeconds(from: started, to: DispatchTime.now()))
+        let signalled = semaphore.wait(timeout: .now() + slotBudget) == .success
         let waitedMs = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000
 
         if signalled {
             // `release` counted us in before signalling, so the slot is already ours.
-            return ticketAfterPacing(raw: raw, label: label, started: started,
-                                     timeout: timeout, slotWaitedMs: waitedMs)
+            return Ticket(key: raw, label: label, waitedMs: waitedMs, granted: true)
         }
 
         // Timed out. Drop out of the queue and proceed uncounted-for: a slot handed to us between
@@ -483,14 +511,18 @@ final class OriginRequestBudget: @unchecked Sendable {
         state.refusals += 1
         state.lastRefusalAt = instant
         state.refusalStreak += 1
-        state.tokens = 0
-        state.lastRefillAt = instant
-        let exponent = min(state.refusalStreak - 1, 3)
-        let exponentialQuiet = min(
-            Self.maximumQuietPeriod,
-            Self.firstQuietPeriod * pow(2, Double(exponent)))
-        let quiet = retryAfter.map { max(0, $0) } ?? exponentialQuiet
-        state.quietUntil = instant + quiet
+        // A cap of zero means "do not arm at all", not "arm with a zero quiet period": arming empties
+        // the bucket, and an empty bucket alone still costs two seconds a request at the refill rate.
+        if quietPeriodCapForTesting != 0 {
+            state.tokens = 0
+            state.lastRefillAt = instant
+            let exponent = min(state.refusalStreak - 1, 3)
+            let exponentialQuiet = min(
+                Self.maximumQuietPeriod,
+                Self.firstQuietPeriod * pow(2, Double(exponent)))
+            let asked = retryAfter.map { max(0, $0) } ?? exponentialQuiet
+            state.quietUntil = instant + (quietPeriodCapForTesting.map { min(asked, $0) } ?? asked)
+        }
         let previous = state.limit
         if let hostLimit = state.hostLimit {
             state.limit = hostLimit

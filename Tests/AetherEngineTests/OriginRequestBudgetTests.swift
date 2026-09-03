@@ -179,6 +179,39 @@ struct OriginRequestBudgetTests {
         budget.release(later)
     }
 
+    /// AE#465 round 2. The case the reversed invariant above is actually FOR: at a ceiling of one,
+    /// a paced caller must leave the single slot available, or the rate rule has silently become a
+    /// concurrency outage for every other path against that origin.
+    @Test("a paced caller leaves a single-slot origin's slot available")
+    func pacedCallerLeavesTheSlotFree() async {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+        budget.setHostLimit(1, for: url)
+        budget.noteRefusal(for: url, status: 429)
+
+        let granted = UnsafeFlag()
+        let started = UnsafeFlag()
+        DispatchQueue.global().async {
+            started.set(true)
+            let ticket = budget.acquire(for: self.url, label: "pump", timeout: 30)
+            granted.set(ticket?.granted == true)
+            budget.release(ticket)
+        }
+        #expect(await waitUntil(30) { started.value == true },
+                "the caller never got a thread; nothing about the budget was measured")
+
+        #expect(await waitUntil { budget.snapshot(for: url)?.paced == true })
+        #expect(budget.snapshot(for: url)?.inflight == 0,
+                "the one slot must stay free while its only caller waits on the rate rule")
+        #expect(granted.value == nil, "the pacer's quiet period has not elapsed yet")
+
+        clock.advance(by: 4)
+        #expect(await waitUntil { granted.value == true },
+                "the pacer must hand the caller through once the quiet period is paid")
+        _ = await waitUntil { budget.snapshot(for: url)?.inflight == 0 }
+        #expect(budget.snapshot(for: url)?.inflight == 0, "the granted ticket returns its slot")
+    }
+
     @Test("isPaced follows the pacer's armed, draining, and disarmed states")
     func isPacedReportsThePacerLifetime() {
         let clock = ManualDispatchClock()
@@ -282,14 +315,23 @@ struct OriginRequestBudgetTests {
         let granted = UnsafeFlag()
         DispatchQueue.global().async {
             started.set(true)
-            let ticket = budget.acquire(for: self.url, label: "pump", timeout: 1)
+            // Generous on purpose: the injected clock decides when this is released, so a real
+            // budget short enough for a loaded machine to spend first would make the wall clock the
+            // subject instead.
+            let ticket = budget.acquire(for: self.url, label: "pump", timeout: 30)
             granted.set(ticket?.granted == true)
             budget.release(ticket)
         }
 
         #expect(await waitUntil { started.value == true })
-        #expect(await waitUntil { budget.snapshot(for: url)?.inflight == 1 },
-                "the request owns its concurrency slot while the pacer holds it")
+        // AE#465 round 2 reverses what this used to assert. Owning the slot while the pacer holds
+        // you turns a rate rule into a concurrency rule: on a single-slot origin one paced request
+        // then parks every other path for the whole quiet period, and a suite of readers doing that
+        // blocked enough threads that unrelated CI tests could not get one. A token is consumed,
+        // not held, so nothing is owed to the books until it is granted.
+        #expect(await waitUntil { budget.snapshot(for: url)?.paced == true })
+        #expect(budget.snapshot(for: url)?.inflight == 0,
+                "a request waiting on the rate rule must not be occupying a concurrency slot")
         #expect(granted.value == nil, "the request must remain parked inside the quiet period")
 
         clock.advance(by: 2)

@@ -4221,12 +4221,19 @@ public final class AetherEngine: ObservableObject {
         if isCustomSource {
             // Rebuild on retained reader (seekable only); no URL to reopen.
             guard customSourceIsSeekable, let placeholderURL = loadedURL else { return }
-            await reloadWithAudioOverride(
+            let failure = await reloadWithAudioOverride(
                 url: placeholderURL,
                 audioStreamIndex: selection.audioTrackIndex.map { Int32($0) },
                 expectedGeneration: loadGeneration,
                 discTitleIDOverride: selection.discTitleID
             )
+            // AE#460 follow-up: a rebuild that died leaves the session in `.error`, and this branch
+            // used to return as if it had come back, so `reloadAtCurrentPosition(applying:)`
+            // reported a correction it had not made. The URL branch below has always thrown what
+            // its load threw; both branches now answer the same way. Measured on a live custom
+            // source whose reader read `cancel()` as terminal: the rebuild failed on stream info
+            // and the call still returned success.
+            if let failure { throw failure }
             // The reload restores from its own pre-stopInternal snapshot, which a torn-down session
             // no longer had anything in; replay the parked subtitle pick on top of it.
             if resumesTornDownSession {

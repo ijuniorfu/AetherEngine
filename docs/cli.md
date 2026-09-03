@@ -301,6 +301,24 @@ matches the shape and answers a different question, and only a second arm that a
 tell those two apart. Run both: the Foundation arm is now the control that proves the pool drains,
 and the POSIX arm is the one that measures the engine.
 
+**`--reload-at S` rebuilds the live session in place S seconds in, and `--cancel-latches` is the
+reader that reads `cancel()` as terminal.** The correction it applies (`httpHeaders`) is inert on a
+custom source on purpose: what the arm measures is the REBUILD, not the field. It reports the
+playhead and the reader's cursor on both sides of it, and the closing `LOOKBACK` line states how far
+back the rebuild reached:
+
+```
+  RELOAD at t=60s: playhead=41.52s cursor=15.0MB edge=15.0MB
+  RELOAD done: playhead 41.52s -> 0.00s, reader cursor 15.0 -> 15.8 MB, edge 15.0 -> 15.8 MB
+LOOKBACK: 7 seeks, deepest reach-back 0.0 MB behind the live edge (0 s of source at this rate)
+```
+
+A reach-back of 0 MB is the rebuild rejoining at the edge. Before the AE#460 follow-up the same run
+reported 15.0 MB (61 s of source) and a playhead of 1.90 s: the reopen rewound the host's spool to
+its base and re-read the whole delivered window. `--cancel-latches` is the other arm, and it is a
+control rather than a defect: a reader that treats `cancel()` as terminal cannot serve the rebuild
+that reuses it, so the reopen dies on stream info and the correction throws.
+
 **`--host-carry removeFirst|subdata` is the third arm, and it names a cause rather than measuring
 the engine.** Round 3's census on the reporter's device pinned his footprint to ONE `REALLOC`-tagged
 block growing on an exact x1.25 ladder, holding every byte the session had consumed. That factor is

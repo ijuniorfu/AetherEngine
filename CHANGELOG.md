@@ -26,6 +26,38 @@ the public-API contract.
 
 ### Fixed
 
+- **A live custom source is rebuilt where the session left it, not where the host started
+  (AE#460 follow-up).** An in-place rebuild on a retained `IOReader` (`reloadAtCurrentPosition`,
+  with or without an option correction, plus an audio-track switch, a disc-title switch and a
+  background return) reopened the source from byte 0, because a fresh `AVIOContext` starts its byte
+  axis there. For a VOD reader that is correct and load-bearing: the reopen has to re-read the
+  container header. For a LIVE reader it is a rewind of the host's spool to its base. Measured on
+  `aetherctl customio --live`: the playhead fell from 41.5 s to 1.9 s and the host was asked to
+  re-deliver every byte it had already delivered, 15 MB and a 61 s window, at I/O speed. A live
+  reopen now leaves the reader alone and moves the axis to its cursor instead, which is the same
+  invariant satisfied from the other end and makes the rebuild the edge rejoin `LiveReloadPolicy`
+  already performs on the URL branch. Reach-back across the rebuild went from 15.0 MB to 0.0 MB. A
+  live reader that will not answer `seek(0, SEEK_CUR)` cannot be aligned to and is rewound as
+  before, with a log line saying so. Reported as a read of the branch by @cmcpherson274 while
+  confirming #460; the rewind was worse than the read, and two further defects sat underneath it.
+
+- **A reader the engine is about to reuse is cancelled once, not twice (AE#460 follow-up).**
+  `CustomIOReaderBridge.markClosed()` forwards to `IOReader.cancel()` and was not idempotent, so the
+  torn-down bridge's own `close()` fired a second cancel a moment later, by which time the engine
+  had already handed the same reader to the successor bridge. That second cancel lands in the
+  rebuilt pump's read, and on a live source that read is parked at the edge and comes back -1: the
+  session reported itself playing and then died with `live custom-source pump exited
+  (reason=readError(-1))`. Intermittent before, because a VOD-shaped reader answers from a backlog
+  and is almost never parked. One cancel is also all that is ever needed: after the first, no read
+  reaches the host, so nothing new can park.
+
+- **A failed rebuild of a custom source no longer reports success (AE#460 follow-up).** The
+  custom-source branch of `reloadAtCurrentPosition` published its error and returned as if the
+  session had come back, so `reloadAtCurrentPosition(applying:)` told a host its correction had
+  landed while the session sat in `.error`. That distinction is the reason the throwing overload
+  exists. It now throws what the rebuild threw, the way the URL branch always has; a rebuild
+  superseded by a newer `load` or `stop` still returns normally, because that is not a failure.
+
 - **An origin that refuses is asked less often, not just less concurrently (AE#465, PR by
   @sitepilotusa).** A refusal used to halve the concurrency budget only, which on the measured CDN
   changed nothing: it served eight parallel 32 MB reads happily and first answered 429 after 36

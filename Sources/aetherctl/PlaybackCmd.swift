@@ -462,12 +462,12 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             // off the transport itself, not off anything the engine remembers.
             print("  HOSTCALL setRate(\(Issue436RateHold.rate)) (held across a pause/resume)")
             engine.setRate(Issue436RateHold.rate)
-        case "reloadlive", "seekback", "overlapseek", "ratehold-tail":
-            break  // reloadlive handled at load time, seekback/overlapseek in the telemetry loop
+        case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek":
+            break  // reloadlive handled at load time, seekback/overlapseek/pauseseek in the telemetry loop
         case let call where call.hasPrefix("seekfar"):
             break  // #433, in the telemetry loop; `seekfar@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,reloadlive,seekback,seekfar,overlapseek)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,reloadlive,seekback,seekfar,overlapseek,pauseseek)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }
@@ -715,6 +715,27 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         if hostCalls.contains("seekback"), tick == 30 {
             print("  HOSTCALL seekToLiveEdge()")
             await engine.seekToLiveEdge()
+        }
+        // AE#479: a scrub that lands PAUSED. The SW pump parks in its pause wait and hears of the seek
+        // only at play(), so whatever the 1 Hz `[SWDiag]` line reports for the five paused ticks after
+        // the landing comes from state the seek path itself had to keep honest. `--seek-pattern`'s
+        // first entry picks the target, else 20 s ahead.
+        if hostCalls.contains("pauseseek") {
+            if tick == 12 {
+                print("  HOSTCALL pause()")
+                engine.pause()
+            }
+            if tick == 15 {
+                let target = seekPattern.first ?? min(engine.currentTime + 20, engine.duration * 0.9)
+                print(String(format: "  HOSTCALL seek(to: %.2f) while paused (stays paused until tick 20)", target))
+                await engine.seek(to: target)
+                print(String(format: "  SEEKLANDED target=%.2f (clock=%.2f, state=%@)",
+                             target, engine.currentTime, String(describing: engine.state)))
+            }
+            if tick == 20 {
+                print("  HOSTCALL play()")
+                engine.play()
+            }
         }
         // #292: three transport calls that can land inside a seek's reposition window. A is the
         // reported case (a scrub arriving as two same-target seeks, the second superseding the first);

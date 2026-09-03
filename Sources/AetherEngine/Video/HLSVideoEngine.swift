@@ -2682,6 +2682,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// session whose placements are AE#412 re-cuts (worth 0 and lead 0 by construction), there is
     /// never one. Measured on `tc-wide-cues-lie.mkv`, 13 of 13 placements across two runs carried
     /// `lead 0.000s`; the reporter's three arms produced a single sample between them.
+    ///
+    /// AE#418 round 9: the distance is a MEASUREMENT of a session, and a session's readings can
+    /// disagree by a frame. Reproduced on a ten-placement chain (`--seek-count 24` over a throttled
+    /// origin, 3 of 3 runs byte-identical): nine placements read 0.000 and `seg5` reads 0.042, so the
+    /// composition after it is one frame out and the reading after THAT puts it back. That is the
+    /// reporter's arm 1 exactly (`-0.036`, then `+0.004`, then a placement a frame out). What the two
+    /// disagree on is which reading is the outlier: on the fixture the standing value is 0.000 and one
+    /// reading deviates, on his 23.976 fps asset it is -0.041 and holds to 2 ms across two arms and
+    /// two placements. So neither a median (round 7's rule, which lags a genuine step by one reading
+    /// and would have cost him 0.041 s at `seg589`) nor a hold-until-confirmed rule is right on both,
+    /// and last-wins is kept: the deviation is one frame, it is undone by the next measurable
+    /// placement, and no instrument here resolves better than the frame it would be chasing. The
+    /// picture probe quantises at one frame too.
     static func placementDisplacement(axis: Double, measuredBase: Double) -> Double {
         let raw = axis - measuredBase
         guard raw.isFinite else { return 0 }
@@ -2913,8 +2926,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // timeline AVPlayer rebuilt puts the segment on a base that is a statement about the rebuild,
         // and round 6 let exactly those readings set the parameter (the reporter's 2.00x, and a 21 s
         // residual on the fixture teaching the same value).
+        let teaching: DisplacementTeaching
         if source == .ownRun {
-            learnPlacementDisplacement(from: placement, measuredBase: reading.base)
+            teaching = learnPlacementDisplacement(from: placement, measuredBase: reading.base)
+        } else {
+            anchorShiftLock.lock()
+            let standing = lastPlacementDisplacement
+            anchorShiftLock.unlock()
+            teaching = .notTaught(standing: standing)
         }
         guard abs(reading.residual) > Self.axisRepublishEpsilonSeconds else {
             // Said out loud, because a check that only speaks when it disagrees cannot be told from one
@@ -2922,7 +2941,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             EngineLog.emit(
                 "[HLSVideoEngine] #418 seg\(placement.index) placement confirmed: AVPlayer holds it "
                 + "from item \(String(format: "%.3f", observedItemStart))s, base "
-                + "\(String(format: "%.3f", reading.base))s as published",
+                + "\(String(format: "%.3f", reading.base))s as published; \(teaching.clause)",
                 category: .session
             )
             return
@@ -2933,7 +2952,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             + "\(String(format: "%.3f", observedItemStart))s, clock \(String(format: "%.3f", itemClock))s, "
             + "residual \(String(format: "%+.3f", reading.residual))s): axis "
             + "\(String(format: "%.3f", placement.assumedBase + placement.worth))s -> "
-            + "\(String(format: "%.3f", reading.axis))s",
+            + "\(String(format: "%.3f", reading.axis))s; \(teaching.clause)",
             category: .session
         )
         publishPlaylistShift(reading.axis, seamItemSeconds: reading.seam)
@@ -2947,14 +2966,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// learned instead from the subset of placements carrying a presentation lead, which on a source
     /// without frame reordering, and on any session whose placements are AE#412 re-cuts, is none of
     /// them.
-    private func learnPlacementDisplacement(from placement: PublishedPlacement, measuredBase: Double) {
+    @discardableResult
+    private func learnPlacementDisplacement(
+        from placement: PublishedPlacement, measuredBase: Double
+    ) -> DisplacementTeaching {
         let sample = Self.placementDisplacement(
             axis: placement.axisInForce, measuredBase: measuredBase)
         anchorShiftLock.lock()
         let previous = lastPlacementDisplacement
         lastPlacementDisplacement = sample
         anchorShiftLock.unlock()
-        guard abs(sample - previous) > Self.axisRepublishEpsilonSeconds else { return }
+        guard abs(sample - previous) > Self.axisRepublishEpsilonSeconds else {
+            return .taught(sample: sample, moved: false)
+        }
         EngineLog.emit(
             "[HLSVideoEngine] #418 seg\(placement.index) sat "
             + "\(String(format: "%.3f", sample))s below the axis it composed on, not "
@@ -2963,6 +2987,37 @@ public final class HLSVideoEngine: @unchecked Sendable {
             + "\(String(format: "%.3f", measuredBase))s)",
             category: .session
         )
+        return .taught(sample: sample, moved: true)
+    }
+
+    /// AE#418 round 9: what a reading did to the standing distance, said on the reading's own line.
+    ///
+    /// Round 8 taught from every own-run reading and printed only the moves, so a reading that taught
+    /// the value it already had and a reading that was not allowed to teach at all printed the same
+    /// verdict. The reporter's round-8 retest ends on exactly that: three `placement confirmed` lines
+    /// with no `sat` line under them, and no way from the log to tell which of the two had happened.
+    /// A standing value that every later `placed` line quotes needs its provenance on the line that
+    /// sets it, not in the reader's head.
+    enum DisplacementTeaching: Equatable {
+        /// An own-run reading. `moved` is false when it taught the value already standing, which is a
+        /// confirmation of the distance rather than silence about it.
+        case taught(sample: Double, moved: Bool)
+        /// A reading off a timeline AVPlayer rebuilt, which is a statement about the rebuild and not
+        /// about where a placement sits below its axis (round 7). It corrects the axis and teaches
+        /// nothing.
+        case notTaught(standing: Double)
+
+        var clause: String {
+            switch self {
+            case .taught(let sample, let moved):
+                return moved
+                    ? "taught the distance \(String(format: "%.3f", sample))s"
+                    : "taught the standing distance \(String(format: "%.3f", sample))s again"
+            case .notTaught(let standing):
+                return "taught nothing, read off a rebuilt timeline; the distance stays "
+                    + "\(String(format: "%.3f", standing))s"
+            }
+        }
     }
 
     /// AE#418 round 7: the window closed with no run this placement could be read from, so the

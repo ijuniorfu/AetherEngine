@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.67.0] - 2026-09-03
+
 ### Added
 
 - **The segment cache states where it holds picture (AE#468, PR by @sitepilotusa).**
@@ -68,6 +72,26 @@ the public-API contract.
   site to get wrong. The loopback re-anchor also ran under `try?` beneath a line that had already
   announced the re-cut; it asks `sessionReloadRefusal` before the teardown and names the outcome after
   it, so a re-cut that could not happen no longer reads as one that did.
+
+- **A placement's distance below its axis is measured in seconds, not modelled as a multiple of
+  the lead (AE#418).** Rounds 5, 6 and 7 read that distance as a coefficient on the epoch's
+  presentation lead: shipped as arithmetic, then measured per source, then held as the median of the
+  readings. The premise under all three was that the distance is a geometry of the source, and it is
+  not. Measured with `play --picture-probe` over a throttled origin on three clips identical but for
+  their reorder depth, the same burst arm, 2 runs each and every run identical: a clip with
+  `has_b_frames=0` opens every gate with a lead of exactly zero and still puts its third placement one
+  frame below its axis, which no coefficient can express, and one source placed the same segment twice
+  at 0.000 and then 0.083. So the session carries the distance in the unit it corrects and reads it
+  off the placement reading that already measures the base. Every reading teaches it, a confirmation
+  included, which is what fixes the starvation the reporter measured: before, only a placement
+  carrying a lead could teach, and on his wide-cues asset 13 of 13 placements across two runs carried
+  `lead 0.000s` (an AE#412 re-cut is recorded worth 0 and lead 0, and an item's first placement
+  composes onto nothing), so three arms produced six readings and one sample. An item's first
+  placement is no longer a case of its own: with nothing measured the distance is zero, which is what
+  AVPlayer does there. The gate-open line still prints `lead=` as a source fact. Verified against the
+  picture on 13 arms, 3 runs each, before and after: no arm leaves a fifth of a second the other build
+  does not, both re-aim arms keep their one seam-crossing tick per run, and the mean |capErr| over the
+  eleven frame-scale arms goes 0.0381 to 0.0373. Reported and measured by @rrgomes.
 
 - **The live axis diagnostic names the term it was missing, and the reading it was published with is
   corrected (AE#446).** The line that reports what the replaced reconstruction WOULD have said takes

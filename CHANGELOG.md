@@ -26,6 +26,22 @@ the public-API contract.
 
 ### Fixed
 
+- **The live axis diagnostic names the term it was missing, and the reading it was published with is
+  corrected (AE#446).** The line that reports what the replaced reconstruction WOULD have said takes
+  its "nothing to say yet" exit on two separate signals, the item not having reported a seekable
+  range yet and the producer not holding a resident floor yet, and which one it was could only be
+  established by reading the source. It is named in the line now. The exit is also timing rather
+  than the item kind: measured on two seeds differing only in frame reordering, the same command
+  takes opposite branches on a START item (gate open at 0.11 s against 0.39 s). The premise
+  published with the round-5 fix does not survive that pair either. A live item's zero is the
+  PRESENTATION time of its first frame while the shift anchors the first DECODE time at 0, so a
+  source with frame reordering begins one presentation lead above zero: `-bf 3` at 60 fps gives
+  `lead=3000` (90 kHz), `live seg-0 finalized: start=0.033s` and a stated axis of 0.03 s, `-bf 0`
+  gives 0.000 s and 0.00 s. So the 0.050 s a device reconstructed was that source's own lead and not
+  an error, and the bundled seed's zero is what made zero look like a rule. The engine's behaviour is
+  unchanged; the source comments and the test suite's stated premise are corrected with it. Measured
+  and reported by @cmcpherson274.
+
 - **The silent-bridge ERROR no longer announces a failure during a healthy start-up (AE#474).**
   `AudioBridge`'s AE#396 detector was counted in source packets (64) while the thing that bounds
   it is one encoder frame: `drainFIFOIntoEncoder(requireFull:)` cannot encode below `frame_size`,

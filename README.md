@@ -140,7 +140,7 @@ try await player.load(url: videoURL, options: .init(
     httpHeaders: headers,              // attached to every demux + segment fetch
     matchContentEnabled: matchContent  // tvOS Match Content master toggle
 ))
-try await player.reloadAtCurrentPosition()                      // background reopen, preserves options
+try await player.reloadAtCurrentPosition()                      // background reopen, preserves options + transport
 try await player.load(url: trackURL, options: .init(audioOnly: true))   // lean audio path
 
 // Transport

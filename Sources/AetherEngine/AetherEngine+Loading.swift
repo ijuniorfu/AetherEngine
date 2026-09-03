@@ -1901,7 +1901,9 @@ extension AetherEngine {
         // already playing so an audio switch / background-resume doesn't silently revert to the main title (#67).
         let titleToReopen = discTitleIDOverride ?? activeDiscTitleID
         // resumeOverride 0 restarts a title switch at the new title's head; nil keeps the current playhead.
-        let resumeAt = resumeOverride ?? currentTime
+        // AE#464 round 2: "the current playhead" is not `currentTime` while another load is in flight,
+        // which has already zeroed that clock. See `AetherEngine.rebuildPosition`.
+        let resumeAt = resumeOverride ?? positionForSessionRebuild
         let embeddedStreamToResume: Int32 = activeEmbeddedSubtitleStreamIndex
         let sidecarToResume: URL? = isSubtitleActive && activeEmbeddedSubtitleStreamIndex < 0
             ? loadedSidecarURL
@@ -1940,6 +1942,9 @@ extension AetherEngine {
         )
 
         state = .loading
+        // AE#464 round 2: this branch reaches `loadSoftware` / `loadNative` rather than `load`, so it
+        // parks its own rebuild position for anything that stacks behind it.
+        positionUnderReconstruction = resumeAt
         let previousAudioIndex = activeAudioTrackIndex
         // Snapshot before stopInternal wipes state. Must reload on the same backend: loadNative on a SW-routed AV1 source throws unsupportedCodec (HLSVideoEngine only accepts HEVC / H.264 / VP9 / probed-AV1).
         let wasOnSoftwarePath = (playbackBackend == .software)

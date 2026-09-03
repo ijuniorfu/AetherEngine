@@ -73,7 +73,7 @@ func printUsage() {
       aetherctl play [--seconds N] [--live] [--fast-zap] [--live-start-immediately] [--dvr-window N] [--subs <codec-or-lang>]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
-                 [--audio-delay <ms>] [--switch-audio-delay <ms>[@ms]]
+                 [--audio-delay <ms>] [--switch-audio-delay <ms>[@ms]]... [--paused]
                  [--reload-applying <key>=<value>]... [--reload-applying-at <ms>]
                  [--drop-audio]
                  [--sequential-origin] [--declared-duration S]
@@ -645,15 +645,21 @@ if first == "play" {
     // runtime setter. Same 20 s default as the teletext switch and for the same reason: it has to
     // land on a session that is playing, or it only re-proves the load option.
     let audioDelayMs = takeIntFlag("--audio-delay", from: &rest) ?? 0
-    let audioDelaySwitch: AudioDelaySwitchRequest? = takeStringFlag("--switch-audio-delay", from: &rest).flatMap { spec in
+    // Round 2: repeatable, so a run can press the stepper more than once. The `@ms` suffixes are
+    // what put two presses inside one runloop turn.
+    var audioDelaySwitches: [AudioDelaySwitchRequest] = []
+    while let spec = takeStringFlag("--switch-audio-delay", from: &rest) {
         let parts = spec.split(separator: "@", maxSplits: 1).map(String.init)
         guard let ms = Int(parts[0]) else {
             print("ERROR: --switch-audio-delay takes <ms>[@ms], got '\(spec)'")
             exit(64)
         }
-        return AudioDelaySwitchRequest(milliseconds: ms,
-                                       delayMilliseconds: parts.count == 2 ? (Int(parts[1]) ?? 20_000) : 20_000)
+        audioDelaySwitches.append(AudioDelaySwitchRequest(
+            milliseconds: ms,
+            delayMilliseconds: parts.count == 2 ? (Int(parts[1]) ?? 20_000) : 20_000))
     }
+    // AE#464 round 2: mount with `autoplay = false`, the shape of a host that owns transport.
+    let pausedMount = takeFlag("--paused", from: &rest)
     // #460: `--reload-applying <key>=<value>`, repeatable, with one shared delay. The delay is a
     // separate flag rather than teletext's `@ms` suffix because a header value can carry an `@`.
     // Default +20 s for the same reason the teletext switch uses it: the correction has to land on
@@ -725,7 +731,8 @@ if first == "play" {
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, pictureProbe: pictureProbe, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,
-                 audioDelayMs: audioDelayMs, audioDelaySwitch: audioDelaySwitch,
+                 audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches,
+                 pausedMount: pausedMount,
                  optionCorrection: optionCorrection,
                  sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests,
                  declaredDuration: declaredDuration,

@@ -134,6 +134,23 @@ numbers.
 
 `--audio-delay <ms>` sets `LoadOptions.audioDelaySeconds` for the load, and `--switch-audio-delay <ms>[@ms]` calls `setAudioDelay(_:)` on a session that is already playing (default +20 s, same reason as the teletext switch). The runtime half is the interesting one: at load the offset is just a number handed to a muxer or a renderer, while mid-session it has to reach media the session has already committed to the previous value, and the two routes pay differently for that (a seek on `.software`, the session-preserving reload on `.loopback`). The engine states the delivered offset rather than the requested one: `[AudioOutput] AE#464 audio delay in effect: +200 ms (sample at 3.994s delivered at 4.194s)` on the software path, `[MP4SegmentMuxer] AE#464 cutting seg1+ with audio delay -150 ms` on the loopback one (AE#464).
 
+`--switch-audio-delay` is repeatable and `--paused` mounts with `autoplay = false`, which is what makes
+the round-2 pair of AE#464 reproducible without hardware. `--paused --host-calls play` is a host that
+owns transport (mount paused, play next to its own load), and the rebuild the engine raises for a nudge
+has no such caller: before the fix item #2 settled `timeControlStatus=paused reason=- t+0.00s`, never
+reached `playing`, and the producer parked on `#65 backpressure PARK (advance) ... (consumer paused)`
+while the run still ended `VERDICT: OK`. After it, `#2 timeControlStatus=playing t+0.06s`. Three presses
+inside one runloop turn (`--switch-audio-delay 50@15000 --switch-audio-delay 100@15003
+--switch-audio-delay 150@15006`) stack three reloads, two superseded by generation, and before the fix
+the survivor loaded `startPos=nil` and cut `seg0+` on a session 14.90 s in; after it,
+`startPos=14.90s`, `initial producer anchored at idx=3` and `seg3+`.
+
+`play --live` without `--dvr-window` is the live-only shape, and it is the one that shows the re-anchor
+gate: `AE#464: audio delay = +150 ms stands, but this session cannot re-anchor at the playhead
+(state=playing, live=true); it arrives at the next seam`. With `--dvr-window 1800` the same run takes the
+re-anchor and re-cuts. Before round 2 the gate read `liveWindow != nil`, which is true for both, so the
+live-only session took a rebuild that rejoins at the edge.
+
 `--reload-applying <key>=<value>` (repeatable, with one shared `--reload-applying-at <ms>`, default +20 s) corrects a `LoadOption` on the playing session through `reloadAtCurrentPosition(applying:)` (#460). Keys: `header.<Name>`, `audio-bridge`, `preferred-audio`, `decode-path`, and `is-live`, which is there to drive the refusal, since a field that names the session has to be observably refused rather than observably ignored. Both outcomes print, which is the pair a host's recovery ladder has to tell apart. Pair it with a header-logging origin to read the correction from the other end: with `--header "X-Auth: stale"` at load and `--reload-applying header.X-Auth=fresh`, the origin log shows three requests carrying the stale value, then three carrying the fresh one, and the transport telemetry carries straight through the rebuild (`resumed at 10.90s from 9.90s`).
 
 `play --sw` sets `LoadOptions.preferredDecodePath = .software` (#461), the shipping per-session lever, rather than the process-global `setForceSoftwarePathForTesting` it drove before; that hook is still what `live --sw` and `dvr` use, since those harnesses run several sessions and want every one of them on the software host. `--reload-applying decode-path=software` is the same lever applied to a session that is already playing: on the 300 s H.264 fixture the run dispatches `codec=27 → native`, takes the correction at t=9.90 s and comes back `codec=27 → software` at 10.81 s, playing. On a live load the override reaches the same routing decision, which is the case with no alternative, since the #2 capability gate is VOD-only and a live session is never classified at all.

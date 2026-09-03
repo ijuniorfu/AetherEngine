@@ -26,6 +26,35 @@ the public-API contract.
 
 ### Fixed
 
+- **A session-preserving reload preserves the transport, and keeps the playhead when one is stacked
+  behind another (AE#464 round 2, reported and measured by @cmcpherson274).** `reloadAtCurrentPosition`
+  replayed `LoadOptions.autoplay` verbatim, and that flag describes the FIRST mount rather than the
+  session. A host that owns transport and mounts with `autoplay = false` therefore got a frozen picture
+  and no error out of every rebuild the engine raises on its own (the AirPlay LAN swap, a #460
+  correction, an audio-delay nudge): the rebuilt host settled `paused`, the producer parked on a
+  consumer that would never ask for a segment, and the host went on reporting progress. The rebuild now
+  comes back in the state the session is in, read from the native host's durable #122 intent where there
+  is one, so it survives a rebuild raised mid-scrub. A resume after a background teardown has no
+  transport left to read and is still the host's call, so that path is unchanged. Second half: the
+  reload's position snapshot read `currentTime`, which `load` zeroes at its start, so a reload raised
+  while another was still in flight rebuilt the session at its head. The position each load was handed
+  is parked across that window instead. Measured on a 300 s H.264 + AAC fixture: before, item #2 settled
+  `timeControlStatus=paused t+0.00s` and never left it, and three stepper presses in one runloop turn
+  came back `startPos=nil` cutting `seg0+` on a session 14.90 s in; after, `playing t+0.06s` and
+  `startPos=14.90s` cutting `seg3+`. `autoplay` is consequently not correctable through
+  `reloadAtCurrentPosition(applying:)`; call `play()` / `pause()` instead.
+
+- **The audio-delay re-anchor gate reads the field that carries the distinction, and states what it
+  actually did (AE#464 round 2).** The gate asked `liveWindow != nil`, which is true for every live
+  session (`load` builds one for each), so its own documented branch, that a live source without a DVR
+  window keeps the value for the next seam rather than paying a rebuild, was unreachable: a live-only
+  `.loopback` session took a reload that rejoins at the edge, and a live-only `.software` session issued
+  a seek the engine then refused as `liveWithoutDVR`. `windowSeconds` is what carries it, exactly as the
+  seek path reads it, and the gate takes the window itself now so there is no derivation left at a call
+  site to get wrong. The loopback re-anchor also ran under `try?` beneath a line that had already
+  announced the re-cut; it asks `sessionReloadRefusal` before the teardown and names the outcome after
+  it, so a re-cut that could not happen no longer reads as one that did.
+
 - **The live axis diagnostic names the term it was missing, and the reading it was published with is
   corrected (AE#446).** The line that reports what the replaced reconstruction WOULD have said takes
   its "nothing to say yet" exit on two separate signals, the item not having reported a seekable

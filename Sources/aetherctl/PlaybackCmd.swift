@@ -80,7 +80,8 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
                     censusThresholdMB: Int? = nil, censusHz: Double? = nil, frameTimes: Bool = false, pictureProbe: Bool = false,
                     sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil,
                     teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil,
-                    audioDelayMs: Int = 0, audioDelaySwitch: AudioDelaySwitchRequest? = nil,
+                    audioDelayMs: Int = 0, audioDelaySwitches: [AudioDelaySwitchRequest] = [],
+                    pausedMount: Bool = false,
                     optionCorrection: LoadOptionCorrectionRequest? = nil,
                     sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, declaredDuration: Double? = nil,
                     httpHeaders: [String: String] = [:]) -> Int32 {
@@ -104,7 +105,7 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
     // CFRunLoopRun, not a blocking semaphore: AetherEngine is @MainActor, so parking the main thread would deadlock the executor.
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, forceSoftware: forceSoftware, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, pictureProbe: pictureProbe, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, audioDelayMs: audioDelayMs, audioDelaySwitch: audioDelaySwitch, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, declaredDuration: declaredDuration, httpHeaders: httpHeaders)
+        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, forceSoftware: forceSoftware, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, pictureProbe: pictureProbe, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches, pausedMount: pausedMount, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, declaredDuration: declaredDuration, httpHeaders: httpHeaders)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -289,7 +290,7 @@ private func seekIntentDrill(
 }
 
 @MainActor
-private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware: Bool = false, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, pictureProbe: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, audioDelayMs: Int = 0, audioDelaySwitch: AudioDelaySwitchRequest? = nil, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:]) async -> Int32 {
+private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware: Bool = false, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, pictureProbe: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, audioDelayMs: Int = 0, audioDelaySwitches: [AudioDelaySwitchRequest] = [], pausedMount: Bool = false, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:]) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -377,6 +378,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         maxConcurrentSourceRequests: maxConcurrentRequests,
         declaredDurationSeconds: declaredDuration,
         externalSubtitles: sidecars,
+        // AE#464 round 2: the reporter's mount. A host that drives transport itself loads with
+        // autoplay off and calls play() next to its own load; a rebuild the ENGINE raises has no
+        // such caller, which is what made a mid-play nudge settle paused and stay there.
+        autoplay: !pausedMount,
         teletextPage: teletextPage,
         audioDelaySeconds: Double(audioDelayMs) / 1000.0,   // AE#464
         preferredDecodePath: forceSoftware ? .software : .automatic
@@ -488,7 +493,9 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     // shape as the audio switch below, for the same reason: the delay has to be elapsed time next to
     // a running session, and here it also has to outlast the subtitle selection, or the run measures
     // the load option it was already able to measure before.
-    if let audioDelaySwitch {
+    // AE#464 round 2: repeatable, because a stepper press is repeatable. Three of them inside
+    // one runloop turn is the leg that stacked three reloads and lost the playhead.
+    for audioDelaySwitch in audioDelaySwitches {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(max(0, audioDelaySwitch.delayMilliseconds)) * 1_000_000)
             print("  HOSTCALL setAudioDelay(\(audioDelaySwitch.milliseconds) ms) at "

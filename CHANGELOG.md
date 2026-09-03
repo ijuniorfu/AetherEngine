@@ -26,6 +26,20 @@ the public-API contract.
 
 ### Fixed
 
+- **An audio language ICU can name but not map keeps its label (AE#458 follow-up, found by
+  @htrung14).** `cnr` (Montenegrin) lost its `LANGUAGE` and its master, and so did 56 other
+  three-letter tags: `identifier(.alpha3)` maps only the ISO 639-1 / 639-2 pairs, and CLDR does not
+  alias these to anything, so neither the direct route nor the 6.61.0 canonicalization fallback
+  reached them, although the tag already IS the ISO 639 code. Such a tag now passes through as
+  itself, gated on ICU having a display name for it in a fixed reference locale: that is the
+  validity signal canonicalization does not give, since `canonicalLanguageIdentifier` echoes `dub`
+  and `xyz` back unchanged just as it echoes `cnr`. The locale is fixed rather than the device's,
+  because ICU names `cnr` in English and not in German, and a file must not resolve on one Apple TV
+  and not on the next. Measured end to end on a `cnr`-tagged SDR H.264 fixture: media-direct with
+  `audioLang=none` before, `master.m3u8` with `LANGUAGE="cnr"` after, and a real `AVPlayerItem`
+  reports one audible option reading `Montenegrin`. The same fixture tagged `dub` still serves
+  media-direct with no audible group, which is what failing closed on a track NAME means.
+
 - **A session-preserving reload preserves the transport, and keeps the playhead when one is stacked
   behind another (AE#464 round 2, reported and measured by @cmcpherson274).** `reloadAtCurrentPosition`
   replayed `LoadOptions.autoplay` verbatim, and that flag describes the FIRST mount rather than the

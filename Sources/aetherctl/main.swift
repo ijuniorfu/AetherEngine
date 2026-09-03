@@ -111,8 +111,8 @@ func printUsage() {
       aetherctl audiotap [--duration S] [--out PATH.wav] [--remote | --software] <url>
                          (#95: decode the loopback audio track to mono 48k WAV, print continuity stats;
                           --software runs a real session through the SW sink, exit 3 if it yields no audible PCM)
-      aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] [--audio-index N] <file>
-      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] [--host-carry none|removeFirst|subdata] [--reload-at S] [--cancel-latches] <file.ts>
+      aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] [--audio-index N] [--reload-decode-path automatic|software] <file>
+      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] [--host-carry none|removeFirst|subdata] [--reload-at S] [--cancel-latches] [--reload-decode-path automatic|software] <file.ts>
                          (AE#445: a host-owned live spool behind MediaSource.custom, paced at the mux rate,
                           never EOF, unknown size; prints physFP and its slope against that rate)
       aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
@@ -769,6 +769,16 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     // reader's in-flight-request cancel becomes. Contract says unblock only; this measures the cost
     // of the other reading rather than leaving it to be discovered on a host.
     let customCancelLatches = takeFlag("--cancel-latches", from: &rest)
+    // AE#461 follow-up: drive the decode-path correction on a CUSTOM source. `--reload-at`'s own
+    // correction (an httpHeaders probe) is inert on this shape by design, so it measures the rebuild
+    // and cannot measure this field; this one is the field.
+    let customReloadDecodePath: DecodePath? = takeStringFlag("--reload-decode-path", from: &rest).flatMap { value in
+        guard let path = DecodePath(rawValue: value) else {
+            print("ERROR: --reload-decode-path takes \(DecodePath.allCases.map(\.rawValue).joined(separator: "|")), got '\(value)'")
+            exit(64)
+        }
+        return path
+    }
     let customHostCarry = takeStringFlag("--host-carry", from: &rest) ?? "none"
     guard let customCarryTrim = HostCarryTrim(rawValue: customHostCarry) else {
         print("ERROR: --host-carry expects none|removeFirst|subdata, got '\(customHostCarry)'")
@@ -831,9 +841,10 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
                                     wraps: !customNoWrap, mallocCensus: customMallocCensus,
                                     foundationReader: customFoundationReader,
                                     carryTrim: customCarryTrim, reloadAt: customReloadAt,
-                                    cancelLatches: customCancelLatches))
+                                    cancelLatches: customCancelLatches,
+                                    reloadDecodePath: customReloadDecodePath))
         }
-        exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag, reload: reloadFlag, switchAudio: switchAudioFlag, selectSubs: selectSubsFlag, extract: extractFlag, audioIndex: customAudioIndex))
+        exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag, reload: reloadFlag, switchAudio: switchAudioFlag, selectSubs: selectSubsFlag, extract: extractFlag, audioIndex: customAudioIndex, reloadDecodePath: customReloadDecodePath))
     default:
         printUsage()
         exit(64)

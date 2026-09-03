@@ -319,6 +319,39 @@ its base and re-read the whole delivered window. `--cancel-latches` is the other
 control rather than a defect: a reader that treats `cancel()` as terminal cannot serve the rebuild
 that reuses it, so the reopen dies on stream info and the correction throws.
 
+**`--reload-decode-path automatic|software` makes the correction the decode path itself** (AE#461
+follow-up), on `customio` with `--reload` and on `customio --live` with `--reload-at`. The header
+probe those arms apply by default is inert on a custom source on purpose, so it measures the rebuild
+and can never measure this field; the field is what a host actually corrects. Both arms print the
+backend on each side of the rebuild, which is the whole observable:
+
+```
+  RELOAD applying preferredDecodePath=software: playhead=0.00s backend=native
+[AetherEngine] #461: reload re-routing this session native -> software on the host's preference (custom source: true)
+  RELOAD done: playhead 0.00s -> 0.33s, backend native -> software, decoder=libavcodec H264 (SW)
+```
+
+Before the follow-up the same run logged `#460: reload applying preferredDecodePath` and then
+`backend native -> native, decoder=VideoToolbox H264 (HW)`: accepted, named in the log, ignored.
+
+On a source the software path cannot represent the arm measures the OTHER half, that a refusal costs
+nothing, by reporting the state the refusal left behind rather than exiting on the throw. The Dolby
+browser test kit is the fixture, because it carries its own control:
+
+```
+# Profile 5 (IPT-only): refused, and the session is untouched
+  REFUSED state=playing backend=native playhead=0.00s (was 0.00s) decoder=VideoToolbox HEVC (HW)
+VERDICT: correction refused, session untouched and still playing
+# Profile 8.1, same material and grading: honoured
+  RELOAD done: playhead 0.00s -> 0.26s, backend native -> software, decoder=libavcodec HEVC (SW)
+```
+
+**Read the live arm's retention ratio over a long run, not a short one.** The slope anchors at 60 s
+to skip the load step, which is exactly where `--reload-at 60` puts a SECOND step: the software
+pipeline's own baseline. A 100 s run reads ratio 1.31 and means nothing by it; a 260 s run shows
+`physFP` stepping 25 to 66 MB across the switch and then flat at 67 for 140 s, ratio 0.18 and still
+falling, which is a step being amortized rather than a session retaining anything.
+
 **`--host-carry removeFirst|subdata` is the third arm, and it names a cause rather than measuring
 the engine.** Round 3's census on the reporter's device pinned his footprint to ONE `REALLOC`-tagged
 block growing on an exact x1.25 ladder, holding every byte the session had consumed. That factor is

@@ -257,7 +257,8 @@ final class PacedLiveSpoolIOReader: IOReader, @unchecked Sendable {
 func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow: Double?,
                         reportsSize: Bool, wraps: Bool, mallocCensus: Bool,
                         foundationReader: Bool = false, carryTrim: HostCarryTrim = .none,
-                        reloadAt: Double? = nil, cancelLatches: Bool = false) -> Int32 {
+                        reloadAt: Double? = nil, cancelLatches: Bool = false,
+                        reloadDecodePath: DecodePath? = nil) -> Int32 {
     EngineLog.handler = { print($0) }
     if mallocCensus {
         // Uncapped captures: a steady mux-rate climb spends one capture per threshold climbed, so the
@@ -275,7 +276,9 @@ func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow:
         box.value = await customLiveSpoolRun(path: path, seconds: seconds, rateKbps: rateKbps,
                                              dvrWindow: dvrWindow, reportsSize: reportsSize, wraps: wraps,
                                              foundationReader: foundationReader, carryTrim: carryTrim,
-                                             reloadAt: reloadAt, cancelLatches: cancelLatches)
+                                             reloadAt: reloadAt,
+                                             reloadDecodePath: reloadDecodePath,
+                                             cancelLatches: cancelLatches)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -286,6 +289,7 @@ func runCustomLiveSpool(path: String, seconds: Double, rateKbps: Int, dvrWindow:
 private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dvrWindow: Double?,
                                 reportsSize: Bool, wraps: Bool, foundationReader: Bool,
                                 carryTrim: HostCarryTrim, reloadAt: Double? = nil,
+                                reloadDecodePath: DecodePath? = nil,
                                 cancelLatches: Bool = false) async -> Int32 {
     let reader: PacedLiveSpoolIOReader
     do {
@@ -328,11 +332,21 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
             let beforePos = engine.currentTime
             let beforeCursor = reader.logicalPosition
             let beforeEdge = reader.releasedBytes
-            print(String(format: "  RELOAD at t=%.0fs: playhead=%.2fs cursor=%.1fMB edge=%.1fMB",
+            let beforeBackend = engine.playbackBackend
+            print(String(format: "  RELOAD at t=%.0fs: playhead=%.2fs cursor=%.1fMB edge=%.1fMB backend=%@",
                          reloadAt, beforePos,
-                         Double(beforeCursor) / 1_048_576.0, Double(beforeEdge) / 1_048_576.0))
+                         Double(beforeCursor) / 1_048_576.0, Double(beforeEdge) / 1_048_576.0,
+                         "\(beforeBackend)"))
             do {
-                try await engine.reloadAtCurrentPosition { $0.httpHeaders["X-Aether-Probe"] = "1" }
+                // AE#461 follow-up: with --reload-decode-path the correction is the decode path
+                // itself, which is the field a custom source could not previously be corrected on.
+                // Without it the arm keeps its header probe, which is inert here on purpose and
+                // measures the rebuild rather than any field.
+                if let reloadDecodePath {
+                    try await engine.reloadAtCurrentPosition { $0.preferredDecodePath = reloadDecodePath }
+                } else {
+                    try await engine.reloadAtCurrentPosition { $0.httpHeaders["X-Aether-Probe"] = "1" }
+                }
                 print("  RELOAD returned without throwing, state=\(engine.state)")
             } catch {
                 reloadReport.value = "threw \(error), state=\(engine.state)"
@@ -344,10 +358,11 @@ private func customLiveSpoolRun(path: String, seconds: Double, rateKbps: Int, dv
             let afterCursor = reader.logicalPosition
             let afterEdge = reader.releasedBytes
             reloadReport.value = String(
-                format: "playhead %.2fs -> %.2fs, reader cursor %.1f -> %.1f MB, edge %.1f -> %.1f MB",
+                format: "playhead %.2fs -> %.2fs, reader cursor %.1f -> %.1f MB, edge %.1f -> %.1f MB, backend %@ -> %@",
                 beforePos, afterPos,
                 Double(beforeCursor) / 1_048_576.0, Double(afterCursor) / 1_048_576.0,
-                Double(beforeEdge) / 1_048_576.0, Double(afterEdge) / 1_048_576.0)
+                Double(beforeEdge) / 1_048_576.0, Double(afterEdge) / 1_048_576.0,
+                "\(beforeBackend)", "\(engine.playbackBackend)")
             print("  RELOAD done: \(reloadReport.value ?? "")")
         }
     }

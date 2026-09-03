@@ -133,6 +133,8 @@ Two refusals, both raised BEFORE any teardown, so a refused correction leaves th
 | --- | --- |
 | `AetherEngineError.loadIdentityNotCorrectable(fields:)` | the closure changed `isLive`, `audioOnly`, `nativeRemoteHLS` or `sequentialOrigin`. These name the session rather than tune it (each opens the source on a different pipeline, and the engine writes the last two itself), so changing one is a different item, not a correction of this one. Load the source again. |
 | `AetherEngineError.sessionNotReloadable(_:)` | there is no session, or the source is a custom `IOReader` that reported itself non-seekable and cannot be reopened at the current position. It carries a `SessionReloadRefusal` (`.noActiveSession` / `.customSourceNotSeekable`) saying which. |
+| `AetherEngineError.sessionNotReloadable(.softwarePathCannotRepresentSource)` | the correction moves a native session onto the software path, and this source's only signal is IPT-PQ-c2 (Dolby Vision HEVC Profile 5, AV1 Profile 10.0). The software decoders hand that on as YCbCr, so the picture would render green/purple. |
+| `AetherEngineError.sessionNotReloadable(.demuxedAudioLiveIsNativeOnly)` | the correction moves a demuxed-audio live session onto the software path, where the side-audio merge does not exist, so it would play silent. |
 
 Both are all-or-nothing: a correction refused for one field installs none of it.
 
@@ -144,6 +146,15 @@ the four consumed by `load` itself (`preferredAudioLanguages`, `externalSubtitle
 `maxConcurrentSourceRequests`, `autoplay`) are installed and take effect at the next load. The
 custom reload carries the session's explicit audio pick and its own subtitle re-arm, so the two
 language lists have nothing to decide on that path anyway.
+
+`preferredDecodePath` is in the first group and was briefly in neither: the reopen picked its host
+from the backend the session was already on, so a decode-path correction on a custom source was
+accepted, named in the log and then ignored. It now asks the same routing policy `load` asks, seeded
+with that backend, so the correction lands on both source shapes. The direction is what makes that
+safe: `DecodePath` has no `.native`, so the only flip the reopen can make is native to software, and
+the software path is the general one. What the software path cannot REPRESENT is refused before any
+teardown instead (the two rows above), because the guards that catch it inside `load` run after the
+routing decision, and reaching them on a correction would mean failing a session already torn down.
 
 Unlike `reloadAtCurrentPosition()`, which returns silently when there is nothing to rebuild, this one
 throws, because a host correcting a session has to tell "corrected" from "did nothing" to decide
@@ -196,6 +207,13 @@ Three properties worth knowing:
 - **`nativeRemoteHLS` is a different route.** AVPlayer plays the remote playlist and the engine
   demuxes and decodes nothing, so there is no decode path to prefer. The engine logs that it
   ignored the preference rather than letting it look applied.
+- **A mid-play correction lands on both source shapes**, URL and custom `IOReader` alike, and moves
+  the session at its own playhead without a restart. On a source the software path cannot represent
+  the correction is refused before any teardown, with `SessionReloadRefusal`
+  `.softwarePathCannotRepresentSource` or `.demuxedAudioLiveIsNativeOnly`, so the session it refuses
+  is still the session that was playing. Measured on the Dolby browser test kit, which carries the
+  discriminator: the Profile 5 cut of a clip is refused and left playing on VideoToolbox, while the
+  Profile 8.1 cut of the SAME material and grading is honoured and rebuilds on `libavcodec HEVC (SW)`.
 
 ### Reading whether the audio was delivered
 

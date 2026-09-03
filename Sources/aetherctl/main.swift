@@ -112,7 +112,7 @@ func printUsage() {
                          (#95: decode the loopback audio track to mono 48k WAV, print continuity stats;
                           --software runs a real session through the SW sink, exit 3 if it yields no audible PCM)
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] [--audio-index N] <file>
-      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] [--host-carry none|removeFirst|subdata] <file.ts>
+      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] [--host-carry none|removeFirst|subdata] [--reload-at S] [--cancel-latches] <file.ts>
                          (AE#445: a host-owned live spool behind MediaSource.custom, paced at the mux rate,
                           never EOF, unknown size; prints physFP and its slope against that rate)
       aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
@@ -762,6 +762,13 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     // AE#445 round 3: a positive control for the reporter's own shape. removeFirst puts an
     // ingest-side Data carry back on the delivery path (bounded count, unbounded backing store);
     // subdata is the same carry re-based, i.e. the fix. Default none measures the engine alone.
+    // AE#460 follow-up: fire an in-place option correction on the live spool N seconds in, so the
+    // custom-source reload branch can be watched on a reader that has run past its base.
+    let customReloadAt = takeDoubleFlag("--reload-at", from: &rest)
+    // The non-conforming arm: a reader that reads `cancel()` as terminal, which is what a network
+    // reader's in-flight-request cancel becomes. Contract says unblock only; this measures the cost
+    // of the other reading rather than leaving it to be discovered on a host.
+    let customCancelLatches = takeFlag("--cancel-latches", from: &rest)
     let customHostCarry = takeStringFlag("--host-carry", from: &rest) ?? "none"
     guard let customCarryTrim = HostCarryTrim(rawValue: customHostCarry) else {
         print("ERROR: --host-carry expects none|removeFirst|subdata, got '\(customHostCarry)'")
@@ -823,7 +830,8 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
                                     dvrWindow: customDvrWindow, reportsSize: customReportsSize,
                                     wraps: !customNoWrap, mallocCensus: customMallocCensus,
                                     foundationReader: customFoundationReader,
-                                    carryTrim: customCarryTrim))
+                                    carryTrim: customCarryTrim, reloadAt: customReloadAt,
+                                    cancelLatches: customCancelLatches))
         }
         exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag, reload: reloadFlag, switchAudio: switchAudioFlag, selectSubs: selectSubsFlag, extract: extractFlag, audioIndex: customAudioIndex))
     default:

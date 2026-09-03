@@ -150,6 +150,12 @@ throws, because a host correcting a session has to tell "corrected" from "did no
 whether to fall through to a fresh load. `sessionReloadRefusal` returns the same `SessionReloadRefusal` for
 either reload without attempting one, and nil when a rebuild would happen.
 
+A rebuild that FAILS also throws, on both source shapes. The custom-source branch used to publish its
+error and return as if the session had come back, so a correction could report success while the
+session sat in `.error`; it now throws what the rebuild threw, the way the URL branch always has. A
+rebuild superseded by a newer `load` or `stop` is not a failure and still returns normally, because
+the newer load owns the session.
+
 ### Overriding the decode path
 
 `LoadOptions.preferredDecodePath` is the per-session escape onto `SoftwarePlaybackHost` (#461).

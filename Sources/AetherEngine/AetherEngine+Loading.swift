@@ -1878,17 +1878,24 @@ extension AetherEngine {
     }
 
     /// Rebuild the pipeline at the current playhead with an optional audio stream override (nil = keep auto-picked). Re-arms the active subtitle source. Called by `selectAudioTrack` and `reloadAtCurrentPosition`. Snapshots subtitle + playhead INSIDE the task body: a chained `selectSubtitleTrack` lands on MainActor before the body runs; snapshotting at call-site would miss it.
+    ///
+    /// AE#460 follow-up: returns the error that killed the rebuild, or nil when the session came
+    /// back (a supersede, which is not a failure, also returns nil: a newer load owns the engine).
+    /// This path publishes its failure and used to return silently either way, so a caller could
+    /// not tell a rebuilt session from a dead one; `reloadAtCurrentPosition(applying:)` is built on
+    /// exactly that distinction. Callers that only drive UI keep discarding it.
+    @discardableResult
     func reloadWithAudioOverride(
         url: URL,
         audioStreamIndex: Int32?,
         expectedGeneration: UInt64,
         discTitleIDOverride: Int? = nil,
         resumeOverride: Double? = nil
-    ) async {
+    ) async -> Error? {
         // Liveness guard: a stop()/load() between scheduling and here would resurrect a dismissed session or kill the successor. Generation captured at schedule time; both stop() and load() invalidate it.
         guard loadGeneration == expectedGeneration, loadedURL != nil else {
             EngineLog.emit("[AetherEngine] reload superseded before start; ignored", category: .engine)
-            return
+            return nil
         }
         // Disc title to reopen with: an explicit override (selectTitle on a custom disc) wins, else the title
         // already playing so an audio switch / background-resume doesn't silently revert to the main title (#67).
@@ -1971,7 +1978,7 @@ extension AetherEngine {
                 EngineLog.emit("[AetherEngine] reload: custom reader reopen failed: \(error)", category: .engine)
                 activeAudioTrackIndex = previousAudioIndex
                 publishError(.reloadFailed, "Reload failed: \(error.localizedDescription)", underlying: error)
-                return
+                return error
             }
             if loadGeneration != gen {
                 customPreopened?.markClosed()
@@ -1979,7 +1986,7 @@ extension AetherEngine {
                     Task.detached { d.close() }
                 }
                 EngineLog.emit("[AetherEngine] reload superseded after reader reopen; unwinding", category: .engine)
-                return
+                return nil
             }
         } else if titleToReopen != nil {
             // URL/local disc audio switch: the backend would otherwise reopen by URL with no title id and
@@ -1996,7 +2003,7 @@ extension AetherEngine {
                 EngineLog.emit("[AetherEngine] reload: disc URL reopen failed: \(error)", category: .engine)
                 activeAudioTrackIndex = previousAudioIndex
                 publishError(.reloadFailed, "Reload failed: \(error.localizedDescription)", underlying: error)
-                return
+                return error
             }
             if loadGeneration != gen {
                 customPreopened?.markClosed()
@@ -2004,7 +2011,7 @@ extension AetherEngine {
                     Task.detached { d.close() }
                 }
                 EngineLog.emit("[AetherEngine] reload superseded after disc URL reopen; unwinding", category: .engine)
-                return
+                return nil
             }
         }
 
@@ -2125,7 +2132,7 @@ extension AetherEngine {
             EngineLog.emit("[AetherEngine] reload: state=.playing total=\(elapsedMs(since: reloadStart))ms", category: .engine)
         } catch is CancellationError {
             // Superseded by a newer load/stop: it owns the engine state.
-            return
+            return nil
         } catch {
             EngineLog.emit(
                 "[AetherEngine] selectAudioTrack reload failed: \(error), playback stopped",
@@ -2133,7 +2140,7 @@ extension AetherEngine {
             )
             activeAudioTrackIndex = previousAudioIndex
             publishError(.audioTrackSwitchFailed, "Audio track switch failed: \(error.localizedDescription)", underlying: error)
-            return
+            return error
         }
 
         // Reload succeeded (failure paths returned above). Re-establish disc state stopInternal wiped.
@@ -2201,6 +2208,7 @@ extension AetherEngine {
             )
             setNativeSubtitleSelected(track: ordinal)
         }
+        return nil
     }
 
     private func elapsedMs(since start: DispatchTime) -> Int {

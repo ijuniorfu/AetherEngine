@@ -235,6 +235,15 @@ starts there`. An item's FIRST placement is no longer a case of its own: with no
 the distance is zero, which is what AVPlayer does there (measured base 0.000 on every arm of every
 fixture). The gate-open line still prints `lead=`, now purely as a source fact.
 
+Round 9 puts the lesson on the reading's own line, because round 8 printed only the MOVES and two
+different things were silent under that. Every verdict line now ends in one of three clauses: `taught
+the distance Xs` (an own-run reading that moved it, with the `sat` line under it), `taught the
+standing distance Xs again` (an own-run reading that agreed with it), or `taught nothing, read off a
+rebuilt timeline; the distance stays Xs`. The third is the one worth having: a rebuilt-timeline
+reading corrects the axis like any other, by 28.000 s on `tc-wide-cues-lie.mkv`, and round 7 refuses
+it the parameter on purpose, so its correction line was otherwise indistinguishable from one that had
+just taught a 28 s lesson.
+
 `--start-position S` starts at a resume anchor, the same one `serve` takes. `--sw` forces the software path for a source that would route native, which is how a native-only fixture exercises the SW pipeline.
 
 `--malloc-census` turns on the large-allocation census (`AetherEngine.setLargeAllocationCensusEnabled`) for the run, for tracing a footprint that grows where the segment budget says it should not. Besides the 30 s sample it arms a jump trigger, which exists because the 30 s memprobe cannot catch a failure that completes inside one sample (every kill on #220 was that shape): a counter polled at `--census-hz N` runs the zone walk once it climbs `--census-threshold-mb N` above its running high-water. Both flags are inert without `--malloc-census`.

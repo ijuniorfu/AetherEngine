@@ -613,3 +613,48 @@ struct Issue418PlacementIdentityTests {
     }
 
 }
+
+@Suite("AE#418 round 9: a reading says what it taught")
+struct Issue418TeachingVisibilityTests {
+
+    @Test("a reading that moved the distance names the value it set")
+    func movedReadingNamesTheValue() {
+        let teaching = HLSVideoEngine.DisplacementTeaching.taught(sample: -0.041, moved: true)
+        #expect(teaching.clause.contains("taught the distance"))
+        #expect(teaching.clause.contains("-0.041"))
+    }
+
+    @Test("a reading that agreed with the standing distance still says it taught")
+    func unmovedReadingStillSaysItTaught() {
+        // The reporter's round-8 question: three `placement confirmed` lines with no `sat` line under
+        // them, and no way to tell a confirmation that taught 0.000 from one that was never allowed
+        // to teach. Round 8 printed only the moves, so silence covered both.
+        let teaching = HLSVideoEngine.DisplacementTeaching.taught(sample: 0, moved: false)
+        #expect(teaching.clause.contains("again"))
+        #expect(teaching.clause.contains("0.000"))
+        #expect(!teaching.clause.contains("nothing"))
+    }
+
+    @Test("a rebuilt timeline says it taught nothing, and what still stands")
+    func rebuiltTimelineTeachesNothing() {
+        // Round 7 refuses this reading the parameter on purpose: a timeline AVPlayer threw away puts
+        // the segment on its advertised start itself, which is a statement about the rebuild. The
+        // reading still corrects the axis, and on the wide fixture it corrects it by 28.000 s, so the
+        // line it prints is exactly the one a reader would otherwise credit with a 28 s lesson.
+        let teaching = HLSVideoEngine.DisplacementTeaching.notTaught(standing: 0.042)
+        #expect(teaching.clause.contains("taught nothing"))
+        #expect(teaching.clause.contains("rebuilt timeline"))
+        #expect(teaching.clause.contains("0.042"))
+    }
+
+    @Test("the three outcomes never read the same")
+    func theThreeOutcomesAreDistinct() {
+        let clauses = Set([
+            HLSVideoEngine.DisplacementTeaching.taught(sample: 0.042, moved: true).clause,
+            HLSVideoEngine.DisplacementTeaching.taught(sample: 0.042, moved: false).clause,
+            HLSVideoEngine.DisplacementTeaching.notTaught(standing: 0.042).clause,
+        ])
+        #expect(clauses.count == 3)
+    }
+
+}

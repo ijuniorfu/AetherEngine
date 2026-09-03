@@ -10,6 +10,25 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.67.1] - 2026-09-03
+
+### Fixed
+
+- **The `[SWDiag]` line no longer reports a pre-seek audio PTS against the post-seek clock
+  (AE#479, from the AE#407 thread).** `aLead` is the newest audio PTS the software pump has
+  enqueued minus the clock. A seek flushes that audio on the main actor while the pump is still on
+  the pre-seek generation: after a playing seek it republished its stale local once more before
+  noticing the seek, and a seek that landed PAUSED parked it in its pause wait, where it wrote
+  nothing until `play()`. Both left the line reading old PTS minus re-anchored clock, `aLead=475.49`
+  on a backward scrub in the field, `-23.89` for five paused ticks on the harness. The seek path now
+  clears the marker when it flushes, and the pump's writes carry the generation they were produced
+  under, so a write from before the flush cannot republish the flushed queue's PTS. `parkedPkts`
+  and `rebuf` are unchanged: they are the pump's own state and were never stale.
+  `aetherctl play --host-calls pauseseek` (pause at t=12, seek at t=15 while paused, resume at
+  t=20) reproduces the paused shape. Reported by @classicjazz.
+
 ### Changed
 
 - **The `[SWDiag]` line names its corrupted-frame counter `corrupt=`, not `corr=` (AE#407 side

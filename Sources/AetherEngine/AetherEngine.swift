@@ -509,6 +509,13 @@ public final class AetherEngine: ObservableObject {
     /// `sourceVideoFormat` for Stats-for-Nerds labels ("Dolby Vision P5"); read from the dvcC record.
     @Published public internal(set) var sourceDVProfile: Int? = nil
 
+    /// AE#461: base-layer signal compatibility ID from the same dvcC/dvvC record as `sourceDVProfile`
+    /// (0 = IPT-only, no compatible base layer). Kept because a decode-path correction has to decide
+    /// whether the software path can represent this source BEFORE it tears the session down, and by
+    /// then the probe stream that carried the record is long gone. Internal: `sourceDVProfile` is the
+    /// label hosts read, this is the term only `softwarePathCannotRepresent` needs.
+    var sourceDVBLCompatID: Int? = nil
+
     /// Nominal source frame rate (fps) from the container's `avg_frame_rate` (falling back to `r_frame_rate`),
     /// or nil when the source has no video or libavformat couldn't derive one. Companion to `sourceVideoFormat`
     /// for Stats-for-Nerds. `LiveTelemetry.observedFps` measures the live rate but is nil on the native AVPlayer
@@ -3250,6 +3257,7 @@ public final class AetherEngine: ObservableObject {
         videoFormat = .sdr
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
+        sourceDVBLCompatID = nil
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil
@@ -3306,6 +3314,7 @@ public final class AetherEngine: ObservableObject {
         var detectedFormat: VideoFormat = .sdr
         var effectiveFormat: VideoFormat = .sdr
         var detectedDVProfileNum: Int? = nil
+        var detectedDVBLCompatIDNum: Int? = nil
         var detectedRate: Double? = nil
         var detectedVideoBitrate: Int64 = 0
         var detectedDVProfile: Bool = false
@@ -3364,7 +3373,9 @@ public final class AetherEngine: ObservableObject {
                 // DV->HDR10 when the panel can't host it; we don't pre-strip engine-side. Pairs with
                 // always-emit-SUPPLEMENTAL + no-strip in HLSVideoEngine's profile81/profile84 emission.
                 detectedDVProfile = (detectedFormat == .dolbyVision)
-                detectedDVProfileNum = Self.dvProfile(stream: stream)
+                let detectedDVConfig = Self.dvConfig(stream: stream)
+                detectedDVProfileNum = detectedDVConfig?.profile
+                detectedDVBLCompatIDNum = detectedDVConfig?.blCompatID
                 detectedCodecID = stream.pointee.codecpar.pointee.codec_id
                 detectedFieldOrder = stream.pointee.codecpar.pointee.field_order
                 sourceVideoWidth = stream.pointee.codecpar.pointee.width
@@ -3492,6 +3503,7 @@ public final class AetherEngine: ObservableObject {
         // the criteria handshake; see panelHDRAfterHandshake below).
         sourceVideoFormat = detectedFormat
         sourceDVProfile = detectedDVProfileNum
+        sourceDVBLCompatID = detectedDVBLCompatIDNum
         sourceVideoFrameRate = detectedRate
         sourceVideoBitrate = detectedVideoBitrate
         sourceVideoCodecName = detectedCodecID == AV_CODEC_ID_NONE
@@ -5022,6 +5034,7 @@ public final class AetherEngine: ObservableObject {
         videoFormat = .sdr
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
+        sourceDVBLCompatID = nil
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil

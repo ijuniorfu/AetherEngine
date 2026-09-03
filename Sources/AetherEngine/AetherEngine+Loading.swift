@@ -1943,13 +1943,37 @@ extension AetherEngine {
         let previousAudioIndex = activeAudioTrackIndex
         // Snapshot before stopInternal wipes state. Must reload on the same backend: loadNative on a SW-routed AV1 source throws unsupportedCodec (HLSVideoEngine only accepts HEVC / H.264 / VP9 / probed-AV1).
         let wasOnSoftwarePath = (playbackBackend == .software)
+        // AE#461 follow-up: which host this rebuild hands the source to. This used to be
+        // `wasOnSoftwarePath` alone, which made a `preferredDecodePath` correction on a custom source
+        // accepted, logged as applied and then silently ignored: the option is read only inside
+        // `load`, and a custom source never reaches it. The same pure policy `load` asks decides it
+        // here, seeded with the backend the session is currently on.
+        //
+        // The one-way type is what makes re-routing safe on this path. `DecodePath` has no `.native`,
+        // so the only flip reachable is native -> software, and the software path is the general one;
+        // the reverse (the `unsupportedCodec` case the line above warns about) stays unreachable by
+        // construction. What the software path cannot REPRESENT is refused before any teardown, in
+        // `reloadAtCurrentPosition(applying:)`, because the guards that catch it in `load` run after
+        // the routing decision and would fail a session this rebuild had already stopped.
+        let targetSoftwarePath = VideoRoutingPolicy.usesSoftwarePath(
+            routedSoftware: wasOnSoftwarePath, preferred: loadedOptions.preferredDecodePath)
+        if targetSoftwarePath != wasOnSoftwarePath {
+            EngineLog.emit(
+                "[AetherEngine] #461: reload re-routing this session native -> software on the host's "
+                + "preference (custom source: \(isCustomSource))",
+                category: .engine
+            )
+        }
         // Preserve codec so the decoder label can be reconstructed without re-probing.
         let preservedVideoCodec = lastDetectedVideoCodec
         let reloadStart = DispatchTime.now()
         EngineLog.emit("[AetherEngine] reload: stopInternal start", category: .engine)
         // resetDisplayCriteria: false: video format is unchanged; resetting triggers a full waitForSwitch Stage 2 timeout (5 s at the 2026-05-26 device test, ~2 s cap since #117; Bose SLIII A2DP + 4K HDR10 PQ: each switch added ~12 s black-screen). On the same route a panel SDR drop during the reset window failed the PQ variant with AVFoundationErrorDomain -11868 / CoreMediaErrorDomain -17223.
-        // keepNativeHost: !wasOnSoftwarePath preserves the AVPlayer across the switch (issue #15).
-        stopInternal(resetDisplayCriteria: false, keepNativeHost: !wasOnSoftwarePath, keepCustomReader: true)
+        // keepNativeHost: !targetSoftwarePath preserves the AVPlayer across the switch (issue #15).
+        // It follows the TARGET route, not the previous one: a rebuild that flips to software renders
+        // into its own layer, and a preserved host would leave AVKit bound to a stale player with
+        // audio still flowing into the next load (the release `load()` does by hand on that branch).
+        stopInternal(resetDisplayCriteria: false, keepNativeHost: !targetSoftwarePath, keepCustomReader: true)
         EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
         let gen = loadGeneration
         loadedURL = url
@@ -2041,7 +2065,7 @@ extension AetherEngine {
 
         do {
             let loadStart = DispatchTime.now()
-            if wasOnSoftwarePath {
+            if targetSoftwarePath {
                 EngineLog.emit("[AetherEngine] reload: loadSoftware enter audio=\(audioStreamIndex.map(String.init) ?? "nil") resumeAt=\(String(format: "%.2f", resumeAt))s", category: .engine)
                 try await loadSoftware(
                     url: url,
@@ -2126,7 +2150,7 @@ extension AetherEngine {
             // fail the reload like a load error instead of leaving the user
             // on an indefinitely frozen frame. Scoped to live reloads on the
             // native path; initial joins and VOD reloads never arm it.
-            if loadedOptions.isLive, !wasOnSoftwarePath {
+            if loadedOptions.isLive, !targetSoftwarePath {
                 armLiveReloadWatchdog(generation: gen)
             }
             EngineLog.emit("[AetherEngine] reload: state=.playing total=\(elapsedMs(since: reloadStart))ms", category: .engine)
@@ -2155,7 +2179,7 @@ extension AetherEngine {
             // A title switch changes the title's stream set. The native path already republished the session's
             // real list via syncPublishedAudioStateFromNativeSession above; only the software path, which does
             // not reconcile tracks post-load, needs the probe-derived lists re-applied here.
-            if wasOnSoftwarePath {
+            if targetSoftwarePath {
                 audioTracks = reopenedAudioTracks
                 applyConfirmedAtmos()   // #214 follow-up: a title switch re-applies probe lists
                 subtitleTracks = reopenedSubtitleTracks

@@ -26,6 +26,27 @@ the public-API contract.
 
 ### Fixed
 
+- **A decode-path correction reaches a custom `IOReader` session instead of being quietly dropped
+  (AE#461 follow-up).** `LoadOptions.preferredDecodePath` was read only inside `load`, while the
+  rebuild that keeps a retained reader picks its host from the backend the session was already on.
+  A host correcting a playing custom source onto the software path was therefore told the correction
+  had been applied, and stayed on the native one: accepted, named in the log, ignored, which is the
+  one outcome the reload's own rules forbid. The rebuild now asks the same routing policy `load`
+  asks, seeded with that backend, so the correction lands on both source shapes. Measured on a live
+  spool reader and on a seekable custom VOD source: `backend native -> software`, decoder
+  `libavcodec H264 (SW)`, session preserved at its own playhead, and no reach-back on the live arm.
+  The one-way type is what makes re-routing the reopen safe, since the only flip it can make is
+  native to software.
+
+  What the software path cannot represent is now refused BEFORE any teardown, with two new
+  `SessionReloadRefusal` cases: `.softwarePathCannotRepresentSource` for a source whose only signal
+  is IPT-PQ-c2 (Dolby Vision HEVC Profile 5, AV1 Profile 10.0), and `.demuxedAudioLiveIsNativeOnly`
+  for a live source whose audio is merged on the native path. Inside `load` both guards run after
+  the routing decision, so on a correction they would have failed a session that was already down.
+  Verified on the Dolby browser test kit, which carries its own control: the Profile 5 cut is
+  refused and left playing on VideoToolbox, the Profile 8.1 cut of the same material and grading is
+  honoured and rebuilds in software. Reported by @cmcpherson274.
+
 - **A live custom source is rebuilt where the session left it, not where the host started
   (AE#460 follow-up).** An in-place rebuild on a retained `IOReader` (`reloadAtCurrentPosition`,
   with or without an option correction, plus an audio-track switch, a disc-title switch and a

@@ -156,7 +156,7 @@ Matroska routinely writes (`ger`, `fre`, `cze`). Two ISO 639-3 classes need more
 The members CLDR aliases to a macrolanguage (`cmn`, `arb`, `pes`, `swh`, `uzn`, `kmr`) have no alpha3
 entry at all, so the tag is canonicalized where the direct route came back empty, which resolves the
 alias without moving any tag that already resolved (`no` stays `nor`, not `nob`). The members CLDR
-does NOT alias (`cnr`, `prs`, `npi`, `ory`, `quz`, `crs`, 51 more measured on macOS 26) have neither
+does NOT alias (`cnr`, `prs`, `npi`, `ory`, `quz`, `crs` and 50 more, 56 measured on macOS 26) have neither
 an alpha3 entry nor a canonical form, and there is nothing to convert: the tag already IS the ISO 639
 code, so it passes through as itself. That last step is gated on ICU having a display NAME for the
 tag in a fixed reference locale, which is the validity signal canonicalization cannot give

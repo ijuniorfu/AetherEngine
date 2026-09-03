@@ -47,7 +47,7 @@ enum AudioLanguageMap {
 
     /// A three-letter tag ICU can NAME but has no alpha3 entry for is already the ISO 639 code, so it
     /// passes through unchanged: `cnr` (Montenegrin), `prs` (Dari), `npi`, `ory`, `quz`, `crs`, `pis`
-    /// and 50 more measured on macOS 26. Neither route above reaches them, because `identifier(.alpha3)`
+    /// and 49 more measured on macOS 26 (56 tags in all). Neither route above reaches them, because `identifier(.alpha3)`
     /// only maps the 639-1/639-2 pairs and CLDR does not alias these to anything (`canonicalLanguageIdentifier`
     /// returns them unchanged). htrung14 found the class through `cnr` on the AE#458 retest.
     ///

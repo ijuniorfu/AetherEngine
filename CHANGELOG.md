@@ -27,8 +27,8 @@ the public-API contract.
 ### Fixed
 
 - **An audio language ICU can name but not map keeps its label (AE#458 follow-up, found by
-  @htrung14).** `cnr` (Montenegrin) lost its `LANGUAGE` and its master, and so did 56 other
-  three-letter tags: `identifier(.alpha3)` maps only the ISO 639-1 / 639-2 pairs, and CLDR does not
+  @htrung14).** `cnr` (Montenegrin) lost its `LANGUAGE` and its master, and so did 55 other
+  three-letter tags, 56 in all: `identifier(.alpha3)` maps only the ISO 639-1 / 639-2 pairs, and CLDR does not
   alias these to anything, so neither the direct route nor the 6.61.0 canonicalization fallback
   reached them, although the tag already IS the ISO 639 code. Such a tag now passes through as
   itself, gated on ICU having a display name for it in a fixed reference locale: that is the

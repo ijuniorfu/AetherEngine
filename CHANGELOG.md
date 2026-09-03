@@ -26,6 +26,25 @@ the public-API contract.
 
 ### Fixed
 
+- **The silent-bridge ERROR no longer announces a failure during a healthy start-up (AE#474).**
+  `AudioBridge`'s AE#396 detector was counted in source packets (64) while the thing that bounds
+  it is one encoder frame: `drainFIFOIntoEncoder(requireFull:)` cannot encode below `frame_size`,
+  so no output is POSSIBLE until that many samples have been enqueued. Its threshold was derived
+  from the lossy pair alone (an E-AC-3 frame of 1536 against a DTS packet of 512), and the FLAC arm
+  breaks both constants: a FLAC frame is 4608 samples and a TrueHD access unit is 40, so the first
+  output needs 116 packets and the line fired at 64. Every TrueHD session therefore printed
+  `the bridge has produced no encoded audio at all ... enqueued=2560 emitted=0` and then played to
+  the end, and not only under the opt-in `.lossless` mode: `.surroundCompat` encodes any source of
+  two channels or fewer to FLAC, so a stereo TrueHD file reproduces it on the default setting. The
+  gate now counts each arm in the unit that bounds it, the encoder's own `frame_size` where PCM
+  reached the FIFO and packets only where the FIFO never moved, and the latter counts from the last
+  accepted sample rather than from the start, so a decoder that answers for a while and then stops
+  is caught by the same arm. The line arrives sooner than it used to on the arm it was written for
+  (about 128 ms of source audio on E-AC-3 against 64 packets), and it now names the encoder it is
+  talking about and the frame boundary it judged. Nothing else read the old threshold: both
+  decision sites that classify a silent bridge are gated on an actual failure, and `$audioDelivery`
+  is derived independently and read `bridged` correctly throughout. Reported by @cmcpherson274.
+
 - **A decode-path correction reaches a custom `IOReader` session instead of being quietly dropped
   (AE#461 follow-up).** `LoadOptions.preferredDecodePath` was read only inside `load`, while the
   rebuild that keeps a retained reader picks its host from the backend the session was already on.

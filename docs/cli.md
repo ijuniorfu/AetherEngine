@@ -186,24 +186,37 @@ opens on a random-access point in DECODE order, and taking the offset there put 
 as the MEAN of `capErr` per axis over the run, since a single tick carries up to two frames of the
 probe's own quantisation.
 
-**Round 6: how much a lead counts is a property of the SOURCE, so the session measures it.** Round 5
-found that a composition lands on a BASE one presentation lead under the axis, measured it on
-`tc-bframes.mkv` and shipped it as arithmetic. It is not arithmetic. The script now writes a third
-clip, `tc-bf1.mkv`, identical but for `-bf 1`, and on the same burst arm the three reorder depths
-place three different ways, the reading and the picture agreeing in all nine runs:
+**Round 8: how far a placement sits below its axis is MEASURED, in seconds.** Rounds 5, 6 and 7 read
+that distance as a multiple of the epoch's presentation lead: round 5 shipped the multiple as
+arithmetic, round 6 measured it per source, round 7 held the median of its readings. The premise was
+that the distance is a geometry of the source. It is not. `Scripts/timecode-fixture.sh` writes three
+clips identical but for their reorder depth, and on the same burst arm over a throttled origin
+(`slowrange.py`, 3200 kbps + 100 ms), `--picture-probe` reading the axis off AVPlayer's own video
+output, 2 runs each and every run identical:
 
-| clip | gate lead | base a composition lands on | burst arm |
+| clip | gate lead | placement 2 sits | placement 3 sits |
 |---|---|---|---|
-| `tc-drought.mkv` | 0.000 | the axis | -9.000 -> -18.000 -> -23.000 |
-| `tc-bf1.mkv` | 0.042 (one frame) | the axis | -9.000 -> -18.000 -> -23.000 |
-| `tc-bframes.mkv` | 0.083 (two frames) | one lead below the axis | -9.000 -> -18.083 -> -23.166 |
+| `tc-cues-lie.mkv` | 0.000 (no reordering) | 0.000 below its axis | **0.042 below its axis** |
+| `tc-bf1-cues-lie.mkv` | 0.042 (one frame) | 0.000 | 0.083 |
+| `tc-bf-cues-lie.mkv` | 0.083 (two frames) | 0.083 | 0.125 |
 
-So a session now starts with no coefficient and composes without one, and the first placement it can
-read back states what a lead is worth here: `#418 segN says a lead counts 1.00x on this source (axis
-Xs, base measured Ys, lead Zs)`. Every `placed` line prints the coefficient it used (`lead 0.083s
-x1.00`, or `x0.00 unmeasured` before the first reading). Under round 5 the middle row was composed
-0.042 s low and corrected back on every measurable placement, and the placements that cannot be
-measured at all kept that error for the rest of the session.
+The bold cell is what retires the model: that clip has `has_b_frames=0`, every gate opens with
+`lead=0`, and its third placement still sits a frame below its axis. A quantity that is nonzero where
+the lead is exactly zero is not a multiple of the lead, and no coefficient can express it. The middle
+row retires the source-law premise separately: one source, two placements, 0.000 then 0.083.
+
+So the session carries the distance in the units it corrects, reads it off the same placement reading
+that already measures the base, and every reading teaches it, a confirmation included. That is also
+what fixes the starvation round 7 shipped: only a placement carrying a lead could teach, and on a
+source without reordering, or on any session whose placements are AE#412 re-cuts (worth 0 and lead 0
+by construction), there is never one. Measured on `tc-wide-cues-lie.mkv`, 13 of 13 placements across
+two runs carried `lead 0.000s`, so the parameter could not move at all.
+
+Each `placed` line names what it composed with (`sitting 0.083s below its axis`), and a reading that
+moves it says so: `#418 segN sat Xs below the axis it composed on, not Ys; the next composition
+starts there`. An item's FIRST placement is no longer a case of its own: with nothing measured yet
+the distance is zero, which is what AVPlayer does there (measured base 0.000 on every arm of every
+fixture). The gate-open line still prints `lead=`, now purely as a source fact.
 
 `--start-position S` starts at a resume anchor, the same one `serve` takes. `--sw` forces the software path for a source that would route native, which is how a native-only fixture exercises the SW pipeline.
 

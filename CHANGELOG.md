@@ -24,6 +24,38 @@ the public-API contract.
   rewind depth is `clock.seekableLiveRange`, which answers a different question. Residency is not a
   promise that a seek inside a span is instant.
 
+### Fixed
+
+- **An origin that refuses is asked less often, not just less concurrently (AE#465, PR by
+  @sitepilotusa).** A refusal used to halve the concurrency budget only, which on the measured CDN
+  changed nothing: it served eight parallel 32 MB reads happily and first answered 429 after 36
+  sequential 256 KB reads in 10 seconds, so the limit that bound was request rate, not parallelism.
+  A 429, 503 or 509 now also arms a per-origin pacer, two tokens refilling at one request every two
+  seconds, honouring a parsed `Retry-After` and otherwise stepping a 2/4/8/15-second quiet period.
+  Sixty seconds without another refusal disarms it; the learned concurrency ceiling is untouched and
+  keeps its own recovery rule. Detour block reads go through the same origin ticket path, which six
+  of eleven requests in one measured seek had been bypassing, and the speculative subtitle forward
+  prefetcher holds while the origin is paced or serial instead of reopening its side reader every
+  four to ten seconds. On the reporter's Apple TV this took refusals from roughly 150 a session to
+  15. Rate is admitted before concurrency, so a request waiting on the pacer holds no slot: waiting
+  inside one turned a rate rule into a concurrency rule, and on a single-slot origin one paced
+  request parked every other path for the whole quiet period.
+- **A slow load says which redirect hop was slow (AE#465, PR by @sitepilotusa).** A task whose
+  redirect chain spent more than a second before its first byte now logs one line per hop in order,
+  with host and port only, so a signed path and its token stay out of the log. Two measured launches
+  waited 5.3 and 9.5 seconds for the chain's first byte, 15 of one 22-second play-to-picture
+  interval, and the reader could only report the whole chain's duration.
+
+### Performance
+
+- **Cache-backed scrub stills decode on VideoToolbox (AE#465, PR by @sitepilotusa).** Scrubbing three
+  resident 100 MB segments and back opened 30 software decoders in 20 seconds. Those stills run
+  beside native AVPlayer playback, so they may use hardware: the decode context now opens with a
+  VideoToolbox device on that path and falls back to software on device-creation, open or frame
+  transfer failure, latching so it cannot retry per frame. Every public custom-reader and network
+  caller keeps the software default from issue #27. The still extractor's LRU holds six contexts
+  instead of two, so a small scrub working set stays warm.
+
 ## [6.66.0] - 2026-09-02
 
 ### Added

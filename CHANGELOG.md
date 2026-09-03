@@ -10,7 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **The `[SWDiag]` line names its corrupted-frame counter `corrupt=`, not `corr=` (AE#407 side
+  finding).** The field is `AVSampleBufferDisplayLayer.videoPerformanceMetrics.numberOfCorruptedFrames`
+  and nothing else. `corr` read as a correction count and was taken for one in the AE#407 thread, where
+  a `corr=0` was cited as evidence that no drift correction had run. There is no drift correction on
+  that path, so the token carried no information about pacing; now it does not look like it does.
+  Reported by @classicjazz.
 
 ## [6.67.0] - 2026-09-03
 

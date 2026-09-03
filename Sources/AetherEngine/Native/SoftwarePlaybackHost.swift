@@ -2473,7 +2473,7 @@ final class SoftwarePlaybackHost {
                 + "dpts=\(spacing) layerDrop=\(dropped)(\(dDrop >= 0 ? "+" : "")\(dDrop)) "
                 + "delay=\(delay >= 0 ? String(format: "%.2f", delay) : "-")"
                 + "(\(dDelay >= 0 ? "+" : "")\(String(format: "%.2f", dDelay))) "
-                + "corr=\(m?.corrupted ?? -1) "
+                + "corrupt=\(m?.corrupted ?? -1) "
                 + "status=\(self.renderer.diagStatusName) surf=\(surface) "
                 + "r4d=\(r4d)",
                 category: .swPlayback

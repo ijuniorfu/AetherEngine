@@ -12,6 +12,21 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.67.2] - 2026-09-03
+
+### Changed
+
+- **Every AE#418 placement reading now says what it taught the standing distance.** 6.67.0 learns
+  how far below its axis a placement sits from every own-run reading, confirmations included, and
+  prints only the readings that MOVE the value. Two different outcomes were silent under that: a
+  reading that taught the value already standing, and a reading taken off a timeline AVPlayer
+  rebuilt, which is refused the parameter on purpose because where a rebuilt timeline puts a segment
+  is a statement about the rebuild. The second is the one that mattered: such a reading corrects the
+  axis like any other, by 28.000 s on the `tc-wide-cues-lie.mkv` fixture, so its correction line was
+  indistinguishable from one that had just taught a 28 s lesson. Every verdict line now ends in
+  `taught the distance Xs`, `taught the standing distance Xs again`, or `taught nothing, read off a
+  rebuilt timeline; the distance stays Xs`. Reported by @rrgomes.
+
 ## [6.67.1] - 2026-09-03
 
 ### Fixed

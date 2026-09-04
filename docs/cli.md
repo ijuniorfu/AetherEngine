@@ -244,6 +244,23 @@ reading corrects the axis like any other, by 28.000 s on `tc-wide-cues-lie.mkv`,
 it the parameter on purpose, so its correction line was otherwise indistinguishable from one that had
 just taught a 28 s lesson.
 
+AE#481 is the case those ten rounds could not see, because a seek burst heals it inside a second. The
+axis belongs to the RUN a re-aimed segment opened, not to the timeline from its advertised start on:
+run the same chain with the re-anchoring seek LAST (`--seek-count 5 --seek-pattern 65,60,70,58,75`,
+served through `Scripts/slowrange.py` at 600 kbps / 300 ms) and the picture reads `pic - picItem` of
+-9.000 at item 53.000 and 0.000 everywhere the landing goes, while the session keeps mapping with
+-9.000 and `capErr` sits at +9.017 to the end of the run. A seek landing now reads what its run
+carries, and says so: `#481 the run holding the landing at item Xs opens at Ys, which is segN's own
+playlist position, so it carries Zs and not the Ws this session was mapping with`. The discriminator
+is that opening, asked of ONE segment: the first the local server answered after the seek, which is the
+one whose content opens that run. It goes into a timeline carrying an axis at the seam that axis
+predicts and into a timeline carrying nothing at its own position, which is round 7's pair of
+admissible answers. Asked of the whole plan the same rule publishes on a coincidence (31 boundaries
+over 120 s against a half-second tolerance: measured, a 0.000 axis written into a timeline carrying
+-27.875 s). Measured on the arm above, `capErr` goes from +9.037 to +0.037, while the 24-seek arms it
+must not touch are unchanged (10 placements, axis -34.376, no reading fired in 2 of 2 runs) and the two
+slow ones improve (mean `|capErr|` 0.0230 and 0.0411 to 0.0162).
+
 `--start-position S` starts at a resume anchor, the same one `serve` takes. `--sw` forces the software path for a source that would route native, which is how a native-only fixture exercises the SW pipeline.
 
 `--malloc-census` turns on the large-allocation census (`AetherEngine.setLargeAllocationCensusEnabled`) for the run, for tracing a footprint that grows where the segment budget says it should not. Besides the 30 s sample it arms a jump trigger, which exists because the 30 s memprobe cannot catch a failure that completes inside one sample (every kill on #220 was that shape): a counter polled at `--census-hz N` runs the zone walk once it climbs `--census-threshold-mb N` above its running high-water. Both flags are inert without `--malloc-census`.

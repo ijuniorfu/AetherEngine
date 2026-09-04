@@ -208,7 +208,7 @@ that distance as a multiple of the epoch's presentation lead: round 5 shipped th
 arithmetic, round 6 measured it per source, round 7 held the median of its readings. The premise was
 that the distance is a geometry of the source. It is not. `Scripts/timecode-fixture.sh` writes three
 clips identical but for their reorder depth, and on the same burst arm over a throttled origin
-(`slowrange.py`, 3200 kbps + 100 ms), `--picture-probe` reading the axis off AVPlayer's own video
+(`Scripts/slowrange.py`, 3200 kbps + 100 ms), `--picture-probe` reading the axis off AVPlayer's own video
 output, 2 runs each and every run identical:
 
 | clip | gate lead | placement 2 sits | placement 3 sits |

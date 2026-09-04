@@ -166,7 +166,15 @@ time out of the picture itself, which is the one axis question nothing else here
 other observable (`#260` frame times, `prodShift` / `hostShift`) describes what the engine WROTE, not
 where AVPlayer then PUT it. Per tick it appends `pic` (source seconds decoded from the frame),
 `picItem` (AVPlayer's own `itemTimeForDisplay` for that frame), `axisErr` (their difference, 0 on an
-honest axis) and `capErr` (the same error as a host placing a cue at `sourceTime` would make it).
+honest axis), `capErr` (the same error as a host placing a cue at `sourceTime` would make it) and
+`capFr`, that same error in frames.
+
+The two errors do NOT have the same resolution, which is why `capFr` is printed. `axisErr`
+differences two frame-grid values read out of one `copyPixelBuffer` call, so it is a whole number of
+frames and every digit of it is a reading. `capErr` differences that same grid value against the
+engine's continuous clock, so below one frame it carries the sub-frame phase of the sampling instant:
+`capFr=+0.40` is the same frame, `capFr=+1.80` is not. Two runs whose `capErr` differs by less than a
+frame have not been shown to differ.
 Needs a fixture whose picture states its own frame number, which `Scripts/timecode-fixture.sh`
 writes; against anything else it prints `pic=none` or nonsense. `pic=none` is also the normal read
 before the first frame and during a stall, so it is not reported as a zero. This is what settled
@@ -199,9 +207,10 @@ Round 4 also needs a fixture with B-FRAMES, and `Scripts/timecode-fixture.sh` no
 (`tc-bframes.mkv`). `-preset ultrafast` disables them, so on `tc-drought.mkv` a segment's dts and pts
 are one number and the gate's offset is the same either way. On real content they are not: the gate
 opens on a random-access point in DECODE order, and taking the offset there put the axis
-`video_delay` frames under the truth on every epoch. The pair isolates exactly that. Read the verdict
-as the MEAN of `capErr` per axis over the run, since a single tick carries up to two frames of the
-probe's own quantisation.
+`video_delay` frames under the truth on every epoch. The pair isolates exactly that. Read the verdict per axis in
+`capFr`, whole frames: a single tick carries up to two frames of the probe's own quantisation. A mean
+of `|capErr|` over ticks does NOT buy resolution below that quantum, it averages the sampling phase
+(AE#418 round 11).
 
 **Round 8: how far a placement sits below its axis is MEASURED, in seconds.** Rounds 5, 6 and 7 read
 that distance as a multiple of the epoch's presentation lead: round 5 shipped the multiple as
@@ -257,9 +266,13 @@ one whose content opens that run. It goes into a timeline carrying an axis at th
 predicts and into a timeline carrying nothing at its own position, which is round 7's pair of
 admissible answers. Asked of the whole plan the same rule publishes on a coincidence (31 boundaries
 over 120 s against a half-second tolerance: measured, a 0.000 axis written into a timeline carrying
--27.875 s). Measured on the arm above, `capErr` goes from +9.037 to +0.037, while the 24-seek arms it
-must not touch are unchanged (10 placements, axis -34.376, no reading fired in 2 of 2 runs) and the two
-slow ones improve (mean `|capErr|` 0.0230 and 0.0411 to 0.0162).
+-27.875 s). Measured on the arm above, `capErr` goes from +9.037 to +0.037, which is 216 frames and the
+only unambiguous number in the set, while the 24-seek arms it must not touch are unchanged (10
+placements, axis -34.376, no reading fired in 2 of 2 runs). On the two slow arms the `capErr` tail
+moves onto the same one-frame lattice pair the fast arm sits on (`+0.009` / `-0.033`). That is a
+sub-frame move and carries no accuracy claim in either direction: an earlier revision of this
+paragraph read it as an improvement from 0.0230 and 0.0411 to 0.0162, which is the mistake AE#418
+round 11 documents on both sides of that thread.
 
 `--start-position S` starts at a resume anchor, the same one `serve` takes. `--sw` forces the software path for a source that would route native, which is how a native-only fixture exercises the SW pipeline.
 

@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.68.0] - 2026-09-05
+
 ### Fixed
 
 - **A live source that goes quiet for a moment no longer commits the session to an item swap
@@ -35,6 +39,19 @@ the public-API contract.
   harness leg names the new outcome (`VERDICT: live-freeze gap absorbed`), and both ends of a late
   episode are now stated in the log, including the case where the source comes back and nothing was
   ever closed. Covered by `Issue446OutageCloseDeadlineTests`.
+
+- **A seek landing reads the axis its own run carries, instead of inheriting one measured
+  elsewhere (AE#481).** The AE#418 axis is published once, at the advertised start of the segment
+  whose gate re-aimed below its boundary, and it then stood for the whole timeline above that seam.
+  The picture says the offset is narrower than that: it belongs to the RUN that segment opened. A
+  seek that opens a new run at a segment the producer wrote on its planned position lands on a
+  source-true stretch, and nothing looked, so `capErr` sat at +9.017 from the landing to the end of
+  the session and every cue placed from the clock was 9 s early, permanently. A seek burst heals it
+  inside a second, which is why ten rounds of #418 never saw it standing: only a session whose last
+  re-anchoring seek is also its last seek keeps the error. A landing now takes the reading itself,
+  anchored on the segment the local server answered first after the seek. Measured on the same arms:
+  `capErr` 9.037 to the end of the session before, 0.037 after, with no reading moving the picture
+  anywhere else (+0.008 to +0.017 across every publication).
 
 ### Added
 

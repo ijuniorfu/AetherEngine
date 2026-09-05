@@ -457,7 +457,14 @@ final class NativeAVPlayerHost {
                 "[NativeAVPlayerHost] #\(sid) layer.isReadyForDisplay=\(ready) t+\(String(format: "%.2f", elapsed))s",
                 category: .engine
             )
-            Task { @MainActor in self?.isVideoReadyForDisplay = ready }
+            // AE#158: the handover leaves the outgoing item on this layer through the load gap, so it
+            // keeps producing changes past the false unloadCurrentItem published. Without the session
+            // guard the item observers carry, the previous episode's picture reads as the successor's
+            // first frame.
+            Task { @MainActor in
+                guard let self, self.sessionID == sid else { return }
+                self.isVideoReadyForDisplay = ready
+            }
         }
 
         let asset = AVURLAsset(url: url, options: Self.assetCreationOptions(httpHeaders: httpHeaders))

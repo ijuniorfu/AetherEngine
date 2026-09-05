@@ -22,7 +22,9 @@ the public-API contract.
   before the engine subscribes for the successor, so a previous episode's EOF, readiness, rate and
   clock are not replayed into the new session; the same-content #93 recovery swap is unchanged.
   Main-actor hops queued by the outgoing item's KVO drop on their session guard instead of writing
-  into the successor. The `nativeRemoteHLS` bypass now consumes the handover too; it used to drop
+  into the successor, layer readiness included: the handover leaves the outgoing item mounted on the
+  layer, so that observer is the one that goes on reporting through the gap. The `nativeRemoteHLS`
+  bypass now consumes the handover too; it used to drop
   the item to nil across a native->native load even while PiP was active. Covered by
   `PiPItemHandoverTests`.
 

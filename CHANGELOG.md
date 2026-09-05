@@ -10,6 +10,32 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A live source that goes quiet for a moment no longer commits the session to an item swap
+  (AE#446 round 7).** The window was served as a finished asset (ENDLIST) the instant the source
+  missed its cadence, which is the same `1.5 x TARGETDURATION` threshold that withdraws the
+  blocking-reload advert. The two decisions do not cost the same: the withdrawal is reversible and
+  free, while an item that has read an ENDLIST never reloads its playlist again, so the source
+  coming back is only expressible as an item swap and the viewer pays for it with a visible seam at
+  the end of the runway. Reported from the field on a 1 s-segment stack (TARGETDURATION 2, so the
+  threshold was 3.0 s): a 3.006 s stall in the source read closed a window with 14 s of runway still
+  ahead of the consumer, the source delivered again 0.6 s later, and the session played out its
+  runway and swapped 17 s after that, for 0.18 to 0.20 s of rebuffering the outage never required.
+  The close now waits for `3 x TARGETDURATION` of silence, and closes early only when the runway
+  left in front of the consumer falls under `2 x TARGETDURATION`, because a consumer that walks off
+  the end of an open window gets no `didPlayToEndTime` to hand the session a controlled swap. The
+  wait is bounded above by the producer's own patience with a source that cuts nothing (35 s, after
+  which the read is given up and a window not yet closed never would be), which is reachable at the
+  large TARGETDURATION a bursty relay seals from its arrival cadence. The
+  ceiling this spends is measured rather than assumed: with the close suppressed and the advert
+  withdrawn, AVPlayer kept fetching the resident runway for 77 s past a freeze at TARGETDURATION 6,
+  about 13 target durations (20 fetches, 13 `-12888` lines across 20 polls), and it stopped on the
+  last listed segment rather than on patience. The
+  harness leg names the new outcome (`VERDICT: live-freeze gap absorbed`), and both ends of a late
+  episode are now stated in the log, including the case where the source comes back and nothing was
+  ever closed. Covered by `Issue446OutageCloseDeadlineTests`.
+
 ### Added
 
 - **`prepareForItemReplacement()`: a host can ask for the AE#158 in-place item handover on a

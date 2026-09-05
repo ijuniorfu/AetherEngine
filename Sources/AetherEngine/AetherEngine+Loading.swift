@@ -1586,7 +1586,10 @@ extension AetherEngine {
         // SW-PiP cue mirror never delivered a cue after the frame compositor was armed. Both halves
         // of such a wiring work in isolation, which is why a dead sink here reads as a working one.
         softwareCancellables.removeAll()
-        let host = SoftwarePlaybackHost()
+        // #489: same contract as the native host two paths over, which re-applies `_videoGravity`
+        // on every build. Without it a software host came up aspect-fit whatever the app had set,
+        // and only a second write mid-session took effect.
+        let host = SoftwarePlaybackHost(videoGravity: _videoGravity)
         host.setAudioDelay(loadedOptions.audioDelaySeconds)   // AE#464: before the decoder opens
         host.deinterlaceConfig = DeinterlaceConfig(
             mode: loadedOptions.deinterlaceMode,

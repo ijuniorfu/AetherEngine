@@ -305,6 +305,19 @@ final class SoftwarePlaybackHost {
         feedLock.lock(); _seekGeneration &+= 1; feedLock.unlock()
     }
 
+    /// AE#491: the generation the packet now in the decoder was read under. The decoder callback
+    /// compares it against the live one, because a flush cannot reach a frame that is already
+    /// inside the decoder: `videoDecoder.flush()` runs on the actor while the demux thread sits in
+    /// `decode(packet:)`, and the hardware decoder answers on its own thread later still. A frame
+    /// that comes out under a newer generation belongs to the position the seek left behind, and
+    /// handing it over makes it the renderer's newest timestamp - the frame after it then reports
+    /// the whole seek distance as one inter-frame interval.
+    nonisolated(unsafe) private var _decodeGeneration: UInt64 = 0
+    nonisolated private var decodeGeneration: UInt64 {
+        get { feedLock.lock(); defer { feedLock.unlock() }; return _decodeGeneration }
+        set { feedLock.lock(); _decodeGeneration = newValue; feedLock.unlock() }
+    }
+
     /// Set when pause() stopped the synchronizer; play() restores the rate (previously play() only flipped isPlaying, leaving the clock frozen).
     private var pausedByHost = false
 
@@ -686,11 +699,14 @@ final class SoftwarePlaybackHost {
         (videoDecoder as? SoftwareVideoDecoder)?.deinterlaceConfig = deinterlaceConfig
 
         try videoDecoder.open(stream: vStream) { [weak self] pixelBuffer, pts, hdr10PlusData in
+            guard let self else { return }
+            // AE#491: a frame decoded from a pre-seek packet is not late, it is from somewhere else.
+            guard self.decodeGeneration == self.seekGeneration else { return }
             // Decoder callback is off-main; SampleBufferRenderer is internally locked.
-            self?.renderer.enqueue(pixelBuffer: pixelBuffer, pts: pts, hdr10PlusData: hdr10PlusData)
+            self.renderer.enqueue(pixelBuffer: pixelBuffer, pts: pts, hdr10PlusData: hdr10PlusData)
             // First-frame milestone: demux reached a video packet + decoder produced a pixel buffer.
-            if self?.bumpFramesEnqueued() == 0 {
-                self?.noteFirstFrameEnqueuedForDisplayFallback()
+            if self.bumpFramesEnqueued() == 0 {
+                self.noteFirstFrameEnqueuedForDisplayFallback()
                 let pfType = CVPixelBufferGetPixelFormatType(pixelBuffer)
                 EngineLog.emit(
                     "[SWHost] first video frame enqueued: "
@@ -997,6 +1013,16 @@ final class SoftwarePlaybackHost {
         // path's optimistic publish does instead of drifting on the stale synchronizer anchor.
         currentTime = seconds
         seekInFlight = true
+
+        // AE#491: armed BEFORE the reposition, not after it. The flushes above emptied both queues,
+        // but the reposition is awaited and the decode thread runs under it, so a frame from a
+        // packet read before the seek used to meet a renderer with no threshold standing and was
+        // taken. It then owns the newest handed-over timestamp, and the first real post-seek frame
+        // reports the entire seek distance as one inter-frame interval.
+        let targetTime = CMTime(seconds: seconds, preferredTimescale: 90000)
+        videoDecoder.skipUntilPTS = targetTime
+        renderer.setSkipThreshold(targetTime)
+
         let outcome = await dem.seekBounded(
             to: seconds, timeout: Self.seekBudgetSeconds, on: seekQueue,
             isSuperseded: { [weak self] in self?.seekGeneration != generation })
@@ -1013,7 +1039,9 @@ final class SoftwarePlaybackHost {
             )
         }
 
-        let targetTime = CMTime(seconds: seconds, preferredTimescale: 90000)
+        // Re-armed after the landing: a pre-seek frame PAST the target (a backward seek) clears the
+        // threshold on its way through, and the generation guard on the decoder callback is what
+        // stops it. Both stand, because neither alone covers both seek directions.
         videoDecoder.skipUntilPTS = targetTime
         renderer.setSkipThreshold(targetTime)
 
@@ -1087,7 +1115,8 @@ final class SoftwarePlaybackHost {
         audioStreamIndex: Int32,
         videoTimeBaseSeconds: Double,
         audioTimeBaseSeconds: Double,
-        audioTapSink: (@Sendable (CMSampleBuffer) -> Void)?
+        audioTapSink: (@Sendable (CMSampleBuffer) -> Void)?,
+        noteDecodeGeneration: @Sendable () -> Void
     ) -> Bool {
         let tbSec = pkt.isVideo ? videoTimeBaseSeconds : audioTimeBaseSeconds
         guard tbSec > 0, !pkt.bytes.isEmpty else { return false }
@@ -1108,6 +1137,7 @@ final class SoftwarePlaybackHost {
         p.pointee.stream_index = pkt.isVideo ? videoStreamIndex : audioStreamIndex
 
         if pkt.isVideo {
+            noteDecodeGeneration()
             videoDecoder.decode(packet: p)
             return false
         } else if let aDec = audioDecoder, let aOut = audioOutput {
@@ -1229,6 +1259,13 @@ final class SoftwarePlaybackHost {
         let getSeekGeneration: @Sendable () -> UInt64 = { [weak self] in
             self?.seekGeneration ?? 0
         }
+        let setDecodeGeneration: @Sendable (UInt64) -> Void = { [weak self] gen in
+            self?.decodeGeneration = gen
+        }
+        let noteDecodeGeneration: @Sendable () -> Void = { [weak self] in
+            guard let self else { return }
+            self.decodeGeneration = self.seekGeneration
+        }
         let getBackgroundAudioOnly: @Sendable () -> Bool = { [weak self] in
             self?.backgroundAudioOnly ?? false
         }
@@ -1297,7 +1334,8 @@ final class SoftwarePlaybackHost {
                     clockArmed: getClockArmed,
                     markClockArmed: setClockArmed,
                     onEnd: onEnd,
-                    audioTapSink: getAudioTapSink
+                    audioTapSink: getAudioTapSink,
+                    noteDecodeGeneration: noteDecodeGeneration
                 )
             }
             return
@@ -1330,6 +1368,8 @@ final class SoftwarePlaybackHost {
                 markClockArmed: setClockArmed,
                 onClockAnchored: onClockAnchored,
                 seekGeneration: getSeekGeneration,
+                setDecodeGeneration: setDecodeGeneration,
+                noteDecodeGeneration: noteDecodeGeneration,
                 backgroundAudioOnly: getBackgroundAudioOnly,
                 onError: onError,
                 onEnd: onEnd,
@@ -1527,7 +1567,8 @@ final class SoftwarePlaybackHost {
         clockArmed: @Sendable () -> Bool,
         markClockArmed: @Sendable () -> Void,
         onEnd: @Sendable () -> Void,
-        audioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?)
+        audioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?),
+        noteDecodeGeneration: @Sendable () -> Void
     ) {
         // Audio look-ahead pump (#107 audio chopping): feed audio packets ahead of the
         // combined cursor so the audio renderer holds AudioLookaheadPolicy.targetLeadSeconds
@@ -1569,7 +1610,8 @@ final class SoftwarePlaybackHost {
                     audioStreamIndex: audioStreamIndex,
                     videoTimeBaseSeconds: videoTimeBaseSeconds,
                     audioTimeBaseSeconds: audioTimeBaseSeconds,
-                    audioTapSink: audioTapSink()
+                    audioTapSink: audioTapSink(),
+                    noteDecodeGeneration: noteDecodeGeneration
                 )
                 if !armed {
                     preArmPacketsFed += 1
@@ -1747,7 +1789,8 @@ final class SoftwarePlaybackHost {
                 audioStreamIndex: audioStreamIndex,
                 videoTimeBaseSeconds: videoTimeBaseSeconds,
                 audioTimeBaseSeconds: audioTimeBaseSeconds,
-                audioTapSink: audioTapSink()
+                audioTapSink: audioTapSink(),
+                noteDecodeGeneration: noteDecodeGeneration
             )
 
             // Arm clock once on first packet PTS (anchoring at .zero caused delay). Audio: first decoded buffers; video-only: first video packet (no clock without audio = frozen frame).
@@ -1823,6 +1866,8 @@ final class SoftwarePlaybackHost {
         markClockArmed: @Sendable () -> Void,
         onClockAnchored: @Sendable (Double) -> Void,
         seekGeneration: @Sendable () -> UInt64,
+        setDecodeGeneration: @Sendable (UInt64) -> Void,
+        noteDecodeGeneration: @Sendable () -> Void,
         backgroundAudioOnly: @Sendable () -> Bool,
         onError: @Sendable (String) -> Void,
         onEnd: @Sendable () -> Void,
@@ -1893,6 +1938,7 @@ final class SoftwarePlaybackHost {
             while !parkedVideo.isEmpty, renderer.isReadyForMoreMediaData,
                   !stopRequested(), !backgroundAudioOnly() {
                 let p = parkedVideo.removeFirst()
+                setDecodeGeneration(parkedSeekGeneration)
                 videoDecoder.decode(packet: p)
                 av_packet_unref(p)
                 av_packet_free_safe(p)
@@ -2251,6 +2297,7 @@ final class SoftwarePlaybackHost {
                     av_packet_free_safe(packet)
                     return true
                 }
+                setDecodeGeneration(genBeforeRead)
                 videoDecoder.decode(packet: packet)
                 // Video-only / undecodable audio fallback: arm clock off first video packet (50+ audio packets with zero buffers = decoder not recovering).
                 if !clockArmed(), let aOut = audioOutput,
@@ -2282,10 +2329,26 @@ final class SoftwarePlaybackHost {
                         return false
                     }
                 }
+                // AE#491: the video branch discards a pre-seek packet here and audio has to do the
+                // same. `audioOutput.flush()` has already emptied the queue these buffers would
+                // join, and their PTS is the marker `applyAudioClockAction` measures the lead
+                // against: one pre-seek buffer past this point reads as a lead the size of the
+                // seek and pauses the clock for a rebuffer that is not happening.
+                if seekGeneration() != genBeforeRead {
+                    av_packet_unref(packet)
+                    av_packet_free_safe(packet)
+                    return true
+                }
                 audioPacketsSeen += 1
                 let buffers = aDec.decode(packet: packet)
                 if !buffers.isEmpty { audioBuffersProduced = true }
                 let tapSink = audioTapSink()
+                // The flush can also land inside `decode`, so the buffers are checked out again.
+                if seekGeneration() != genBeforeRead {
+                    av_packet_unref(packet)
+                    av_packet_free_safe(packet)
+                    return true
+                }
                 for buf in buffers {
                     tapSink?(buf)   // #95: mirror before enqueue
                     aOut.enqueue(sampleBuffer: buf)

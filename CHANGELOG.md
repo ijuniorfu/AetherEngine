@@ -12,6 +12,21 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.68.1] - 2026-09-05
+
+### Fixed
+
+- **A software session is built on the gravity the host asked for, instead of on the layer's own
+  default (#489).** `videoGravity` reached the software display layer through its setter only, so a
+  value set before playback started was dropped when the load built the host, and the identical
+  value set again mid-session took effect. From the outside that reads as a picture mode that works
+  only when you toggle it. The native path has re-applied the stored gravity on every host build all
+  along; the software path now does too, and does it at construction, so the layer is never briefly
+  on a fill nobody asked for. Beyond the picture itself, a host that draws its own subtitle overlay
+  has to know which gravity is on screen in order to place cues against the right rectangle, and
+  while the engine's published value and the layer's real one could disagree for a whole session
+  there was nothing for it to trust.
+
 ## [6.68.0] - 2026-09-05
 
 ### Fixed

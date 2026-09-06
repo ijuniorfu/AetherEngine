@@ -12,6 +12,37 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.68.4] - 2026-09-06
+
+### Fixed
+
+- **A parked packet no longer outlives the flush that retired it (#494).** The parked-video FIFO
+  holds whatever the demux loop read ahead of the renderer, which is the audio lead's worth of
+  video, three to four seconds of it. The drain read the seek generation once and then emptied that
+  FIFO into the decoder, so a seek landing mid-drain had its own `videoDecoder.flush()` undone by
+  the packets that kept arriving after it. The frames those packets produce were still refused at
+  the decoder callback, which is why this survived both rounds of #491; the damage is done by the
+  one frame that does not come out during its own decode. The deinterlacer holds a frame of
+  lookahead, so the last pre-seek frame emerges on the FIRST post-seek decode call, by which time
+  the decode generation is the new one and every gate passes it. It is then a sample whose
+  presentation time is the whole seek distance in the future: the display layer accepts it, holds
+  it, stops reporting `isReadyForMoreMediaData`, and the demux loop parks on that signal until its
+  packet FIFO caps out, leaving video frozen while the clock runs and the session reports playing
+  with no rebuffer. The generation check is per packet now, and a feed epoch orders the feed against
+  the flush: a caller captures it while its packets are still current and hands it back with each
+  one, and `flush()` retires it under the same lock `decode(packet:epoch:)` takes. Measured on a
+  480i fixture through the hardware deinterlace chain, twenty seeks a run and ten runs an arm with
+  the arms alternating inside each repeat: 9 frozen episodes in 200 seeks before, 0 in 200 after.
+  Not confined to the deinterlace path; the progressive arm produced it too, just less often.
+
+### Changed
+
+- `aetherctl play --deinterlace-field-rate field|frame` drives `LoadOptions.deinterlaceFieldRate`
+  (#492). `send_field`, the default, emits one output frame per FIELD, so a 29.97i source hands the
+  layer 59.94 frames per second against 23.976 for a progressive one, and that factor is the
+  confound in any per-seek counter compared across the two. The lever existed in no harness, so the
+  A/B that separates the count from the path could not be run at all.
+
 ## [6.68.3] - 2026-09-06
 
 ### Fixed

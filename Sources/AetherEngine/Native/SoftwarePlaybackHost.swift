@@ -305,6 +305,28 @@ final class SoftwarePlaybackHost {
         feedLock.lock(); _seekGeneration &+= 1; feedLock.unlock()
     }
 
+    /// AE#491 round 2: the generation whose seek is FINISHED, meaning the source stands at that
+    /// target and the clock has been re-anchored there. The gap to `_seekGeneration` is the seek
+    /// window; see `SeekWindow` for what a packet read inside it does to the frontier and to the
+    /// audio lead.
+    nonisolated(unsafe) private var _settledSeekGeneration: UInt64 = 0
+
+    nonisolated var seekWindowOpen: Bool {
+        feedLock.lock(); defer { feedLock.unlock() }
+        return SeekWindow.isOpen(requested: _seekGeneration, settled: _settledSeekGeneration)
+    }
+
+    nonisolated private func noteSeekSettled(_ generation: UInt64) {
+        feedLock.lock()
+        if SeekWindow.closes(settling: generation, live: _seekGeneration) {
+            _settledSeekGeneration = generation
+        }
+        feedLock.unlock()
+        demuxCondition.lock()
+        demuxCondition.broadcast()
+        demuxCondition.unlock()
+    }
+
     /// AE#491: the generation the packet now in the decoder was read under. The decoder callback
     /// compares it against the live one, because a flush cannot reach a frame that is already
     /// inside the decoder: `videoDecoder.flush()` runs on the actor while the demux thread sits in
@@ -1006,6 +1028,7 @@ final class SoftwarePlaybackHost {
         // Live source is forward-only; DVR rewind reseeds decoders from the ring without touching the live demuxer's read position.
         if isLive, let ring = dvrRing {
             await seekLiveDVR(to: seconds, ring: ring, wasPlaying: wasPlaying)
+            noteSeekSettled(generation)
             return .landed
         }
 
@@ -1061,6 +1084,9 @@ final class SoftwarePlaybackHost {
         }
         // Arm now so the demux loop doesn't re-arm at stale initialClockTime (a pre-first-audio seek snapped back to session start without this).
         clockArmed = true
+        // The source stands at the target and the clock is anchored on it: everything the loop
+        // reads from here belongs to this position. Closing the window releases the loop.
+        noteSeekSettled(generation)
         return outcome
     }
 
@@ -1156,6 +1182,8 @@ final class SoftwarePlaybackHost {
         stopRequested = true
         isPlaying = false
         seekInFlight = false
+        // A teardown inside a seek's window would otherwise leave it open on this instance.
+        noteSeekSettled(seekGeneration)
         timeTimer?.cancel()
         timeTimer = nil
         renderer.subtitleCompositor.reset()
@@ -1258,6 +1286,9 @@ final class SoftwarePlaybackHost {
         }
         let getSeekGeneration: @Sendable () -> UInt64 = { [weak self] in
             self?.seekGeneration ?? 0
+        }
+        let getSeekWindowOpen: @Sendable () -> Bool = { [weak self] in
+            self?.seekWindowOpen ?? false
         }
         let setDecodeGeneration: @Sendable (UInt64) -> Void = { [weak self] gen in
             self?.decodeGeneration = gen
@@ -1368,6 +1399,7 @@ final class SoftwarePlaybackHost {
                 markClockArmed: setClockArmed,
                 onClockAnchored: onClockAnchored,
                 seekGeneration: getSeekGeneration,
+                seekWindowOpen: getSeekWindowOpen,
                 setDecodeGeneration: setDecodeGeneration,
                 noteDecodeGeneration: noteDecodeGeneration,
                 backgroundAudioOnly: getBackgroundAudioOnly,
@@ -1866,6 +1898,7 @@ final class SoftwarePlaybackHost {
         markClockArmed: @Sendable () -> Void,
         onClockAnchored: @Sendable (Double) -> Void,
         seekGeneration: @Sendable () -> UInt64,
+        seekWindowOpen: @Sendable () -> Bool,
         setDecodeGeneration: @Sendable (UInt64) -> Void,
         noteDecodeGeneration: @Sendable () -> Void,
         backgroundAudioOnly: @Sendable () -> Bool,
@@ -2075,9 +2108,14 @@ final class SoftwarePlaybackHost {
         }
 
         func demuxIteration() -> Bool {
-            if !isPlaying() {
+            // AE#491 round 2: the seek window is part of this park, not a second one. Keyed on it,
+            // the loop stands still from the generation bump until the source and the clock are
+            // both at the target, so nothing it does can be measured against, or fed from, the
+            // position the seek left behind.
+            if !SeekWindow.loopMayRead(isPlaying: isPlaying(), windowOpen: seekWindowOpen()) {
                 condition.lock()
-                while !isPlaying() && !stopRequested() {
+                while !SeekWindow.loopMayRead(isPlaying: isPlaying(), windowOpen: seekWindowOpen()),
+                      !stopRequested() {
                     autoreleasepool {
                         _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
                     }
@@ -2138,8 +2176,13 @@ final class SoftwarePlaybackHost {
                 return false
             }
 
-            // Stale packet from before seek flush: decoding would clear the skip threshold (visible fast-forward burst). Discard.
-            if seekGeneration() != genBeforeRead {
+            // Stale packet from before seek flush: decoding would clear the skip threshold (visible
+            // fast-forward burst). Discard. AE#491 round 2: the generation alone does not say it,
+            // because a read that starts INSIDE the window carries the new one and is stale all the
+            // same; see `SeekWindow.admitsPacket`.
+            if !SeekWindow.admitsPacket(readGeneration: genBeforeRead,
+                                        liveGeneration: seekGeneration(),
+                                        windowOpen: seekWindowOpen()) {
                 av_packet_unref(packet)
                 av_packet_free_safe(packet)
                 return true

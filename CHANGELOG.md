@@ -10,7 +10,24 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A seek's window is closed at both ends, not just at the request (#491 round 2).** The seek
+  generation moves when a seek is REQUESTED, and the read position moves when the reposition runs,
+  tens of milliseconds later. A packet read in between carries the OLD position's bytes under the
+  NEW generation, which is the pass condition of every gate that compares generations, so round 1's
+  guards let it through. One video packet is enough: on a backward seek its timestamp is past the
+  target, so the skip threshold passes it and it becomes the renderer's frontier, and since the
+  frontier is a maximum no frame from the new position can lower it again, leaving the reported
+  cushion carrying the seek distance for the rest of the session. The audio half of the same window
+  measures a packet enqueued after the landing against a clock the landing has not re-anchored yet,
+  and a lead the size of the seek reads as an exhausted one that pauses the clock for a rebuffer
+  that is not happening. The demux loop now stands still from the bump until the source and the
+  clock are both at the target, and discards anything a read took out of that window. Measured on a
+  3000 s fixture with twelve alternating large seeks two seconds apart: 5 to 9 packets per run
+  entered the pipeline from a source that had not been repositioned yet and two of three runs took
+  a spurious rebuffer, against zero of either afterwards, with the seek landing latency unchanged
+  (59.7 ms against 60.7 ms over 24 seeks).
 
 ## [6.68.2] - 2026-09-05
 

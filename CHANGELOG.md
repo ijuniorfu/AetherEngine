@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.68.3] - 2026-09-06
+
 ### Fixed
 
 - **A seek's window is closed at both ends, not just at the request (#491 round 2).** The seek

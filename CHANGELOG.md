@@ -12,6 +12,67 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.69.0] - 2026-09-06
+
+### Added
+
+- **`PlaybackErrorKind.sourceCertificateRejected` (#495).** An origin behind a self-signed or
+  private CA certificate is refused before a byte arrives, and nothing in the failure said so:
+  there was no `NSURLErrorServerCertificate` handling anywhere in the engine, so on the FFmpeg path
+  a refused handshake reached the demuxer as an empty stream and surfaced as "Invalid data found
+  when processing input", which reads as a corrupt file, while on the native path the URL error sat
+  under AVFoundation's own inside `NSUnderlyingErrorKey` where nothing looked. The new kind carries
+  the `NSURLErrorDomain` code (-1200 through -1206) in `underlyingCode` and an English sentence the
+  OS locale cannot change. Reported by the Moonfin developer, whose word for the symptom is the
+  right one: a split state, where a host's own API layer browses the library fine and every engine
+  fetch fails. This does not make such an origin playable, which is a separate decision; it makes
+  the failure legible.
+
+### Fixed
+
+- **A frame that says nothing about colour inherits what the container declared (#499).** An HDR
+  source whose colour description lives only in the container (an empty VUI in the bitstream) lost
+  its tone map in the frame extractor. The gate reads the stream (`codecpar.color_trc` says PQ) and
+  the tone mapper hands zscale the frame, and libavcodec writes the VUI onto a frame without ever
+  falling back to `codecpar`, so zimg had no path to linear and failed `code 3074`. The still then
+  fell through to the plain sws conversion, which is an untone-mapped PQ picture. `ColorDescription`
+  resolves the two declarations once, per field, with the bitstream winning wherever it committed
+  to a value and two silences staying silent. Measured with `aetherctl extract` on one clip muxed
+  twice: the container-only file now produces the byte-identical image the VUI file always did, and
+  the VUI file's own output did not move. The software decoder was the same defect one layer down
+  and unreported: it built its CoreVideo attachments from the frame while the hardware decoder
+  builds them from `codecpar`, so the same file kept PQ / BT.2020 through one decoder and lost it
+  through the other.
+- **macOS reads its own display instead of asserting it has none (#493).** `AVPlayer.availableHDRModes`
+  is `API_UNAVAILABLE(macos)`, so the capability branch there returned a table of `false`. That is
+  not "unknown", it is an assertion, and `effectiveVideoFormat` clamps a Dolby Vision source's PQ
+  base against it, which is how a DV title on a 16-inch XDR display resolved to `.sdr`. HDR, HDR10
+  and HLG now come from `AVPlayer.eligibleForHDRPlayback`, which is display-configuration aware and
+  reads false on an SDR-only Mac. Dolby Vision stays unclaimed: eligibility proves EDR, not that
+  AVFoundation will accept a given DV variant, and a refusal costs -11868 with nothing playing.
+  Separately, `videoFormat` took the tvOS branch on macOS, where `currentPanelIsHDR()` is a hard
+  `false`, so every HDR title was labelled SDR whatever the display was doing; macOS composites EDR
+  per window with no display mode switch, which is the same physics as the iOS built-in panel, so it
+  belongs on that branch. That half is what made plain HDR10 and HLG read SDR: the capability stub
+  only ever reached DV sources, since `effectiveVideoFormat` opens with `guard detected ==
+  .dolbyVision`. Reported by Rasmusmart57.
+
+### Changed
+
+- **The display says what it can before the engine writes to it (#459).** One line per criteria
+  event, emitted before any set or clear, because a write is what makes a later reading
+  unattributable: `[DisplayCriteria] panel readout before apply: currentEDR=1.20 potentialEDR=1.00
+  headroomLimit=inactive switching=no matching=on hdrEligible=yes provenHDR=yes`. `potentialEDRHeadroom`
+  is in there against a measurement of my own that read it flat at 1.00 while `currentEDRHeadroom`
+  read 1.20 on the same `UIScreen`; that was one box on one OS, and the box this issue is about
+  disagrees on the other property. `UITraitCollection.hdrHeadroomUsageLimit` (tvOS 26) is in there
+  because it caps what the headroom properties may report while it is active, so a 1.00 under it is
+  a statement about the app's UI state rather than about the display, and every reading this issue
+  rests on was taken without knowing which of the two it was. At apply the line sits before the
+  Match Content guard, since a box with matching off is exactly the configuration nothing else in
+  the log describes, and it is deliberately not routed through the HDR proof latch: a diagnostic
+  that also decided routing would answer a different question than the one being asked.
+
 ## [6.68.4] - 2026-09-06
 
 ### Fixed

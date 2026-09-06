@@ -239,6 +239,27 @@ public struct DisplayCapabilities: Sendable, Equatable {
         self.supportsHDR10 = supportsHDR10
         self.supportsHLG = supportsHLG
     }
+
+    /// AE#493: what a display that engages EDR on demand can present, where no per-mode table exists.
+    ///
+    /// `AVPlayer.availableHDRModes` is `API_UNAVAILABLE(macos)`, so the macOS branch had nothing to read
+    /// for the per-mode split and returned a table of `false`. That is not the same as unknown: it is an
+    /// assertion, and `effectiveVideoFormat` clamps a PQ base against it, which downgraded every HDR10
+    /// and HLG source to SDR before playback started (reported on a 16" XDR, macOS 26).
+    ///
+    /// Eligibility is the honest answer for the two that only need EDR: HDR10 and HLG are a transfer
+    /// function, and a display AVFoundation calls eligible for HDR playback presents both. It is
+    /// deliberately NOT the answer for Dolby Vision. Eligibility proves EDR, not that AVFoundation will
+    /// accept a given DV variant on this display, and a refusal surfaces as -11868 with nothing playing.
+    /// DV therefore stays unclaimed here and belongs to a host assertion instead, where the claim is made
+    /// by whoever knows the hardware.
+    static func onDemandEDRDisplay(hdrEligible: Bool) -> DisplayCapabilities {
+        DisplayCapabilities(
+            supportsHDR: hdrEligible,
+            supportsDolbyVision: false,
+            supportsHDR10: hdrEligible,
+            supportsHLG: hdrEligible)
+    }
 }
 
 /// Deinterlacer selection for the software-decode path (interlaced MPEG-2 / VC-1 / MPEG-4, and

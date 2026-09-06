@@ -82,7 +82,8 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// exists. A decoded frame carries the VUI alone, and a remux whose VUI is empty would otherwise
     /// reach `attachColorSpace` as an untagged picture, so an HDR10 file decoded in software lost its
     /// PQ / BT.2020 attachments while the same file through the hardware decoder (which reads
-    /// `codecpar`) kept them. Written once under `lock` in `open`, read on the decode thread.
+    /// `codecpar`) kept them. Written once in `open`, before the host can feed a packet, and read on
+    /// the decode thread afterwards, the same discipline `use10Bit` and the other open-time fields keep.
     private var containerColor = ColorDescription.unspecified
 
     /// Deinterlaced frames dropped for carrying no PTS (see the drop site in decode()). Guarded by `lock`.

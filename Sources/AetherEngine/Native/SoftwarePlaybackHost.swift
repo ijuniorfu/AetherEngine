@@ -2173,7 +2173,7 @@ final class SoftwarePlaybackHost {
             // AE#492: captured before the read, so a flush that lands during it retires this packet
             // inside the decoder rather than leaving the caller to re-check a value it cannot hold
             // across the call.
-            let epochBeforeRead = videoDecoder.feedEpoch
+            var epochBeforeRead = videoDecoder.feedEpoch
             let packet: UnsafeMutablePointer<AVPacket>?
             do {
                 packet = try demuxer.readPacket()
@@ -2227,6 +2227,11 @@ final class SoftwarePlaybackHost {
                         waitForRenderer(.drainAll)
                         freeParkedVideo()
                         videoDecoder.flush()
+                        // AE#492: this flush is THIS thread's, made after the read and on behalf of
+                        // the packet in hand. Retiring that packet along with the seam it opens
+                        // would drop the first picture of every new segment, so the epoch moves with
+                        // it. A seek's flush comes from the other thread and is not re-read here.
+                        epochBeforeRead = videoDecoder.feedEpoch
                         audioDecoder?.flush()
                         renderer.drainReorderBuffer()
                         // Chunked archives seam every minute or two; log each seam (bounded by the

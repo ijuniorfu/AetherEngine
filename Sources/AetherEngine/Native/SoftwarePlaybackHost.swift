@@ -1164,7 +1164,9 @@ final class SoftwarePlaybackHost {
 
         if pkt.isVideo {
             noteDecodeGeneration()
-            videoDecoder.decode(packet: p)
+            // AE#492: no epoch. This replays from the DVR ring after a reseed, so there is no batch
+            // of packets decided on before a flush for one to invalidate.
+            videoDecoder.decode(packet: p, epoch: nil)
             return false
         } else if let aDec = audioDecoder, let aOut = audioOutput {
             var enqueued = false
@@ -1966,13 +1968,28 @@ final class SoftwarePlaybackHost {
         // Generation-checked: the blocking waits below can sit here across a seek, and the
         // lockstep gate discards a pre-seek packet for the same reason (decoding one clears
         // the decoder's skip threshold = visible fast-forward burst).
+        //
+        // AE#492: the check is per PACKET, and the epoch travels with it. Read once at the top, this
+        // loop emptied the whole four-second FIFO into the decoder while a seek was landing, so the
+        // packets kept arriving AFTER that seek's `videoDecoder.flush()` and refilled what the flush
+        // had just cleared. Their own frames were still refused at the decoder callback, but the last
+        // one stayed inside the deinterlacer's lookahead and came out on the FIRST post-seek decode,
+        // by which time `decodeGeneration` was the new one and every gate passed it. One such frame
+        // is a sample whose presentation time is the whole seek distance in the future: the layer
+        // takes it, holds it, stops reporting `isReadyForMoreMediaData`, and the loop parks on that
+        // signal until its FIFO caps out. Measured here as three to four seconds of `enq=+0` with the
+        // audio lead decaying under it, on a session that reports playing and never rebuffers.
         func drainParkedVideoNonblocking() {
             if seekGeneration() != parkedSeekGeneration { return }
+            let epoch = videoDecoder.feedEpoch
             while !parkedVideo.isEmpty, renderer.isReadyForMoreMediaData,
                   !stopRequested(), !backgroundAudioOnly() {
+                // Leave the rest standing: the next iteration of the loop frees the FIFO as a batch
+                // once it has read the new generation.
+                if seekGeneration() != parkedSeekGeneration { return }
                 let p = parkedVideo.removeFirst()
                 setDecodeGeneration(parkedSeekGeneration)
-                videoDecoder.decode(packet: p)
+                videoDecoder.decode(packet: p, epoch: epoch)
                 av_packet_unref(p)
                 av_packet_free_safe(p)
             }
@@ -2153,6 +2170,10 @@ final class SoftwarePlaybackHost {
             }
 
             let genBeforeRead = seekGeneration()
+            // AE#492: captured before the read, so a flush that lands during it retires this packet
+            // inside the decoder rather than leaving the caller to re-check a value it cannot hold
+            // across the call.
+            let epochBeforeRead = videoDecoder.feedEpoch
             let packet: UnsafeMutablePointer<AVPacket>?
             do {
                 packet = try demuxer.readPacket()
@@ -2341,7 +2362,7 @@ final class SoftwarePlaybackHost {
                     return true
                 }
                 setDecodeGeneration(genBeforeRead)
-                videoDecoder.decode(packet: packet)
+                videoDecoder.decode(packet: packet, epoch: epochBeforeRead)
                 // Video-only / undecodable audio fallback: arm clock off first video packet (50+ audio packets with zero buffers = decoder not recovering).
                 if !clockArmed(), let aOut = audioOutput,
                    audioDecoder == nil || (audioPacketsSeen >= 50 && !audioBuffersProduced) {

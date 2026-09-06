@@ -1287,6 +1287,15 @@ public final class AetherEngine: ObservableObject {
             supportsHDR10: modes.contains(.hdr10),
             supportsHLG: modes.contains(.hlg)
         )
+        #elseif os(macOS)
+        // AE#493: `availableHDRModes` is `API_UNAVAILABLE(macos)`, so there is no per-mode table to read
+        // here. The old all-false stub was not a hedge, it was an assertion, and `effectiveVideoFormat`
+        // clamped every PQ and HLG source to SDR against it. Eligibility answers the two that only need
+        // EDR; Dolby Vision stays unclaimed. `NSScreen.maximumPotentialExtendedDynamicRangeColorComponentValue`
+        // would be the other candidate and is not used: eligibility already reads true on the reported
+        // display and false on an SDR-only Mac (#98), and NSScreen is main-actor isolated while this is
+        // read per load off the main actor.
+        return DisplayCapabilities.onDemandEDRDisplay(hdrEligible: AVPlayer.eligibleForHDRPlayback)
         #else
         return DisplayCapabilities(
             supportsHDR: AVPlayer.eligibleForHDRPlayback,
@@ -3814,12 +3823,18 @@ public final class AetherEngine: ObservableObject {
         } else {
             panelHDRAfterHandshake = displayCriteria.currentPanelIsHDR()
         }
-        #if os(iOS)
+        #if os(iOS) || os(macOS)
         // The iPhone built-in display has no HDMI Match-Content handshake; it renders HDR/DV natively
         // whenever the system reports it eligible. effectiveFormat is already clamped to displayCapabilities
         // (the same signal that drives the served DV/HDR stream), so publish it directly. Gating on
         // panelHDRAfterHandshake (false on iOS, kept for media-playlist routing) wrongly relabelled every
         // HDR/DV title as SDR in Stats for Nerds.
+        //
+        // AE#493: macOS belongs on this branch for the same reason and was on the tvOS one. It composites
+        // EDR per window with no display mode switch, so there is no handshake to read and
+        // `currentPanelIsHDR()` is a hard `false` off tvOS, which labelled every HDR title on an XDR
+        // display SDR. `panelIsInHDRMode` is not the fix there: the panel-mode question is the tvOS
+        // question, and asking it of a window is the wrong question.
         videoFormat = effectiveFormat
         #else
         videoFormat = Self.presentedVideoFormat(

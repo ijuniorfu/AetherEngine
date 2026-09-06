@@ -938,7 +938,7 @@ final class NativeAVPlayerHost {
                                                            domain: (item.error as NSError?)?.domain)
                 return
             }
-            failure = PlaybackErrorInfo(kind: .nativeItemFailed, message: desc, underlying: item.error)
+            failure = Self.itemFailureInfo(desc: desc, itemError: item.error)
             return
         }
 
@@ -966,7 +966,7 @@ final class NativeAVPlayerHost {
                     + "clock=\(String(format: "%.2f", self.renderedTime)))",
                     category: .engine
                 )
-                self.failure = PlaybackErrorInfo(kind: .nativeItemFailed, message: desc, underlying: item.error)
+                self.failure = Self.itemFailureInfo(desc: desc, itemError: item.error)
             } else {
                 EngineLog.emit(
                     "[NativeAVPlayerHost] #\(self.sessionID) deferred failure cleared: player recovered "
@@ -2370,4 +2370,21 @@ final class NativeAVPlayerHost {
         return parts.joined(separator: " ")
     }
 
+}
+
+extension NativeAVPlayerHost {
+    /// AE#495: classify a failed item before publishing it. AVFoundation's own error is what
+    /// `item.error` reports (`-11800` and friends), and a refused certificate rides one or two levels
+    /// below it in `NSUnderlyingErrorKey`, so a host reading domain and code alone sees AVFoundation
+    /// giving up and nothing about why. Everything that is not a trust refusal keeps
+    /// `nativeItemFailed` exactly as before.
+    nonisolated static func itemFailureInfo(desc: String, itemError: Error?) -> PlaybackErrorInfo {
+        if let code = TransportSecurityFailure.code(in: itemError) {
+            return PlaybackErrorInfo(kind: .sourceCertificateRejected,
+                                     message: TransportSecurityFailure.sentence(for: code),
+                                     underlyingDomain: NSURLErrorDomain,
+                                     underlyingCode: code)
+        }
+        return PlaybackErrorInfo(kind: .nativeItemFailed, message: desc, underlying: itemError)
+    }
 }

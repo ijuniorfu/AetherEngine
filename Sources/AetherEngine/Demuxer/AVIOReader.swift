@@ -495,6 +495,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// on it rather than handing FFmpeg an empty stream to misreport as invalid data. Written on
     /// the delegate queue before `streamEnded`; guarded by `streamLock`.
     private var streamRefusedStatus = 0
+    /// AE#495: the `NSURLErrorDomain` code of a TLS trust refusal seen on any of this reader's tasks,
+    /// 0 when none. Recorded rather than thrown from where it happens, because the task that sees it
+    /// is not the one the open is waiting on: without it the open fails as FFmpeg's invalid data and a
+    /// self-signed origin is indistinguishable from a corrupt file. Guarded by `streamLock`.
+    private var transportSecurityCode = 0
 
     // MARK: - Persistent Mode (single forward-streaming connection, playback path)
 
@@ -1128,6 +1133,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// publishes the status. `fallbackStatus` is the ranged open's refusal (0 when there was
     /// none): a hung-up unranged GET whose header never arrived within the open budget still
     /// carries the verdict the origin already gave. Demux thread, open-time only.
+    /// AE#495: record a TLS trust refusal off any task of this reader, and name it once in the log.
+    /// Everything else is left to the caller's own error handling; this only classifies.
+    func noteTransportSecurityFailure(_ error: Error?) {
+        guard let code = TransportSecurityFailure.code(in: error) else { return }
+        streamLock.lock()
+        let first = transportSecurityCode == 0
+        transportSecurityCode = code
+        streamLock.unlock()
+        guard first else { return }
+        EngineLog.emit(
+            "[AVIOReader] \(label) TLS refused (NSURLError \(code)): "
+            + "\(TransportSecurityFailure.sentence(for: code))",
+            category: .demux)
+    }
+
     private func failIfStreamingRefused(fallbackStatus: Int) throws {
         streamLock.lock()
         let refused = streamRefusedStatus
@@ -1135,6 +1155,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let empty = streamBuffer.isEmpty && streamBytesRead == 0
         streamLock.unlock()
         let status = refused != 0 ? refused : ((ended && empty) ? fallbackStatus : 0)
+        // AE#495: a handshake the system refused outranks a status, because there was never a
+        // response to carry one. Same reason this function exists at all: the demuxer would be handed
+        // nothing and report invalid data.
+        streamLock.lock()
+        let tlsCode = transportSecurityCode
+        streamLock.unlock()
+        if tlsCode != 0 {
+            EngineLog.emit(
+                "[AVIOReader] \(label) source unreachable: \(TransportSecurityFailure.sentence(for: tlsCode)); "
+                + "failing the open typed",
+                category: .demux)
+            markClosed()
+            close()
+            throw AVIOReaderError.transportSecurityFailed(code: tlsCode)
+        }
         guard status != 0 else { return }
         EngineLog.emit(
             "[AVIOReader] \(label) source refused: HTTP \(status); failing the open typed",
@@ -3030,6 +3065,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.unlock()
         if let error, !(deliberateEnd && (error as? URLError)?.code == .cancelled) {
             EngineLog.emit("[AVIOReader] \(label) conn gen=\(generation) ended with error: \(error.localizedDescription)", category: .demux)
+            noteTransportSecurityFailure(error)
         }
         if isCurrentGen && isLive {
             EngineLog.emit("[AVIOReader] Live source: connection ended gen=\(generation) buffered=\(windowAhead / 1024)KB; reconnect will fire when buffer drains", category: .demux)
@@ -3669,7 +3705,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         // A truncating cancel is this reader hanging up on purpose, so the cancellation error it
         // produces is not a failed fetch: the prefix the request asked for is in hand (#255).
-        if let err = delegate.error, !delegate.truncated { throw err }
+        if let err = delegate.error, !delegate.truncated {
+            noteTransportSecurityFailure(err)
+            throw err
+        }
         guard let response = delegate.response else { throw AVIOReaderError.noResponse }
         if delegate.truncated {
             EngineLog.emit(
@@ -4343,6 +4382,10 @@ enum AVIOReaderError: Error, Equatable, CustomStringConvertible, LocalizedError 
     /// instead of the AVERROR_INVALIDDATA FFmpeg reports for an empty or error-page stream, and so the
     /// error page never reaches the demuxer.
     case httpStatus(Int)
+    /// AE#495: the transport was refused over certificate trust, so no body ever existed. Typed for
+    /// the same reason `httpStatus` is: without it the open surfaces FFmpeg's invalid data and a
+    /// self-signed origin reads as a corrupt file.
+    case transportSecurityFailed(code: Int)
 
     var description: String {
         switch self {
@@ -4352,6 +4395,8 @@ enum AVIOReaderError: Error, Equatable, CustomStringConvertible, LocalizedError 
         case .hlsPlaylistOnRawLivePath: return "HLS playlist supplied to the raw live path"
         case .hlsPlaylistOnVODPath: return "HLS playlist supplied to the VOD loopback path"
         case .httpStatus(let status): return "Origin answered HTTP \(status) for the source"
+        case .transportSecurityFailed(let code):
+            return TransportSecurityFailure.sentence(for: code)
         }
     }
 

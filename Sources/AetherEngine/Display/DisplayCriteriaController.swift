@@ -632,6 +632,35 @@ final class DisplayCriteriaController {
         elapsedMs(fromNanos: start.uptimeNanoseconds, toNanos: DispatchTime.now().uptimeNanoseconds)
     }
 
+    /// AE#459: one line carrying everything the system will say about the display, in a fixed shape so a
+    /// reporter can be asked to grep for it.
+    ///
+    /// Built pure because the values come from four different objects and the line is the instrument: a
+    /// diagnostic whose format drifts cannot be compared against the one a reporter posted last month.
+    ///
+    /// `potentialEDR` is in here at DrHurt's suggestion and against my own measurement, which is the point.
+    /// It read a flat 1.00 on an Apple TV 4K 3rd gen on tvOS 26.5 while `currentEDR` read 1.20 on the same
+    /// `UIScreen` in the same moment, so it looked like a property tvOS does not maintain. That was one box
+    /// on one OS, and the box this issue is about answers differently on the other property, so the honest
+    /// move is to print both and let a second panel decide rather than to carry my own result as a rule.
+    nonisolated static func panelReadoutLine(
+        phase: String,
+        currentEDR: CGFloat,
+        potentialEDR: CGFloat,
+        switching: Bool,
+        matching: Bool,
+        hdrEligible: Bool,
+        proven: Bool
+    ) -> String {
+        "[DisplayCriteria] panel readout \(phase): "
+        + "currentEDR=\(String(format: "%.2f", currentEDR)) "
+        + "potentialEDR=\(String(format: "%.2f", potentialEDR)) "
+        + "switching=\(switching ? "yes" : "no") "
+        + "matching=\(matching ? "on" : "off") "
+        + "hdrEligible=\(hdrEligible ? "yes" : "no") "
+        + "provenHDR=\(proven ? "yes" : "no")"
+    }
+
     init() {}
 
     /// Program AVDisplayCriteria before the session starts. `.sdr` programs a rate-only criteria so Match Frame Rate still engages. `codecTag` nil derives from format (`'dvh1'` for DV, `'hvc1'` otherwise). `omitColorExtensions` skips BT.2020 extensions for diagnostic builds. Returns `.willSwitch` when a dynamic-range switch is expected (caller should call waitForSwitch), `.applied` for an SDR rate-only write, or `.unchanged` when the criteria are already active and nothing was written (#133).
@@ -652,6 +681,9 @@ final class DisplayCriteriaController {
         }
 
         let displayManager = window.avDisplayManager
+        // AE#459: before the guard below, not after. A box with Match Content off is exactly the
+        // configuration whose panel state nothing else in this log describes.
+        logPanelReadout("before apply", window: window)
 
         // isDisplayCriteriaMatchingEnabled covers both Match Dynamic Range and Match Frame Rate; tvOS picks the applicable dimension internally.
         guard displayManager.isDisplayCriteriaMatchingEnabled else {
@@ -1115,6 +1147,7 @@ final class DisplayCriteriaController {
             lastApplied = nil
             return
         }
+        logPanelReadout("before reset", window: window)
         window.avDisplayManager.preferredDisplayCriteria = nil
         didApply = false
         lastApplied = nil   // #133: a RESET returns the panel to default; the next apply must re-establish it.
@@ -1125,6 +1158,24 @@ final class DisplayCriteriaController {
     // MARK: - Window resolution
 
     #if os(tvOS)
+    /// Emit the readout for one phase. Called before the engine writes or clears criteria, because a write
+    /// is what makes a later reading unattributable: the whole of #459 is a value read at the one moment it
+    /// has nothing to say. Deliberately NOT routed through `observeHeadroom`: a diagnostic that also latches
+    /// the HDR proof would change routing, and this round is meant to measure, not to decide.
+    private func logPanelReadout(_ phase: String, window: UIWindow) {
+        let manager = window.avDisplayManager
+        EngineLog.emit(
+            Self.panelReadoutLine(
+                phase: phase,
+                currentEDR: window.screen.currentEDRHeadroom,
+                potentialEDR: window.screen.potentialEDRHeadroom,
+                switching: manager.isDisplayModeSwitchInProgress,
+                matching: manager.isDisplayCriteriaMatchingEnabled,
+                hdrEligible: AVPlayer.eligibleForHDRPlayback,
+                proven: panelProvenToEngageHDR),
+            category: .engine)
+    }
+
     private func resolveWindow() -> UIWindow? {
         if let provider = Self.windowProvider, let win = provider() as? UIWindow {
             return win

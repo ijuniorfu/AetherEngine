@@ -432,6 +432,9 @@ extension AetherEngine {
         w.noteEdge(edgeSessionTime)
         w.notePlayhead(currentTime)
         w.noteResidentFloor(residentLiveFloorSessionSeconds())
+        // Sodalite#104 round 4: the cadence the playlist declares, which outranks how the source
+        // happened to deliver. nil on the paths that serve no playlist of ours.
+        w.noteTargetDuration(liveTargetDurationSeconds)
         auditLiveRejoinPlacement()
         liveWindow = w
         // AE#442: tick-to-tick advancement, not a running maximum: a backward DVR seek drops the
@@ -440,6 +443,22 @@ extension AetherEngine {
             liveBehindWhenLastAdvancing = w.behindLiveSeconds
         }
         lastPublishedLivePlayhead = currentTime
+        // Sodalite#104: one line per TRANSITION of the edge verdict, with every number that decided
+        // it. A host draws its LIVE badge and its DVR rail from this flag, so a report of "the bar
+        // jumped back to live" is otherwise unanswerable from a device: the distance alone does not
+        // say what it was judged against, and the tolerance follows the cadence now.
+        if clock.isAtLiveEdge != w.isAtEdge {
+            EngineLog.emit(
+                "[AetherEngine] #104 live edge verdict \(w.isAtEdge ? "AT EDGE" : "BEHIND"): "
+                + "behind=\(String(format: "%.2f", w.behindLiveSeconds))s "
+                + "playhead=\(String(format: "%.2f", currentTime))s "
+                + "edge=\(String(format: "%.2f", w.edgeTime))s "
+                + "lastEdgeStep=\(String(format: "%.2f", w.lastEdgeStepSeconds))s "
+                + "targetDuration=\(w.targetDurationSeconds.map { String(format: "%.2f", $0) + "s" } ?? "none") "
+                + "tolerance=\(String(format: "%.2f", w.edgeToleranceSeconds))s",
+                category: .session
+            )
+        }
         clock.liveEdgeTime = w.edgeTime
         clock.seekableLiveRange = w.seekableRange
         clock.isAtLiveEdge = w.isAtEdge

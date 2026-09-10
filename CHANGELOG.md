@@ -30,6 +30,17 @@ the public-API contract.
   patient with the next), floored by the client's patience and bounded by the
   producer's starvation exit. The close deadline carries the same floor, at two
   deliveries rather than one.
+- **The delivery meter read a backlogged join as the source's rhythm, so the
+  window closed fourteen seconds into a session and the viewer paid an item
+  swap (#524).** A backlogged origin hands over its whole window at I/O speed
+  and the cutter finalizes five segments in 55 ms, so every sample in the meter
+  was an interval INSIDE one delivery: it reported "it delivers every 0.04s" for
+  a source delivering every 6.5 s, and dropping the single worst sample threw
+  away the only real interval there was. Intervals inside one delivery are no
+  longer samples of how long the source goes quiet, and the lateness question
+  now also reads the ingest's own arrival meter, which measures the upstream's
+  refresh cadence one layer up, has a value before this provider has finalized
+  its second segment, and has no intra-delivery intervals in it at all.
 
 ## [6.80.0] - 2026-09-10
 

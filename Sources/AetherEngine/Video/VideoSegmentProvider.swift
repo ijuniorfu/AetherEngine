@@ -407,10 +407,20 @@ struct SourceDeliveryCadenceMeter {
     /// threshold under the client's patience on every live join.
     static let minimumSamples = 4
 
+    /// AE#524: two segments finalized this close together are one delivery, not two.
+    ///
+    /// A source that hands over 6 s of media at a time into a 3 s cutter finalizes its segments 30 ms
+    /// apart, and the question this meter answers is how long the source goes QUIET, so those 30 ms
+    /// are not a sample of it. Measured on a device, the meter read "it delivers every 0.04s" for a
+    /// source delivering every 6.5 s, because a backlogged join fills the whole window with intra
+    /// delivery intervals: every quiet stretch then read as an outage, the window closed, and the
+    /// viewer paid an item swap fourteen seconds into the session.
+    static let sameDeliverySeconds = 0.25
+
     private var intervals: [Double] = []
 
     mutating func note(intervalSeconds: Double) {
-        guard intervalSeconds.isFinite, intervalSeconds >= 0 else { return }
+        guard intervalSeconds.isFinite, intervalSeconds > Self.sameDeliverySeconds else { return }
         intervals.append(intervalSeconds)
         if intervals.count > Self.sampleCount {
             intervals.removeFirst(intervals.count - Self.sampleCount)
@@ -1766,6 +1776,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// `LiveEdgePolicy.outageCloseOnRunway` carries the measurement.
     var liveOutageEndlist: Bool {
         let consumerTarget = cache.targetIndex
+        // Read before the lock: the ingest's meter takes a lock of its own.
+        let ingestCadence = liveTargetDurationFloorSeconds
         stateLock.lock()
         if _liveOutageEndlistLatched {
             stateLock.unlock()
@@ -1774,8 +1786,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let total = segments.count
         let silence = sourceSilenceLocked()
         let targetDuration = liveTargetDurationSeal.value
-        let late = sourceIsLateLocked()
-        let cadence = _liveDeliveryCadence.cadenceSeconds
+        let late = sourceIsLateLocked(ingestCadenceSeconds: ingestCadence)
+        let cadence = cadenceSecondsLocked(ingest: ingestCadence)
         let deadline = targetDuration.map {
             LiveEdgePolicy.outageCloseSilenceSeconds(targetDuration: $0, cadenceSeconds: cadence)
         }
@@ -1885,11 +1897,25 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#523: the rhythm is the SOURCE's, measured, floored by the client's patience. A source coarser
     /// than its advertised target duration used to be late on every ordinary delivery, and the close
     /// that followed cost the viewer an item swap each time.
-    private func sourceIsLateLocked() -> Bool {
+    private func sourceIsLateLocked(ingestCadenceSeconds: Double?) -> Bool {
         guard let silence = sourceSilenceLocked() else { return false }
         return silence > LiveEdgePolicy.sourceLateSeconds(
             targetDuration: liveTargetDurationSeal.value ?? 0,
-            cadenceSeconds: _liveDeliveryCadence.cadenceSeconds)
+            cadenceSeconds: cadenceSecondsLocked(ingest: ingestCadenceSeconds))
+    }
+
+    /// AE#524: the source's rhythm, from whichever meter can see it.
+    ///
+    /// On the ingest path the upstream's own arrival cadence is already measured one layer up, by the
+    /// thing that watches playlist refreshes bring new segments, and it is the better measurement:
+    /// a delivery is a refresh there, with no intra-delivery intervals to confuse it, and it has a
+    /// reading before this provider has finalized its second segment. A source the engine cuts itself
+    /// has no such meter, and the finalize intervals here are all there is. Call under stateLock.
+    private func cadenceSecondsLocked(ingest: Double?) -> Double? {
+        let local = _liveDeliveryCadence.cadenceSeconds
+        guard let ingest else { return local }
+        guard let local else { return ingest }
+        return Swift.max(ingest, local)
     }
 
     /// AE#446 round 7: test-only. The close decision is a function of how long the source has been
@@ -1930,9 +1956,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// closed, where a live rejoin has no edge to aim at and starts the viewer at the beginning of it.
     /// Measured doing exactly that: a rejoin 180 s below the place it was supposed to hold.
     var liveOutageProductionResumed: Bool {
+        let ingestCadence = liveTargetDurationFloorSeconds
         stateLock.lock()
         defer { stateLock.unlock() }
-        return _liveOutageEndlistLatched && !sourceIsLateLocked()
+        return _liveOutageEndlistLatched
+            && !sourceIsLateLocked(ingestCadenceSeconds: ingestCadence)
     }
 
     /// AE#446 round 2: re-open the window as live, for a FRESH item only. Safe because the item that

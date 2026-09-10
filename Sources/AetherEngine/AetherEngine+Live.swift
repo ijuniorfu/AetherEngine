@@ -463,6 +463,45 @@ extension AetherEngine {
         clock.seekableLiveRange = w.seekableRange
         clock.isAtLiveEdge = w.isAtEdge
         clock.behindLiveSeconds = w.behindLiveSeconds
+        logLiveCushionIfDue(window: w)
+    }
+
+    /// AE#524: the cushion between the playhead and the live edge, once a second, for the life of a
+    /// live session.
+    ///
+    /// A live session's distance from the edge is set once at the join and then only erodes: the
+    /// playhead advances at exactly 1x while the edge advances at whatever rate the source publishes,
+    /// so any stretch of publishing below real time is spent out of the cushion and nothing gives it
+    /// back. Reported from a device, a session that rebuffered once 57 s in had come up with 15 s of
+    /// cushion and had about 4 s left when it stalled, and the batch arithmetic accounts for only 3.2
+    /// s of the 11 that went missing. Reconstructing the rest from segment timestamps and an
+    /// `AVKitLayer` sample every second is guesswork, and it produced two incompatible readings of
+    /// the same minute.
+    ///
+    /// So the three numbers that decide it are printed together, on one axis: where the playhead is,
+    /// where the edge is, and how much of the window the CLIENT has actually fetched, which is a
+    /// different quantity from either and is what runs out first.
+    @MainActor
+    func logLiveCushionIfDue(window w: LiveWindow) {
+        let now = Date()
+        if let last = lastLiveCushionLogAt, now.timeIntervalSince(last) < 1.0 { return }
+        lastLiveCushionLogAt = now
+        let playhead = currentTime
+        let edge = w.edgeTime
+        let floor = w.seekableRange?.lowerBound
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let ahead = await self.avPlayerBufferAheadSeconds()
+            EngineLog.emit(
+                "[AetherEngine] #524 live cushion: playhead=\(String(format: "%.2f", playhead))s "
+                + "edge=\(String(format: "%.2f", edge))s "
+                + "cushion=\(String(format: "%.2f", edge - playhead))s "
+                + "fetched=\(String(format: "%.2f", ahead))s "
+                + "resident=\(floor.map { String(format: "%.2f", edge - $0) + "s" } ?? "none") "
+                + "atEdge=\(w.isAtEdge ? "y" : "n")",
+                category: .session
+            )
+        }
     }
 
     /// AE#446 round 4: who asked for a seek. The two differ in exactly two places, both about a live

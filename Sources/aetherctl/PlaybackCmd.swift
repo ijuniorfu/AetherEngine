@@ -786,7 +786,13 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         // AE#441: the live rewind surfaces a host actually scales its strip on. Sampling them needed a
         // patched copy of this CLI before, which is how an over-promising lower bound stayed unseen.
         if engine.isLive {
-            line += String(format: " edge=%.2f behind=%.2f", engine.liveEdgeTime, engine.behindLiveSeconds)
+            // Sodalite#104: `atEdge` is the flag a host draws its LIVE badge and its return-to-live
+            // affordance from, and it is not readable from `behind` alone, because the tolerance it
+            // is judged against follows the segment cadence. Printing the distance without the
+            // verdict is what let a flag that toggles twice per cut go unnoticed here.
+            line += String(format: " edge=%.2f behind=%.2f atEdge=%@",
+                           engine.liveEdgeTime, engine.behindLiveSeconds,
+                           engine.isAtLiveEdge ? "y" : "n")
             line += " range=" + (engine.seekableLiveRange.map {
                 String(format: "%.2f...%.2f", $0.lowerBound, $0.upperBound) } ?? "nil")
         }

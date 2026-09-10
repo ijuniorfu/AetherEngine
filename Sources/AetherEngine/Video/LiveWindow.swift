@@ -28,6 +28,21 @@ struct LiveWindow: Equatable {
     /// the place the session starts.
     private(set) var lastEdgeStepSeconds: Double = 0
 
+    /// Sodalite#104 round 4: the TARGETDURATION the live playlist declares, when one is served.
+    ///
+    /// This outranks `lastEdgeStepSeconds` wherever it exists, because the two answer different
+    /// questions. The declared duration is how long a segment IS; the observed step is how the
+    /// source happened to DELIVER, and a tuner or transcode route delivers in bursts. Judging the
+    /// edge by the burst made the tolerance as wide as the burst: measured on a device, a viewer who
+    /// had deliberately rewound was told they were at the live edge a few seconds later, when the
+    /// next burst widened the window under them.
+    private(set) var targetDurationSeconds: Double?
+
+    mutating func noteTargetDuration(_ seconds: Double?) {
+        guard let seconds, seconds > 0 else { return }
+        targetDurationSeconds = seconds
+    }
+
     mutating func noteEdge(_ t: Double) {
         let previous = edgeTime
         edgeTime = Swift.max(edgeTime, t)
@@ -79,5 +94,13 @@ struct LiveWindow: Equatable {
     /// constant stays as slack for tick granularity on top of it. The step is the LAST one rather
     /// than a maximum, so an outsized jump (a rebase, a source resuming) widens the reading for the
     /// one cycle it describes and not for the rest of the session.
-    var isAtEdge: Bool { behindLiveSeconds <= Self.edgeTolerance + lastEdgeStepSeconds }
+    var isAtEdge: Bool { behindLiveSeconds <= edgeToleranceSeconds }
+
+    /// Sodalite#104: one segment, plus the constant as slack for tick granularity.
+    ///
+    /// The segment comes from the playlist when one is served, and from the observed advance
+    /// otherwise (remote HLS live and the software live path declare nothing here).
+    var edgeToleranceSeconds: Double {
+        Self.edgeTolerance + (targetDurationSeconds ?? lastEdgeStepSeconds)
+    }
 }

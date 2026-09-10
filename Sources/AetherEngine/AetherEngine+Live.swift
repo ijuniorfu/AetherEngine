@@ -432,6 +432,9 @@ extension AetherEngine {
         w.noteEdge(edgeSessionTime)
         w.notePlayhead(currentTime)
         w.noteResidentFloor(residentLiveFloorSessionSeconds())
+        // Sodalite#104 round 4: the cadence the playlist declares, which outranks how the source
+        // happened to deliver. nil on the paths that serve no playlist of ours.
+        w.noteTargetDuration(liveTargetDurationSeconds)
         auditLiveRejoinPlacement()
         liveWindow = w
         // AE#442: tick-to-tick advancement, not a running maximum: a backward DVR seek drops the
@@ -451,7 +454,8 @@ extension AetherEngine {
                 + "playhead=\(String(format: "%.2f", currentTime))s "
                 + "edge=\(String(format: "%.2f", w.edgeTime))s "
                 + "lastEdgeStep=\(String(format: "%.2f", w.lastEdgeStepSeconds))s "
-                + "tolerance=\(String(format: "%.2f", LiveWindow.edgeTolerance + w.lastEdgeStepSeconds))s",
+                + "targetDuration=\(w.targetDurationSeconds.map { String(format: "%.2f", $0) + "s" } ?? "none") "
+                + "tolerance=\(String(format: "%.2f", w.edgeToleranceSeconds))s",
                 category: .session
             )
         }

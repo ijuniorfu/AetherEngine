@@ -30,7 +30,7 @@ struct Sodalite104LiveEdgeCadenceTests {
         var w = LiveWindow(windowSeconds: 60)
         w.noteEdge(4)
         w.notePlayhead(4)
-        return w
+        return w   // no TARGETDURATION: these pin the observed-step fallback
     }
 
     @Test("a healthy session never leaves the edge between two cuts")
@@ -87,15 +87,34 @@ struct Sodalite104LiveEdgeCadenceTests {
         #expect(!w.isAtEdge)
     }
 
-    @Test("the step is the last one, so an outsized jump does not widen the window forever")
-    func anOversizedStepDoesNotPersist() {
+    @Test("a declared cadence outranks a bursty delivery")
+    func targetDurationOutranksTheObservedStep() {
+        // The device case: a tuner or transcode route delivers in bursts, so the edge jumps by far
+        // more than a segment. Judging by the observed jump made the tolerance as large as the burst,
+        // and a viewer who had deliberately rewound was told they were at the live edge. The playlist
+        // says how long a segment is; the delivery does not.
+        var w = LiveWindow(windowSeconds: 120)
+        w.noteTargetDuration(6)
+        w.noteEdge(10)
+        w.noteEdge(40)          // a 30 s burst
+        #expect(w.lastEdgeStepSeconds == 30)
+        w.notePlayhead(28)      // 12 s behind: two segments, and a deliberate rewind
+        #expect(!w.isAtEdge)
+        w.notePlayhead(35)      // 5 s behind: inside the declared segment
+        #expect(w.isAtEdge)
+    }
+
+    @Test("without a declared cadence the observed step still decides")
+    func withoutTargetDurationTheStepDecides() {
+        // Remote HLS live and the software live path serve no playlist of ours, so nothing declares
+        // a TARGETDURATION there and the observed advance is all there is.
         var w = healthySession()
-        w.noteEdge(34)          // a 30 s jump, the shape a rebase or a resumed source makes
+        w.noteEdge(34)
         w.notePlayhead(14)
-        #expect(w.isAtEdge)     // 20 s behind is inside that jump, so this one cycle tolerates it
-        w.noteEdge(38)          // the next ordinary cut
+        #expect(w.isAtEdge)
+        w.noteEdge(38)
         w.notePlayhead(14)
-        #expect(!w.isAtEdge)    // 24 s behind against a 4 s step: back to the ordinary reading
+        #expect(!w.isAtEdge)
     }
 
     @Test("a non-advancing edge sample leaves the step alone")

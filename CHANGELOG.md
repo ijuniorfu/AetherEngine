@@ -10,7 +10,26 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A live source coarser than its own advertised TARGETDURATION was called dead
+  on every ordinary delivery, closing the window and swapping the item about
+  twice a minute (#523).** The lateness question, "has the source stopped
+  delivering", was answered with `1.5 x TARGETDURATION`, which is AVPlayer's
+  patience with an unchanged playlist: the right threshold for withdrawing
+  `CAN-BLOCK-RELOAD`, a statement about the client, and the wrong one for a
+  statement about the source. Measured in the field on a channel whose upstream
+  hands over about 6 s of media at a time into a 3 s cutter: segments finalize in
+  pairs 30 ms apart, one pair every 6.50 to 6.85 s, TARGETDURATION sealed at 4 so
+  patience was 6.0 s, and every single delivery gap was therefore read as an
+  outage. The window closed, the item played out its runway and was swapped, 31.4
+  s apart, twice in the captured minute, on a session delivering 72 s of media per
+  64 s of wall clock. The source is now judged by its own measured delivery
+  rhythm (`SourceDeliveryCadenceMeter`, a robust maximum over a trailing window
+  with the single worst sample dropped so one outage cannot teach the meter to be
+  patient with the next), floored by the client's patience and bounded by the
+  producer's starvation exit. The close deadline carries the same floor, at two
+  deliveries rather than one.
 
 ## [6.80.0] - 2026-09-10
 

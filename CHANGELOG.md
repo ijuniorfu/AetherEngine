@@ -25,6 +25,20 @@ the public-API contract.
 
 ### Fixed
 
+- **A seek on a VC-1 track could leave the parser without a picture size, and
+  which seeks it hit came down to one bit of encoder rate control (#490,
+  FFmpegBuild 3.2.1).** libavformat closes and reopens the parser on every
+  reposition, and `vc1_parser.c` never seeds its context from the extradata the
+  way the decoder does at init, so a landing whose entry point carries no
+  sequence header in front of it is read at the wrong bit offset: `hrd_full[]`
+  precedes `coded_size_flag` only when the sequence header said so. The bit
+  taken for `coded_size_flag` is the leaky bucket fullness at that entry point,
+  so below half it falls back to a zero picture size ("Picture size 0x0 is
+  invalid") and above half it takes a coded size out of the following payload
+  without a word. Six of six seeks on a reproducer built from a public sample,
+  none after. The fix is in the bundled FFmpeg and is submitted upstream as
+  FFmpeg PR 24458.
+
 - **A live source coarser than its own advertised TARGETDURATION was called dead
   on every ordinary delivery, closing the window and swapping the item about
   twice a minute (#523).** The lateness question, "has the source stopped

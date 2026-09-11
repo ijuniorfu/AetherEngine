@@ -30,6 +30,19 @@ the public-API contract.
   patient with the next), floored by the client's patience and bounded by the
   producer's starvation exit. The close deadline carries the same floor, at two
   deliveries rather than one.
+- **`reloadAtCurrentPosition()` refused a forward-only source in silence, and a
+  host that believed it had rebuilt waited forever (#526).** A live
+  direct-ingest session is a custom, non-seekable source, so the rebuild's
+  `guard customSourceIsSeekable` returned without doing anything or saying
+  anything. Measured on a device: a channel paused, the app backgrounded, the
+  pipeline torn down by the paused-background grace window (#127), and on the
+  way back the host's reload did nothing at all for twenty minutes while the
+  player sat on a spinner. The refusal is right, a forward-only origin cannot be
+  reopened at a position, and the vocabulary for saying so already existed
+  (`sessionReloadRefusal`, `AetherEngineError.sessionNotReloadable`); only this
+  path did not use it. It now throws that refusal and logs it, so a host can
+  tell "cannot be rebuilt" from "rebuilt", and a live host's answer to it is to
+  tune again.
 - **The delivery meter read a backlogged join as the source's rhythm, so the
   window closed fourteen seconds into a session and the viewer paid an item
   swap (#524).** A backlogged origin hands over its whole window at I/O speed

@@ -56,6 +56,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// (`VideoRoutingPolicy.presentsDolbyVisionBaseLayer`), ahead of every DV branch including AE#455.
     let dolbyVisionHandling: DolbyVisionHandling
 
+    /// AE#532: the profile this source's own RPU reports, when the container record was worth doubting
+    /// (`DolbyVisionRecordAudit`). nil when nothing was read, which is every source but a Profile 5
+    /// record over a BT.2020 YCbCr HDR VUI. The route believes it over the record.
+    let dolbyVisionRPUProfile: Int?
+
     /// Match Content master toggle at load time; one input to the master-vs-media-playlist routing decision.
     private let matchContentEnabled: Bool
 
@@ -831,6 +836,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         keepDvh1TagWithoutDV: Bool = false,
         forceDolbyVisionOnNonDVDisplay: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
+        dolbyVisionRPUProfile: Int? = nil,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
         audioSourceStreamIndexOverride: Int32? = nil,
@@ -874,6 +880,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
         self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
         self.dolbyVisionHandling = dolbyVisionHandling
+        self.dolbyVisionRPUProfile = dolbyVisionRPUProfile
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode
         self.audioSourceStreamIndexOverride = audioSourceStreamIndexOverride

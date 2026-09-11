@@ -412,10 +412,27 @@ extension HLSVideoEngine {
         // DV decoder tonemaps IPT-PQ-c2 internally; without dvh1 IPT chroma reads as YCbCr (green/purple
         // cast, AetherEngine#4 Build 160+163 / DrHurt#19). The dvh1.05 master is accepted on non-DV
         // HDR10 panels and tonemapped (#98), so P5 routes like any HDR source (resolveUseMasterPlaylist).
-        let dvRecord = doviConfigRecord(from: codecpar)
+        let sourceDVRecord = doviConfigRecord(from: codecpar)
+        // AE#532: a Profile 5 record its own RPU contradicts is served as what the RPU says. The audit
+        // ran at load time and only for that class (`DolbyVisionRecordAudit`), so this is a verdict
+        // already reached, not a question asked here. Correcting the record before the classification is
+        // the whole change: a 7 lands on the Profile 7 branch and a 8 on the Profile 8.1 branch, whose
+        // compatibility rewrite turns the record's 0 into the 1 it should have carried.
+        var dvRecord = sourceDVRecord
+        let correctedDVProfile = DolbyVisionRecordAudit.correctedProfile(
+            record: sourceDVRecord.map { Int($0.dv_profile) }, rpu: dolbyVisionRPUProfile)
+        if let corrected = correctedDVProfile {
+            dvRecord?.dv_profile = UInt8(corrected)
+            EngineLog.emit(
+                "[HLSVideoEngine] AE#532: DV Profile 5 record contradicted by its own RPU "
+                + "(RPU reads profile \(corrected)); serving it as Profile \(corrected), not as "
+                + "Profile 5. A Profile 5 RPU cannot carry a residual or an NLQ",
+                category: .session
+            )
+        }
         let dvVariant = classifyDVVariant(dvRecord, codecID: AV_CODEC_ID_HEVC)
 
-        if let r = dvRecord {
+        if let r = sourceDVRecord {
             let cp = Int(codecpar.pointee.color_primaries.rawValue)
             let trc = Int(codecpar.pointee.color_trc.rawValue)
             let csp = Int(codecpar.pointee.color_space.rawValue)

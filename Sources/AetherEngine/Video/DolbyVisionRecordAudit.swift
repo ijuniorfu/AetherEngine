@@ -1,5 +1,6 @@
 import Foundation
 import AetherLibavcodec
+import AetherLibavformat
 import AetherLibavutil
 import Dovi
 
@@ -68,5 +69,49 @@ enum DolbyVisionRecordAudit {
     static func correctedProfile(record: Int?, rpu: Int?) -> Int? {
         guard record == 5, let rpu, rpu != record else { return nil }
         return (rpu == 7 || rpu == 8) ? rpu : nil
+    }
+
+    /// How many video packets to walk before giving up. Every frame of a Dolby Vision source carries an
+    /// RPU, so the answer is in the first one; the slack is for a container whose head is audio.
+    private static let auditPacketBudget = 16
+
+    /// Open the source a second time and read what its first RPU says. nil when the source cannot be
+    /// opened, carries no video, or holds no parseable RPU in its first frames, which all mean the same
+    /// thing to the caller: the record stands.
+    ///
+    /// A second open rather than a read from the session's own probe demuxer, because that demuxer is
+    /// handed to the software path as it stands and packets taken out of it here would be packets that
+    /// path never sees. The audit is gated on `recordIsContradicted`, so this cost is paid by the one
+    /// class of source that is already broken without it, and by no other.
+    static func rpuProfileOfSource(url: URL, extraHeaders: [String: String]) -> Int? {
+        let demuxer = Demuxer()
+        defer { demuxer.close() }
+        do {
+            try demuxer.open(
+                url: url, extraHeaders: extraHeaders,
+                profile: .dolbyVisionRecordAuditDemuxer(callerProbesize: nil, callerMaxAnalyzeDuration: nil))
+        } catch {
+            return nil
+        }
+
+        let videoIdx = demuxer.videoStreamIndex
+        guard videoIdx >= 0, let stream = demuxer.stream(at: videoIdx) else { return nil }
+        let codecpar = stream.pointee.codecpar
+        let framing = A53SEIParser.nalFraming(
+            codec: .hevc, extradata: codecpar?.pointee.extradata,
+            size: Int(codecpar?.pointee.extradata_size ?? 0))
+
+        var walked = 0
+        while walked < auditPacketBudget {
+            guard let packet = (try? demuxer.readPacket()) ?? nil else { return nil }
+            defer {
+                av_packet_unref(packet)
+                av_packet_free_safe(packet)
+            }
+            guard packet.pointee.stream_index == videoIdx else { continue }
+            walked += 1
+            if let profile = rpuProfile(packet, framing: framing) { return profile }
+        }
+        return nil
     }
 }

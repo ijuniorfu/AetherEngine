@@ -172,4 +172,175 @@ struct DolbyVisionRecordAuditTests {
         #expect(DolbyVisionRecordAudit.correctedProfile(record: 5, rpu: 0) == nil)
         #expect(DolbyVisionRecordAudit.correctedProfile(record: 5, rpu: 4) == nil)
     }
+
+    // MARK: - The route the verdict buys
+
+    /// An `AVCodecParameters` carrying a DOVI record and a VUI, freed with the test.
+    private final class DVCodecpar {
+        let ptr: UnsafeMutablePointer<AVCodecParameters>
+        init(profile: UInt8, blCompatibilityID: UInt8,
+             trc: AVColorTransferCharacteristic = AVCOL_TRC_SMPTE2084,
+             matrix: AVColorSpace = AVCOL_SPC_BT2020_NCL) {
+            ptr = avcodec_parameters_alloc()
+            ptr.pointee.codec_type = AVMEDIA_TYPE_VIDEO
+            ptr.pointee.codec_id = AV_CODEC_ID_HEVC
+            ptr.pointee.width = 3840
+            ptr.pointee.height = 2160
+            ptr.pointee.level = 153
+            ptr.pointee.color_primaries = AVCOL_PRI_BT2020
+            ptr.pointee.color_trc = trc
+            ptr.pointee.color_space = matrix
+            let size = MemoryLayout<AVDOVIDecoderConfigurationRecord>.size
+            guard let sd = av_packet_side_data_new(
+                &ptr.pointee.coded_side_data, &ptr.pointee.nb_coded_side_data,
+                AV_PKT_DATA_DOVI_CONF, size, 0) else {
+                fatalError("could not attach a DOVI configuration record")
+            }
+            memset(sd.pointee.data, 0, size)
+            sd.pointee.data.withMemoryRebound(to: AVDOVIDecoderConfigurationRecord.self, capacity: 1) { rec in
+                rec.pointee.dv_version_major = 1
+                rec.pointee.dv_profile = profile
+                rec.pointee.dv_level = 6
+                rec.pointee.rpu_present_flag = 1
+                rec.pointee.bl_present_flag = 1
+                rec.pointee.dv_bl_signal_compatibility_id = blCompatibilityID
+            }
+        }
+        deinit {
+            var p: UnsafeMutablePointer<AVCodecParameters>? = ptr
+            avcodec_parameters_free(&p)
+        }
+    }
+
+    private static func route(
+        _ par: DVCodecpar, dvDisplay: Bool = true, rpuProfile: Int?,
+        handling: DolbyVisionHandling = .automatic
+    ) throws -> HLSVideoEngine.CodecRoute {
+        let engine = HLSVideoEngine(
+            url: URL(fileURLWithPath: "/dev/null"),
+            dvModeAvailable: dvDisplay,
+            dolbyVisionHandling: handling,
+            dolbyVisionRPUProfile: rpuProfile)
+        return try engine.resolveCodecRoute(codecpar: UnsafePointer(par.ptr))
+    }
+
+    /// The reported shape: a Profile 5 record over an HDR10 VUI.
+    private static func relabelledProfile5() -> DVCodecpar {
+        DVCodecpar(profile: 5, blCompatibilityID: 0)
+    }
+
+    @Test("a Profile 5 record whose RPU is a Profile 8 is served as Profile 8.1")
+    func relabelledEightRoutesAs81() throws {
+        let r = try Self.route(Self.relabelledProfile5(), rpuProfile: 8)
+        #expect(r.codecTagOverride == "hvc1")
+        #expect(r.videoRange == .pq)
+        #expect(r.supplementalCodecs == "dvh1.08.06/db1p")
+        // The record said compatibility 0; the rewrite writes the 8.1 it should have carried.
+        #expect(r.doviConfig == .rewriteToProfile81)
+        #expect(r.convertP7ToProfile81 == false)
+        #expect(r.dvVariant == .profile81)
+    }
+
+    @Test("a Profile 5 record whose RPU is a Profile 7 gets the Profile 7 conversion")
+    func relabelledSevenRoutesAsP7() throws {
+        let r = try Self.route(Self.relabelledProfile5(), rpuProfile: 7)
+        #expect(r.codecTagOverride == "hvc1")
+        #expect(r.videoRange == .pq)
+        #expect(r.supplementalCodecs == "dvh1.08.06/db1p")
+        #expect(r.doviConfig == .rewriteToProfile81)
+        #expect(r.convertP7ToProfile81)
+        #expect(r.dvVariant == .profile7)
+    }
+
+    @Test("the same correction on a display without Dolby Vision plays the HDR10 base")
+    func relabelledSevenOnNonDVDisplay() throws {
+        let r = try Self.route(Self.relabelledProfile5(), dvDisplay: false, rpuProfile: 7)
+        #expect(r.codecTagOverride == "hvc1")
+        #expect(r.videoRange == .pq)
+        #expect(r.supplementalCodecs == nil)
+        #expect(r.doviConfig == .strip)
+        #expect(r.convertP7ToProfile81 == false)
+    }
+
+    @Test("without a verdict the record stands and the route does not move")
+    func noVerdictKeepsProfile5Route() throws {
+        let r = try Self.route(Self.relabelledProfile5(), rpuProfile: nil)
+        #expect(r.codecTagOverride == "dvh1")
+        #expect(r.primaryCodecs == "dvh1.05.06")
+        #expect(r.dvVariant == .profile5)
+    }
+
+    @Test("an RPU that agrees with the record moves nothing")
+    func agreeingRPUKeepsProfile5Route() throws {
+        let r = try Self.route(Self.relabelledProfile5(), rpuProfile: 5)
+        #expect(r.codecTagOverride == "dvh1")
+        #expect(r.dvVariant == .profile5)
+    }
+
+    @Test("a host asking for the base layer still gets the base layer")
+    func baseLayerOnlyWinsOverTheCorrection() throws {
+        let r = try Self.route(Self.relabelledProfile5(), rpuProfile: 7, handling: .baseLayerOnly)
+        #expect(r.codecTagOverride == "hvc1")
+        #expect(r.supplementalCodecs == nil)
+        #expect(r.doviConfig == .strip)
+        #expect(r.convertP7ToProfile81 == false)
+    }
+
+    // MARK: - Against real media
+
+    @Test("the relabelled fixture's RPU reports the profile its record hides",
+          .enabled(if: relabelledFixtureExists(), "see relabelledFixtureURL for the two-byte recipe"))
+    func relabelledFixtureRPUSaysEight() throws {
+        #expect(DolbyVisionRecordAudit.rpuProfileOfSource(
+            url: relabelledFixtureURL(), extraHeaders: [:]) == 8)
+    }
+
+    @Test("a genuine Profile 5 asset's RPU agrees with its record, so nothing is corrected",
+          .enabled(if: genuineProfile5FixtureExists(), "see genuineProfile5FixtureURL for the download"))
+    func genuineFixtureRPUSaysFive() throws {
+        let rpu = DolbyVisionRecordAudit.rpuProfileOfSource(
+            url: genuineProfile5FixtureURL(), extraHeaders: [:])
+        #expect(rpu == 5)
+        #expect(DolbyVisionRecordAudit.correctedProfile(record: 5, rpu: rpu) == nil)
+    }
+}
+
+// MARK: - Fixtures
+
+/// A Profile 8.1 remux whose container record was relabelled to Profile 5 / compatibility 0, which is
+/// the reported shape: the record claims IPT-PQ-c2 while the VUI and the RPU describe an HDR10 base.
+/// Nothing can be committed here, so build it from Dolby's own Profile 8.1 test signal
+/// (see `reference` in `genuineProfile5FixtureURL`) by flipping two bytes of its `dvvC` box:
+///
+///     python3 -c "
+///     d=bytearray(open('Patterns_Of_Nature_HDR10-P8.1_UHD_24_H265-10Mbps_DD+JOC-768Kbps.mp4','rb').read())
+///     p=d.find(b'dvvC')+4
+///     d[p+2]=(5<<1)|(d[p+2]&1)   # dv_profile 8 -> 5
+///     d[p+4]=d[p+4]&0x0F         # dv_bl_signal_compatibility_id 1 -> 0
+///     open('Fixtures/user/dv-p5-relabelled-synthetic.mp4','wb').write(bytes(d))"
+///
+/// The bitstream is untouched, so the RPU underneath still reports profile 8 and the correction has
+/// something true to find.
+private func relabelledFixtureURL() -> URL {
+    URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/user/dv-p5-relabelled-synthetic.mp4")
+}
+
+private func relabelledFixtureExists() -> Bool {
+    FileManager.default.fileExists(atPath: relabelledFixtureURL().path)
+}
+
+/// Dolby's own Profile 5 signal, the negative control: a real IPT-PQ-c2 source whose VUI is unspecified
+/// and whose RPU says 5. From the browser test kit, no login:
+/// `https://ott.dolby.com/browser_test_kit/source_mp4s/24fps.zip`
+private func genuineProfile5FixtureURL() -> URL {
+    relabelledFixtureURL().deletingLastPathComponent()
+        .appendingPathComponent("Patterns_Of_Nature_DoVi_24_P5_UHD_HEVC-10mbps_DD+JOC-768kbps_iOS.mp4")
+}
+
+private func genuineProfile5FixtureExists() -> Bool {
+    FileManager.default.fileExists(atPath: genuineProfile5FixtureURL().path)
 }

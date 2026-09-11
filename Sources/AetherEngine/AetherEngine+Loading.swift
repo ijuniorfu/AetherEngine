@@ -1423,7 +1423,7 @@ extension AetherEngine {
                         }
                     }
                     guard let self, let host,
-                          let player = self.currentAVPlayer else { return }
+                          self.currentAVPlayer != nil else { return }
                     // Stage 1: nudge seek. Device-proven to reach AVPlayer (rate re-asserts)
                     // but NOT always to revive its loader; stage 2 covers that.
                     // AE#422: same read the wedge path already takes from the mirror. This one was

@@ -83,7 +83,10 @@ extension AetherEngine {
             routedSoftware: playbackBackend == .software,
             preferred: proposed.preferredDecodePath,
             codecID: lastDetectedVideoCodec,
-            dvProfile: sourceDVProfile,
+            // AE#532: what the source is, not what its record claimed. A Profile 5 record the RPU
+            // corrected is representable in software, so a flip to it is not refused.
+            dvProfile: DolbyVisionRecordAudit.correctedProfile(
+                record: sourceDVProfile, rpu: sourceDolbyVisionRPUProfile) ?? sourceDVProfile,
             dvBLCompatID: sourceDVBLCompatID,
             // The proposal's handling against the loaded source's base layer: a correction that turns
             // the base layer on and moves to software in one step is honoured, one that keeps the

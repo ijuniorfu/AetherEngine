@@ -197,6 +197,15 @@ struct DemuxerOpenProfile: Sendable {
         -> DemuxerOpenProfile {
         subtitleSideDemuxer(callerProbesize: callerProbesize, callerMaxAnalyzeDuration: callerMaxAnalyzeDuration)
     }
+
+    /// Open profile for the AE#532 Dolby Vision record audit. Same shape and the same reasoning as the
+    /// Atmos pass above: the audit wants packets, not stream info, and the sample entry the framing is
+    /// read from is already resolved by `avformat_open_input`. It reaches its answer in the first video
+    /// packet rather than deep in the interleave, so it is the cheaper of the two by construction.
+    static func dolbyVisionRecordAuditDemuxer(callerProbesize: Int64?, callerMaxAnalyzeDuration: Int64?)
+        -> DemuxerOpenProfile {
+        subtitleSideDemuxer(callerProbesize: callerProbesize, callerMaxAnalyzeDuration: callerMaxAnalyzeDuration)
+    }
 }
 
 /// AVFormatContext wrapper. HTTP(S) uses custom AVIO via URLSession (no built-in

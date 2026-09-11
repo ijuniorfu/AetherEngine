@@ -17,7 +17,8 @@ func runSegVerify(url: URL, from: Int, count: Int, dvModeAvailable: Bool,
     print("segverify: starting engine for \(url.absoluteString)")
     let engine = HLSVideoEngine(url: url, dvModeAvailable: dvModeAvailable,
                                 forceDolbyVisionOnNonDVDisplay: forceDVWithoutDisplay,
-                                dolbyVisionHandling: dolbyVisionHandling)
+                                dolbyVisionHandling: dolbyVisionHandling,
+                                dolbyVisionRPUProfile: DolbyVisionRecordAudit.rpuCorrection(url: url))
     let playbackURL: URL
     do {
         playbackURL = try engine.start()

@@ -530,6 +530,12 @@ public final class AetherEngine: ObservableObject {
     /// label hosts read, this is the term only `softwarePathCannotRepresent` needs.
     var sourceDVBLCompatID: Int? = nil
 
+    /// AE#532: the profile the loaded source's own RPU reports, when the record was contradicted enough
+    /// to be worth checking (`DolbyVisionRecordAudit`). nil for every other source, including one whose
+    /// RPU could not be read. Held for the same reason as `sourceDVBLCompatID`: a reload has to judge the
+    /// source after the probe that measured it is gone.
+    var sourceDolbyVisionRPUProfile: Int? = nil
+
     /// Whether the loaded source's Dolby Vision has a base layer `LoadOptions.dolbyVisionHandling =
     /// .baseLayerOnly` can present (`VideoRoutingPolicy.dolbyVisionBaseLayerIsPresentable`), decided
     /// on the probe stream for the same reason as `sourceDVBLCompatID`: a correction that turns the
@@ -3429,6 +3435,7 @@ public final class AetherEngine: ObservableObject {
         sourceDVProfile = nil
         sourceDVBLCompatID = nil
         sourceDolbyVisionBaseLayerPresentable = false
+        sourceDolbyVisionRPUProfile = nil
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil
@@ -3493,6 +3500,10 @@ public final class AetherEngine: ObservableObject {
         // format clamp, the criteria request and the software-path guard below all read.
         var detectedDVBaseLayerPresentable = false
         var presentsDolbyVisionBaseLayer = false
+        // AE#532: what this source's own RPU says, and the profile the route should believe instead of
+        // the record. Both stay nil for every source but a Profile 5 record over a BT.2020 YCbCr HDR VUI.
+        var detectedDVRPUProfile: Int? = nil
+        var correctedDVProfile: Int? = nil
         var detectedCodecID: AVCodecID = AV_CODEC_ID_NONE
         var detectedFieldOrder: AVFieldOrder = AV_FIELD_UNKNOWN
         var probedAudioTracks: [TrackInfo] = []
@@ -3575,6 +3586,32 @@ public final class AetherEngine: ObservableObject {
                     colorMatrix: stream.pointee.codecpar.pointee.color_space)
                 presentsDolbyVisionBaseLayer = options.dolbyVisionHandling == .baseLayerOnly
                     && detectedDVBaseLayerPresentable
+                // AE#532: a Profile 5 record over a VUI that contradicts it is the one claim in a
+                // container worth checking against the bitstream, because a Profile 5 RPU cannot carry a
+                // residual or an NLQ and the RPU is therefore proof rather than a guess. Gated on that
+                // pairing, so no other source reads a packet here. `.url` only: a custom reader has no
+                // second open to give, and live is not a class this was reported on.
+                if case .url(let auditURL) = source, !options.isLive,
+                   DolbyVisionRecordAudit.recordIsContradicted(
+                       codecID: detectedCodecID, dvProfile: detectedDVProfileNum,
+                       colorTransfer: stream.pointee.codecpar.pointee.color_trc,
+                       colorMatrix: stream.pointee.codecpar.pointee.color_space) {
+                    let auditHeaders = options.httpHeaders
+                    detectedDVRPUProfile = await Task.detached(priority: .userInitiated) {
+                        DolbyVisionRecordAudit.rpuProfileOfSource(url: auditURL, extraHeaders: auditHeaders)
+                    }.value
+                    correctedDVProfile = DolbyVisionRecordAudit.correctedProfile(
+                        record: detectedDVProfileNum, rpu: detectedDVRPUProfile)
+                    EngineLog.emit(
+                        correctedDVProfile.map {
+                            "[AetherEngine] AE#532: DV Profile 5 record contradicted by its own RPU "
+                            + "(RPU reads profile \($0)); this session routes it as Profile \($0)"
+                        } ?? ("[AetherEngine] AE#532: DV Profile 5 record over a BT.2020 YCbCr VUI, but the "
+                              + "RPU "
+                              + (detectedDVRPUProfile.map { "reads profile \($0)" } ?? "could not be read")
+                              + "; the record stands"),
+                        category: .engine)
+                }
                 if options.dolbyVisionHandling == .baseLayerOnly, detectedFormat == .dolbyVision {
                     EngineLog.emit(
                         presentsDolbyVisionBaseLayer
@@ -3725,6 +3762,7 @@ public final class AetherEngine: ObservableObject {
         sourceDVProfile = detectedDVProfileNum
         sourceDVBLCompatID = detectedDVBLCompatIDNum
         sourceDolbyVisionBaseLayerPresentable = detectedDVBaseLayerPresentable
+        sourceDolbyVisionRPUProfile = detectedDVRPUProfile
         sourceVideoFrameRate = detectedRate
         sourceVideoBitrate = detectedVideoBitrate
         sourceVideoCodecName = detectedCodecID == AV_CODEC_ID_NONE
@@ -4087,7 +4125,9 @@ public final class AetherEngine: ObservableObject {
                    codecID: detectedCodecID,
                    // A Profile 5 record served as its base layer plays as plain HEVC, which is what
                    // the raw-hvcC probe judges; the exemption is for the dvh1 route it is not on.
-                   dvProfile: presentsDolbyVisionBaseLayer ? nil : dvProfile,
+                   // AE#532: a record the RPU corrected is not on that route either, and its base layer
+                   // is standard Main10, so the gate judges it the way it judges any Profile 7 / 8.
+                   dvProfile: presentsDolbyVisionBaseLayer ? nil : (correctedDVProfile ?? dvProfile),
                    canHardwareDecode: { VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) }) {
                 useSoftwarePath = true
                 EngineLog.emit(
@@ -4173,7 +4213,9 @@ public final class AetherEngine: ObservableObject {
            let dvConfig = Self.dvConfig(stream: vStream),
            VideoRoutingPolicy.softwarePathCannotRepresent(
                codecID: detectedCodecID,
-               dvProfile: dvConfig.profile,
+               // AE#532: the refusal is about IPT-PQ-c2, which a record the RPU contradicts does not
+               // carry. Its base layer is plain HEVC and decodes correctly.
+               dvProfile: correctedDVProfile ?? dvConfig.profile,
                dvBlCompatID: dvConfig.blCompatID,
                presentsDolbyVisionBaseLayer: presentsDolbyVisionBaseLayer) {
             probe.markClosed()
@@ -4260,6 +4302,7 @@ public final class AetherEngine: ObservableObject {
                     keepDvh1TagWithoutDV: options.keepDvh1TagWithoutDV,
                     forceDolbyVisionOnNonDVDisplay: options.forceDolbyVisionOnNonDVDisplay,
                     dolbyVisionHandling: options.dolbyVisionHandling,
+                    dolbyVisionRPUProfile: detectedDVRPUProfile,
                     matchContentEnabled: options.matchContentEnabled,
                     panelIsInHDRMode: panelHDRAfterHandshake,
                     audioBridgeMode: options.audioBridgeMode,
@@ -5326,6 +5369,7 @@ public final class AetherEngine: ObservableObject {
         sourceDVProfile = nil
         sourceDVBLCompatID = nil
         sourceDolbyVisionBaseLayerPresentable = false
+        sourceDolbyVisionRPUProfile = nil
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil

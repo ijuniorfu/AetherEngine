@@ -98,6 +98,27 @@ _Nothing yet._
   Covered by `DolbyVisionRecordAuditTests`, whose real-media arms run against Dolby's own
   Profile 5 signal and a Profile 8.1 signal relabelled to Profile 5 by two bytes.
 
+- **A backward scrub could be torn down as a wedged consumer, because the clock
+  that was supposed to measure a consumer's silence ran on its activity (#528).**
+  The VOD backpressure park waits on a condition that `SegmentCache.declareTarget`
+  broadcasts on every target change, so every consumer GET woke the parked pump
+  early and `parked += 1` counted wakeups rather than seconds. In the field log
+  this read 12 to 22 "seconds" inside 2.4 s of wall clock, and the 24 s brake
+  fired in a pump whose own elapsed time was 10.1 s: the livelier the consumer,
+  the faster the clock meant to measure its stillness. The second half was the
+  wedge detector's own definition of frozen, a monotonic high-water target, which
+  a viewer scrubbing backward can never satisfy because every GET of theirs names
+  a lower target than the last. The most active consumer of the session read as
+  the silent one. Both parks now convert wakeups into seconds through a
+  `ParkClock`, which costs a real wedge nothing (a wedged consumer broadcasts
+  nothing, so its park always ran at one second per second), and the detector's
+  slow path resets on any target movement in either direction. Its fast path
+  deliberately does not: a scrub storm that fetches and renders nothing is the
+  #35 / #79 wedge. The `PARK` line now carries the `stuck=` field this
+  investigation had to reconstruct from target differences across log lines.
+  Found in a log attached to #496, not reported. A/B under `aetherctl seektest`
+  is identical on the player side (981 samples, 0.28 s max wedge, 155 segments).
+
 - **A seek on a VC-1 track could leave the parser without a picture size, and
   which seeks it hit came down to one bit of encoder rate control (#490,
   FFmpegBuild 3.2.1).** libavformat closes and reopens the parser on every

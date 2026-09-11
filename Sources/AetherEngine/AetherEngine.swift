@@ -530,6 +530,13 @@ public final class AetherEngine: ObservableObject {
     /// label hosts read, this is the term only `softwarePathCannotRepresent` needs.
     var sourceDVBLCompatID: Int? = nil
 
+    /// Whether the loaded source's Dolby Vision has a base layer `LoadOptions.dolbyVisionHandling =
+    /// .baseLayerOnly` can present (`VideoRoutingPolicy.dolbyVisionBaseLayerIsPresentable`), decided
+    /// on the probe stream for the same reason as `sourceDVBLCompatID`: a correction that turns the
+    /// base layer on and moves to software in one step is judged before the teardown, when the VUI it
+    /// rests on is gone.
+    var sourceDolbyVisionBaseLayerPresentable: Bool = false
+
     /// Nominal source frame rate (fps) from the container's `avg_frame_rate` (falling back to `r_frame_rate`),
     /// or nil when the source has no video or libavformat couldn't derive one. Companion to `sourceVideoFormat`
     /// for Stats-for-Nerds. `LiveTelemetry.observedFps` measures the live rate but is nil on the native AVPlayer
@@ -3421,6 +3428,7 @@ public final class AetherEngine: ObservableObject {
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
         sourceDVBLCompatID = nil
+        sourceDolbyVisionBaseLayerPresentable = false
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil
@@ -3481,6 +3489,10 @@ public final class AetherEngine: ObservableObject {
         var detectedRate: Double? = nil
         var detectedVideoBitrate: Int64 = 0
         var detectedDVProfile: Bool = false
+        // `dolbyVisionHandling = .baseLayerOnly` resolved against this source: the two halves the
+        // format clamp, the criteria request and the software-path guard below all read.
+        var detectedDVBaseLayerPresentable = false
+        var presentsDolbyVisionBaseLayer = false
         var detectedCodecID: AVCodecID = AV_CODEC_ID_NONE
         var detectedFieldOrder: AVFieldOrder = AV_FIELD_UNKNOWN
         var probedAudioTracks: [TrackInfo] = []
@@ -3547,18 +3559,44 @@ public final class AetherEngine: ObservableObject {
             let videoIdx = probe.videoStreamIndex
             if videoIdx >= 0, let stream = probe.stream(at: videoIdx) {
                 detectedFormat = Self.detectVideoFormat(stream: stream)
-                effectiveFormat = Self.effectiveVideoFormat(detected: detectedFormat, stream: stream,
-                                                           capabilities: sessionDisplayCaps)
+                let detectedDVConfig = Self.dvConfig(stream: stream)
+                detectedDVProfileNum = detectedDVConfig?.profile
+                detectedDVBLCompatIDNum = detectedDVConfig?.blCompatID
+                detectedCodecID = stream.pointee.codecpar.pointee.codec_id
+                // `.baseLayerOnly`: the clamp reads a table with Dolby Vision left unclaimed, so the
+                // source resolves to the HDR10 / HLG its base layer is, the criteria ask for hvc1, and
+                // the served route (same predicate, `CodecRoutePolicy`) agrees. A source with no base
+                // layer to present (a genuine Profile 5) keeps everything as it was.
+                detectedDVBaseLayerPresentable = VideoRoutingPolicy.dolbyVisionBaseLayerIsPresentable(
+                    codecID: detectedCodecID,
+                    dvProfile: detectedDVProfileNum,
+                    dvBlCompatID: detectedDVBLCompatIDNum,
+                    colorTransfer: stream.pointee.codecpar.pointee.color_trc,
+                    colorMatrix: stream.pointee.codecpar.pointee.color_space)
+                presentsDolbyVisionBaseLayer = options.dolbyVisionHandling == .baseLayerOnly
+                    && detectedDVBaseLayerPresentable
+                if options.dolbyVisionHandling == .baseLayerOnly, detectedFormat == .dolbyVision {
+                    EngineLog.emit(
+                        presentsDolbyVisionBaseLayer
+                            ? "[AetherEngine] dolbyVisionHandling=baseLayerOnly: DV Profile "
+                              + "\(detectedDVProfileNum ?? 0) presents its base layer; the format clamp and the "
+                              + "criteria request leave Dolby Vision unclaimed"
+                            : "[AetherEngine] dolbyVisionHandling=baseLayerOnly ignored: DV Profile "
+                              + "\(detectedDVProfileNum ?? 0) compat=\(detectedDVBLCompatIDNum ?? 0) has no base "
+                              + "layer to present (IPT-PQ-c2, VUI unspecified); keeping the Dolby Vision route",
+                        category: .engine)
+                }
+                effectiveFormat = Self.effectiveVideoFormat(
+                    detected: detectedFormat, stream: stream,
+                    capabilities: presentsDolbyVisionBaseLayer
+                        ? sessionDisplayCaps.withoutDolbyVision() : sessionDisplayCaps)
                 detectedRate = Self.detectFrameRate(stream: stream)
                 // DrHurt #4 (2026-05-26): use source-detected DV, not effective-format, so codecTag=dvh1
                 // asks AVDisplayManager for DV mode on every DV source. AVPlayer's HLS tone-mapper downgrades
                 // DV->HDR10 when the panel can't host it; we don't pre-strip engine-side. Pairs with
                 // always-emit-SUPPLEMENTAL + no-strip in HLSVideoEngine's profile81/profile84 emission.
-                detectedDVProfile = (detectedFormat == .dolbyVision)
-                let detectedDVConfig = Self.dvConfig(stream: stream)
-                detectedDVProfileNum = detectedDVConfig?.profile
-                detectedDVBLCompatIDNum = detectedDVConfig?.blCompatID
-                detectedCodecID = stream.pointee.codecpar.pointee.codec_id
+                // The base-layer route is the one exception: it serves hvc1 and asks for hvc1.
+                detectedDVProfile = (detectedFormat == .dolbyVision) && !presentsDolbyVisionBaseLayer
                 detectedFieldOrder = stream.pointee.codecpar.pointee.field_order
                 sourceVideoWidth = stream.pointee.codecpar.pointee.width
                 sourceVideoHeight = stream.pointee.codecpar.pointee.height
@@ -3686,6 +3724,7 @@ public final class AetherEngine: ObservableObject {
         sourceVideoFormat = detectedFormat
         sourceDVProfile = detectedDVProfileNum
         sourceDVBLCompatID = detectedDVBLCompatIDNum
+        sourceDolbyVisionBaseLayerPresentable = detectedDVBaseLayerPresentable
         sourceVideoFrameRate = detectedRate
         sourceVideoBitrate = detectedVideoBitrate
         sourceVideoCodecName = detectedCodecID == AV_CODEC_ID_NONE
@@ -4046,7 +4085,9 @@ public final class AetherEngine: ObservableObject {
             let dvProfile = Self.dvProfile(stream: vStream)
             if VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
                    codecID: detectedCodecID,
-                   dvProfile: dvProfile,
+                   // A Profile 5 record served as its base layer plays as plain HEVC, which is what
+                   // the raw-hvcC probe judges; the exemption is for the dvh1 route it is not on.
+                   dvProfile: presentsDolbyVisionBaseLayer ? nil : dvProfile,
                    canHardwareDecode: { VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) }) {
                 useSoftwarePath = true
                 EngineLog.emit(
@@ -4133,7 +4174,8 @@ public final class AetherEngine: ObservableObject {
            VideoRoutingPolicy.softwarePathCannotRepresent(
                codecID: detectedCodecID,
                dvProfile: dvConfig.profile,
-               dvBlCompatID: dvConfig.blCompatID) {
+               dvBlCompatID: dvConfig.blCompatID,
+               presentsDolbyVisionBaseLayer: presentsDolbyVisionBaseLayer) {
             probe.markClosed()
             Task.detached { [probe] in probe.close() }
             let profileLabel = detectedCodecID == AV_CODEC_ID_AV1 ? "10.0" : "5"
@@ -4217,6 +4259,7 @@ public final class AetherEngine: ObservableObject {
                     audioSourceStreamIndex: selectedAudio,
                     keepDvh1TagWithoutDV: options.keepDvh1TagWithoutDV,
                     forceDolbyVisionOnNonDVDisplay: options.forceDolbyVisionOnNonDVDisplay,
+                    dolbyVisionHandling: options.dolbyVisionHandling,
                     matchContentEnabled: options.matchContentEnabled,
                     panelIsInHDRMode: panelHDRAfterHandshake,
                     audioBridgeMode: options.audioBridgeMode,
@@ -5282,6 +5325,7 @@ public final class AetherEngine: ObservableObject {
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
         sourceDVBLCompatID = nil
+        sourceDolbyVisionBaseLayerPresentable = false
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil

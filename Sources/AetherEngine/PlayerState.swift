@@ -282,6 +282,19 @@ public struct DisplayCapabilities: Sendable, Equatable {
             supportsHDR10: supportsHDR10,
             supportsHLG: supportsHLG)
     }
+
+    /// The same display with Dolby Vision left unclaimed: what `LoadOptions.dolbyVisionHandling =
+    /// .baseLayerOnly` asks the format clamp to read, so a Dolby Vision source resolves to the HDR10 /
+    /// HLG its base layer is and the criteria request follows. HDR itself is untouched: the panel still
+    /// presents HDR, it is only not asked for Dolby Vision.
+    func withoutDolbyVision() -> DisplayCapabilities {
+        guard supportsDolbyVision else { return self }
+        return DisplayCapabilities(
+            supportsHDR: supportsHDR,
+            supportsDolbyVision: false,
+            supportsHDR10: supportsHDR10,
+            supportsHLG: supportsHLG)
+    }
 }
 
 /// Deinterlacer selection for the software-decode path (interlaced MPEG-2 / VC-1 / MPEG-4, and
@@ -334,6 +347,21 @@ public enum DecodePath: String, Sendable, Equatable, CaseIterable {
     case software
 }
 
+/// Which layer of a Dolby Vision source a session presents. See `LoadOptions.dolbyVisionHandling`.
+public enum DolbyVisionHandling: String, Sendable, Equatable, CaseIterable {
+    /// Dolby Vision wherever the profile and the display allow it. The default.
+    case automatic
+    /// Present the HDR10 / HLG base layer and leave the Dolby Vision out of the container: `hvc1` /
+    /// `av01` sample entry, `dvcC` stripped, no `SUPPLEMENTAL-CODECS`, HDR10 / HLG display criteria.
+    /// The RPU NAL units stay in the bitstream and are ignored, the way a Profile 7 already plays on a
+    /// display without Dolby Vision. Only for a source whose base layer is a YCbCr HDR signal: HEVC
+    /// Profile 7 / 8.1 / 8.4, AV1 Profile 10.1 / 10.4, and a Profile 5 record over a VUI that declares
+    /// a BT.2020 YCbCr PQ or HLG base (a mislabelled Profile 7 / 8 remux, the class this exists for).
+    /// A Profile 5 or AV1 Profile 10.0 whose VUI says nothing carries IPT-PQ-c2 and has no base layer to
+    /// present, so it keeps its Dolby Vision route and the engine says so in the log.
+    case baseLayerOnly
+}
+
 public struct LoadOptions: Sendable, Equatable {
     /// Diagnostic lever: omit BT.2020 / transfer / YCbCr matrix from AVDisplayCriteria so AVPlayer re-reads color from the bitstream. Default off.
     public var omitCriteriaColorExtensions: Bool
@@ -360,6 +388,26 @@ public struct LoadOptions: Sendable, Equatable {
     /// Ignored when the display does support Dolby Vision, and applies to HEVC Profile 8.1 only. Reported by
     /// DrHurt against a Samsung HDR10 panel.
     public var forceDolbyVisionOnNonDVDisplay: Bool
+
+    /// A `DolbyVisionHandling`. Default `.automatic`. `.baseLayerOnly` presents the HDR10 / HLG base layer
+    /// of a Dolby Vision source and leaves the Dolby Vision out of the container, on every display: the
+    /// route a host offers as "Dolby Vision: off (HDR10)".
+    ///
+    /// The case it exists for is a source whose Dolby Vision is wrong and whose base layer is right. A
+    /// remux that carries a Profile 7 RPU under a container record claiming Profile 5 is the reported
+    /// shape: the record says IPT-PQ-c2, the VUI says BT.2020 YCbCr PQ, and a player that believes the
+    /// record decodes YCbCr as IPT (the green / violet cast of AE#4 and AE#176). No player can tell which
+    /// half is lying from the container alone, so the choice is the host's, and a host that offers it
+    /// offers it per title.
+    ///
+    /// Applies to the profiles whose base layer is a YCbCr HDR signal (HEVC 7 / 8.1 / 8.4, AV1 10.1 /
+    /// 10.4) and to a Profile 5 record whose VUI declares one; a Profile 5 or AV1 10.0 whose VUI says
+    /// nothing has no base layer to present and keeps its route. A tuning field: correctable on the
+    /// playing session through `reloadAtCurrentPosition(applying:)`. Takes precedence over
+    /// `forceDolbyVisionOnNonDVDisplay`, which asks for the opposite. The software path decodes the base
+    /// layer alone in any case, so there it only lifts the Profile 5 refusal (#176) for a record the VUI
+    /// contradicts.
+    public var dolbyVisionHandling: DolbyVisionHandling
 
     /// Mirror of `AVDisplayManager.isDisplayCriteriaMatchingEnabled`. Default `true`. When `false`, engine routes HDR sources through the media playlist (auto-tonemap path) because AVKit cannot switch the panel.
     public var matchContentEnabled: Bool
@@ -741,6 +789,7 @@ public struct LoadOptions: Sendable, Equatable {
         httpHeaders: [String: String] = [:],
         keepDvh1TagWithoutDV: Bool = false,
         forceDolbyVisionOnNonDVDisplay: Bool = false,
+        dolbyVisionHandling: DolbyVisionHandling = .automatic,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
         panelPresentsDolbyVision: Bool = false,
@@ -781,6 +830,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.httpHeaders = httpHeaders
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
         self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
+        self.dolbyVisionHandling = dolbyVisionHandling
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode
         self.panelPresentsDolbyVision = panelPresentsDolbyVision

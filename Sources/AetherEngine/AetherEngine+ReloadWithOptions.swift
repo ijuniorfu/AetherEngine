@@ -85,6 +85,11 @@ extension AetherEngine {
             codecID: lastDetectedVideoCodec,
             dvProfile: sourceDVProfile,
             dvBLCompatID: sourceDVBLCompatID,
+            // The proposal's handling against the loaded source's base layer: a correction that turns
+            // the base layer on and moves to software in one step is honoured, one that keeps the
+            // Dolby Vision on a Profile 5 record is refused as before.
+            presentsDolbyVisionBaseLayer: proposed.dolbyVisionHandling == .baseLayerOnly
+                && sourceDolbyVisionBaseLayerPresentable,
             isLive: loadedOptions.isLive,
             hasCompanionAudioReader: (customReader as? LiveIngestSourceInfo)?.companionAudioReader != nil
         ) {
@@ -211,6 +216,7 @@ enum SessionOptionCorrection {
         codecID: AVCodecID,
         dvProfile: Int?,
         dvBLCompatID: Int?,
+        presentsDolbyVisionBaseLayer: Bool = false,
         isLive: Bool,
         hasCompanionAudioReader: Bool
     ) -> SessionReloadRefusal? {
@@ -219,7 +225,8 @@ enum SessionOptionCorrection {
         guard flipsToSoftware else { return nil }
 
         if VideoRoutingPolicy.softwarePathCannotRepresent(
-            codecID: codecID, dvProfile: dvProfile, dvBlCompatID: dvBLCompatID) {
+            codecID: codecID, dvProfile: dvProfile, dvBlCompatID: dvBLCompatID,
+            presentsDolbyVisionBaseLayer: presentsDolbyVisionBaseLayer) {
             return .softwarePathCannotRepresentSource
         }
         // The companion reader exists only for a video-only live variant (the resolver spins one up
@@ -262,7 +269,7 @@ enum SessionOptionCorrection {
     /// deliberately. Update this list and, if the field names the session, `loadIdentityFields`.
     static let knownFields: [String] = [
         "omitCriteriaColorExtensions", "suppressDisplayCriteria", "httpHeaders",
-        "keepDvh1TagWithoutDV", "forceDolbyVisionOnNonDVDisplay", "matchContentEnabled",
+        "keepDvh1TagWithoutDV", "forceDolbyVisionOnNonDVDisplay", "dolbyVisionHandling", "matchContentEnabled",
         "panelIsInHDRMode", "panelPresentsDolbyVision", "audioBridgeMode", "isLive", "audioOnly",
         "dvrWindowSeconds",
         "liveBlockingReload", "liveJoinProfile", "liveJoinStartsImmediately",

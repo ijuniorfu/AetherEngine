@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.81.0] - 2026-09-11
+
 ### Added
 
 - **`LoadOptions.dolbyVisionHandling = .baseLayerOnly`: the HDR10 / HLG base layer of a

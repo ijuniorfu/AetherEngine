@@ -10,6 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`liveResumeClamped`, so a host can say that a long pause cost the viewer
+  something (AE#444 follow-up, Sodalite#104).** A session paused for longer than
+  its own DVR depth has had the position it was parked on evicted by the sliding
+  window, and the clamp that moves the resume into what is still held has been
+  right since AE#444. What it could not do is tell anyone. Measured on the
+  harness with a 30 s window and a 70 s pause: the playhead sat at 93881.2 while
+  the window slid to 93890.0...93920.0 underneath it, and the resume landed at
+  93895.0 in silence. The payload carries both the content the window took and
+  where the resume landed, so a host can phrase either without arithmetic
+  against a window it cannot see.
+
 ### Fixed
 
 - **A live source coarser than its own advertised TARGETDURATION was called dead

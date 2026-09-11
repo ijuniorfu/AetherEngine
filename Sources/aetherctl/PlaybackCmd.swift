@@ -609,12 +609,12 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             // off the transport itself, not off anything the engine remembers.
             print("  HOSTCALL setRate(\(Issue436RateHold.rate)) (held across a pause/resume)")
             engine.setRate(Issue436RateHold.rate)
-        case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek":
+        case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek", "pausehold":
             break  // reloadlive handled at load time, seekback/overlapseek/pauseseek in the telemetry loop
         case let call where call.hasPrefix("seekfar"):
             break  // #433, in the telemetry loop; `seekfar@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,reloadlive,seekback,seekfar,overlapseek,pauseseek)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }
@@ -768,6 +768,9 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     }
 
     let ticks = max(1, Int(seconds))
+    // Sodalite#104: where the playhead stood when the pause-and-hold drill parked it, so the run can
+    // say whether it moved.
+    var pauseHoldPlayhead: Double?
     for tick in 1...ticks {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         var line = String(format: "  t=%02d state=%@ phase=%@ cur=%.2f src=%.2f buf=%.2f dur=%.1f",
@@ -888,6 +891,38 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         // only at play(), so whatever the 1 Hz `[SWDiag]` line reports for the five paused ticks after
         // the landing comes from state the seek path itself had to keep honest. `--seek-pattern`'s
         // first entry picks the target, else 20 s ahead.
+        // Sodalite#104: what a live session does while it is PAUSED for longer than its DVR window.
+        //
+        // The question a host has to answer is whether pausing keeps recording, and what happens when
+        // the recording reaches the depth the session asked for: a producer that parks stops draining
+        // the origin, and a window that slides instead walks past the position the viewer is parked
+        // on. Neither is reachable from a device in less than the buffer depth, which is ninety
+        // minutes on a real session; with `--dvr-window 30` it is a ninety second run.
+        //
+        // Pauses at t=10 and resumes ten seconds before the end, so the run covers the fill, whatever
+        // the engine does at the cap, and the return.
+        if hostCalls.contains("pausehold") {
+            if tick == 10 {
+                print("  HOSTCALL pause() and HOLD (resumes at t=\(max(11, ticks - 10)))")
+                engine.pause()
+                pauseHoldPlayhead = engine.currentTime
+            }
+            if tick > 10, tick < max(11, ticks - 10) {
+                let range = engine.clock.seekableLiveRange
+                print(String(format:
+                    "    PAUSEHOLD t=%02d playhead=%.2f (moved %+.2f) edge=%.2f window=%@ resident=%.1fs",
+                    tick, engine.currentTime, engine.currentTime - (pauseHoldPlayhead ?? 0),
+                    engine.clock.liveEdgeTime,
+                    range.map { String(format: "%.1f...%.1f", $0.lowerBound, $0.upperBound) } ?? "none",
+                    range.map { $0.upperBound - $0.lowerBound } ?? 0))
+            }
+            if tick == max(11, ticks - 10) {
+                let held = engine.currentTime
+                print(String(format: "  HOSTCALL play() after the hold (playhead %.2f, moved %+.2f while paused)",
+                             held, held - (pauseHoldPlayhead ?? 0)))
+                engine.play()
+            }
+        }
         if hostCalls.contains("pauseseek") {
             if tick == 12 {
                 print("  HOSTCALL pause()")

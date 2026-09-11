@@ -87,6 +87,23 @@ Live's counterpart to a terminal `.error`, and a host that plays live has to sub
 
 Answering it: negotiate a fresh URL and `load` again, or, where the URL is fixed (an IPTV channel), load the same one again. Guard the answer with one retune in flight, a minimum spacing and a bounded count per session, then surface the exhausted case the way a terminal `.error` would be surfaced, because a ladder that ends on a silent `return` leaves the same dead channel behind a counter.
 
+### Live: a resume that had to move
+
+```swift
+player.liveResumeClamped          // PassthroughSubject<LiveResumeClamp, Never>; subscribe per session
+
+public struct LiveResumeClamp {
+    public let skippedSeconds: Double      // content the sliding window took while the session was paused
+    public let behindLiveSeconds: Double   // where the resume landed; 0 for an edge snap
+}
+```
+
+A session paused for longer than its own DVR depth has had the position it was parked on evicted by the sliding window, so the resume cannot start where the pause stopped. `clampsLiveResumeToWindow` (default on) moves it to the retained floor, or snaps to the edge on a live-only session; this fires when it does.
+
+It exists so a host can SAY so. Measured on the harness with a 30 s window and a 70 s pause, the playhead sat at 93881.2 while the window slid to 93890.0...93920.0 underneath it and the resume landed at 93895.0 without a word: a viewer who paused a match and came back saw it continue somewhere else, with nothing on screen to say why. Neither number requires arithmetic against a window the host cannot see, so a host can phrase either "you missed fourteen seconds" or "continuing twenty-five seconds behind live".
+
+Hosts that own the decision set `LoadOptions.clampsLiveResumeToWindow = false` instead and get a log line naming the deferral; nothing fires then.
+
 The same-URL answer is the cheap one rather than a no-op: the #168 carriage verdict (a master advertising HEVC while delivering MPEG-TS) is remembered per exact absolute URL for six hours, 32 entries, so the retune routes straight onto the live ingest instead of re-paying the doomed native mount and its watchdog grace. A URL carrying a rotated per-session token misses that memory and re-pays the one-time discovery per retune, which is worth knowing where a first-frame budget is measured against the retune as well.
 
 Where the token rotates, the key the memory cannot have is one the host does have: the channel. `$videoRoute` publishes the reroute as it happens (`.remoteBypass` becomes `.loopback`), so a host can record that verdict against its own channel id and open the channel's next session on the ingest directly, either with `nativeRemoteHLS: false` (an `m3u8` on the raw live path is routed onto the ingest reader from 6.24.0, at the cost of one failed open) or by handing `HLSLiveIngestReader` to `.custom(_:formatHint: "mpegts")` itself, which costs nothing at all. Either skips the native mount and up to 4 s of carriage-watchdog grace per retune, whatever the URL looks like that time.
@@ -484,6 +501,7 @@ Time lives on `player.clock`, a separate `ObservableObject`, so ~10 Hz ticks nev
 | `$isLive` | Mirrors `LoadOptions.isLive` for the session. |
 | `seekToLiveEdge()` | `async`. |
 | `liveSourceReset` | The retune contract above. |
+| `liveResumeClamped`, `LiveResumeClamp` | A resume that found the playhead outside the window and moved it; see above. |
 | `liveScrubThumbnail(atSessionSeconds:maxWidth:)` | Cache-backed still on the live session axis. |
 | `$playlistShiftSeconds` | Seconds the producer subtracted from source PTS. Published values already fold it back; exposed for hosts pairing their own samples against AVPlayer's raw clock. |
 | `HLSLiveIngestReader(playlistURL:)`, `HLSLiveIngestReader(playlistURL:httpHeaders:)` | The ready-made `IOReader` for ingesting an upstream HLS playlist directly, with AES-128 clear-key and SSAI handling. The headers ride the playlist, every segment and every AES key, which is what a tokenized IPTV origin enforces per request. Unsupported shapes surface a typed `HLSIngestError`. |

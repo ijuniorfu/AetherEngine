@@ -124,6 +124,9 @@ extension AetherEngine {
                 "[AetherEngine] live resume clamp: behind=\(behind)s window=live-only -> edge snap",
                 category: .session
             )
+            // The whole distance is skipped, and the resume is at the edge.
+            liveResumeClamped.send(LiveResumeClamp(skippedSeconds: w.behindLiveSeconds,
+                                                   behindLiveSeconds: 0))
             Task { await self.seekToLiveEdge() }
         case .seek(let t):
             EngineLog.emit(
@@ -131,6 +134,9 @@ extension AetherEngine {
                 + "-> seek \(String(format: "%.1f", t))",
                 category: .session
             )
+            liveResumeClamped.send(LiveResumeClamp(
+                skippedSeconds: Swift.max(0, t - (w.edgeTime - w.behindLiveSeconds)),
+                behindLiveSeconds: Swift.max(0, w.edgeTime - t)))
             Task { await self.seek(to: t) }
         }
     }

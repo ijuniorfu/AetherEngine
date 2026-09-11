@@ -1182,6 +1182,18 @@ public final class AetherEngine: ObservableObject {
     /// parked the session; the host must negotiate a fresh transcode URL and call `load`. No replay; subscribe per session.
     public let liveSourceReset = PassthroughSubject<Void, Never>()
 
+    /// AE#444 follow-up (Sodalite#104): fires when a resume found the playhead outside the DVR window
+    /// and moved it forward.
+    ///
+    /// The clamp itself has been right since AE#444 and is the only sane thing to do: a session paused
+    /// for longer than its own buffer depth has had the position it was parked on evicted by the
+    /// sliding window, and there is nothing there to resume from. What it could not do is TELL anyone.
+    /// Measured on the harness with a 30 s window, a session paused for 70 s: the playhead sat at
+    /// 93881.2 while the window slid to 93890.0...93920.0 underneath it, and the resume landed at
+    /// 93895.0 without a word. A viewer who paused a match and came back saw it continue somewhere
+    /// else, and nothing on screen said why. No replay; subscribe per session.
+    public let liveResumeClamped = PassthroughSubject<LiveResumeClamp, Never>()
+
     /// Fires when the SYSTEM turned captions on by itself, i.e. selected a legible option in the item that
     /// neither the host nor the user asked for. On iOS 26 that is Settings > Accessibility > Subtitles &
     /// Captioning > Automatic Subtitles (show when muted, on skip back, on a language mismatch); those
@@ -6527,6 +6539,22 @@ public final class AetherEngine: ObservableObject {
     }
     #endif
     #endif
+}
+
+/// AE#444 follow-up (Sodalite#104): what a resume after a long pause had to do, for a host that wants
+/// to say so.
+public struct LiveResumeClamp: Sendable, Equatable {
+    /// Seconds the playhead was moved FORWARD: the content the sliding window took while the session
+    /// was paused, which is what the viewer does not get to see.
+    public let skippedSeconds: Double
+    /// How far behind the live edge the resumed position is. Zero when the clamp was an edge snap,
+    /// which is what a live-only session with no DVR window gets.
+    public let behindLiveSeconds: Double
+
+    public init(skippedSeconds: Double, behindLiveSeconds: Double) {
+        self.skippedSeconds = skippedSeconds
+        self.behindLiveSeconds = behindLiveSeconds
+    }
 }
 
 // MARK: - Errors

@@ -292,6 +292,12 @@ public final class Demuxer: @unchecked Sendable {
     private(set) var discTitles: [DiscTitle] = []
     private(set) var selectedDiscTitleIndex: Int = 0
 
+    /// Language codes the selected disc title declares for its elementary streams, keyed by `AVStream.id`
+    /// (MPEG-TS PID on Blu-ray, MPEG-PS stream / substream id on DVD). Neither disc format repeats the
+    /// language inside the stream, so `trackInfo` backfills undetermined tracks from this; empty for every
+    /// non-disc source, where it is a no-op (#527).
+    private(set) var discStreamLanguages: [Int: String] = [:]
+
     /// Per-clip presentation-offset spans for a selected multi-clip Blu-ray title (empty otherwise). When
     /// non-empty, `readPacket` and `indexedKeyframes` fold each clip's timestamps onto one contiguous
     /// timeline so the playhead does not leap at clip boundaries (AE#105). Guarded by `accessLock`.
@@ -319,6 +325,7 @@ public final class Demuxer: @unchecked Sendable {
     private func adoptDiscInfo(_ info: DiscInfo) {
         discTitles = info.titles
         selectedDiscTitleIndex = info.selectedTitleIndex
+        discStreamLanguages = info.selectedTitle?.streamLanguages ?? [:]
         clipTimeline = info.clipTimeline
         lastClipIndex = 0
         lastReadClipIdx = -1
@@ -1099,7 +1106,11 @@ public final class Demuxer: @unchecked Sendable {
             codecName = "unknown"
         }
 
-        let language = metadataValue(stream.pointee.metadata, key: "language")
+        let language = Self.resolvedLanguage(
+            declared: metadataValue(stream.pointee.metadata, key: "language"),
+            streamID: stream.pointee.id,
+            discLanguages: discStreamLanguages
+        )
         let title = metadataValue(stream.pointee.metadata, key: "title")
         let name: String
         if let title = title, !title.isEmpty {
@@ -1150,6 +1161,27 @@ public final class Demuxer: @unchecked Sendable {
             isAtmos: isAtmos,
             assHeader: assHeader
         )
+    }
+
+    /// The language to publish for a stream. A disc keeps its track languages in its navigation data
+    /// rather than in the streams, so an m2ts / VOB demuxed on its own reports every track as
+    /// undetermined and no preferred-language selection can match. `discLanguages` (empty for every
+    /// non-disc source) fills those in, keyed by the stream's container id. A language the container
+    /// actually declared always wins: the disc tables describe the authored title, the stream describes
+    /// itself (#527).
+    static func resolvedLanguage(declared: String?, streamID: Int32,
+                                 discLanguages: [Int: String]) -> String? {
+        guard isUndeterminedLanguage(declared) else { return declared }
+        return discLanguages[Int(streamID)] ?? declared
+    }
+
+    /// True for a container language that names no language: absent, empty, or the ISO 639-2
+    /// "undetermined" code. This is what every Blu-ray and DVD track reports, since neither format
+    /// carries the language in the stream (#527).
+    static func isUndeterminedLanguage(_ value: String?) -> Bool {
+        guard let value = value?.trimmingCharacters(in: .whitespaces).lowercased(),
+              !value.isEmpty else { return true }
+        return value == "und" || value == "undetermined"
     }
 
     /// MKV font attachments. Payload in codec extradata; filename/MIME in stream metadata.

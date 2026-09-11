@@ -12,6 +12,24 @@ the public-API contract.
 
 ### Added
 
+- **A disc's tracks arrive with the languages the disc declares, so preferred-language
+  selection works on an ISO at all (#527).** Neither disc format puts a track language
+  in the stream: a Blu-ray's clip PMT carries no ISO 639 descriptor and a DVD's VOBs
+  carry nothing, so every audio and subtitle track of an ISO demuxed on its own came out
+  undetermined and `preferredAudioLanguages` / `preferredSubtitleLanguages` could never
+  match one. The languages are in the disc's navigation data, which is where libbluray
+  and VLC read them, and now so does the engine: on Blu-ray from every PlayItem's STN
+  table, on DVD from the VTS IFO audio and subpicture attribute tables, with the title's
+  main program chain naming the substream each attribute is actually carried as (a stream
+  the chain marks absent is dropped, and without a readable chain the attribute's position
+  is used, which is how the great majority of discs are authored). The table is keyed by
+  the stream id the demuxer reports and applied in one place, so it reaches the published
+  track lists, auto-selection and both playback backends together. Only an undetermined
+  track is filled in; a language the container really declares stays authoritative.
+  `aetherctl disc-inspect` prints what a disc declares per title, so a disc whose tracks
+  stay undetermined can be told apart from a disc that declares nothing. Reported by
+  bitxeno.
+
 - **`liveResumeClamped`, so a host can say that a long pause cost the viewer
   something (AE#444 follow-up, Sodalite#104).** A session paused for longer than
   its own DVR depth has had the position it was parked on evicted by the sliding

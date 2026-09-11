@@ -12,6 +12,34 @@ the public-API contract.
 
 ### Added
 
+- **`LoadOptions.dolbyVisionHandling = .baseLayerOnly`: the HDR10 / HLG base layer of a
+  Dolby Vision source, the Dolby Vision left out of the container.** The route a host
+  offers as "Dolby Vision: off", for a title whose Dolby Vision is wrong and whose base
+  layer is right. The reported title (a 4K remux of *1917*) carries a container record
+  claiming Profile 5, compatibility 0, over a bitstream whose VUI declares BT.2020 YCbCr
+  PQ and whose RPU carries `disable_residual_flag = 0`, an enhancement-layer resampling
+  filter and NLQ, fields only a Profile 7 RPU has, with an identity mapping and HDR10
+  static metadata on the base. A genuine Profile 5 leaves the VUI unspecified, IPT-PQ-c2
+  having no code point in it, and its RPU has no residual to describe. Served as
+  `dvh1.05`, as the record asks, AVPlayer reads YCbCr as IPT and the picture is green /
+  violet; every player that ignores the record shows the HDR10 base layer. Nothing in
+  the container says which half is lying, so the choice is the host's, per title.
+  With the option the source takes the plain `hvc1` / `av01` route on every display:
+  `dvcC` stripped, no `SUPPLEMENTAL-CODECS`, no Profile 7 conversion, HDR10 / HLG
+  display criteria instead of `dvh1`, `videoFormat` reading the base layer's format
+  while `sourceVideoFormat` and `sourceDVProfile` keep naming what the file carries. It
+  is admitted for HEVC Profile 7 / 8.1 / 8.4 and AV1 Profile 10.1 / 10.4, whose record
+  names the base layer, and for a Profile 5 / AV1 10.0 record whose VUI names one; a
+  Profile 5 whose VUI is unspecified has no base layer to present, keeps its route, and
+  the engine says so. On the default route the contradiction is logged
+  (`DV Profile 5 record over a BT.2020 YCbCr VUI`) so a host knows to offer the option.
+  A tuning field, correctable on the playing session through
+  `reloadAtCurrentPosition(applying:)`; it wins over `forceDolbyVisionOnNonDVDisplay`,
+  and under it a Profile 5 record the VUI contradicts no longer refuses the software
+  path (#176), whose decoder was presenting the base layer anyway.
+  `aetherctl serve | validate | segverify | play --dv-base-layer` and
+  `play --reload-applying dolby-vision=baseLayerOnly` drive it. Covered by
+  `DolbyVisionBaseLayerTests`.
 - **A disc's tracks arrive with the languages the disc declares, so preferred-language
   selection works on an ISO at all (#527).** Neither disc format puts a track language
   in the stream: a Blu-ray's clip PMT carries no ISO 639 descriptor and a DVD's VOBs

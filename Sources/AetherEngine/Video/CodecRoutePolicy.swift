@@ -284,7 +284,28 @@ extension HLSVideoEngine {
         }
 
         if codecID == AV_CODEC_ID_AV1 {
-            let dvRecord = effectiveDvMode ? doviConfigRecord(from: codecpar) : nil
+            let sourceRecord = doviConfigRecord(from: codecpar)
+            // `dolbyVisionHandling = .baseLayerOnly`: read the record for nothing but the log, and
+            // strip it on the way out, so the source takes the plain av01 branch below whatever the
+            // display can do. Same predicate as the HEVC path and the format clamp.
+            let presentsBaseLayer = sourceRecord.map { r in
+                VideoRoutingPolicy.presentsDolbyVisionBaseLayer(
+                    handling: dolbyVisionHandling,
+                    codecID: AV_CODEC_ID_AV1,
+                    dvProfile: Int(r.dv_profile),
+                    dvBlCompatID: Int(r.dv_bl_signal_compatibility_id),
+                    colorTransfer: codecpar.pointee.color_trc,
+                    colorMatrix: codecpar.pointee.color_space)
+            } ?? false
+            if presentsBaseLayer, let r = sourceRecord {
+                EngineLog.emit(
+                    "[HLSVideoEngine] AV1 DV Profile \(r.dv_profile) compat=\(r.dv_bl_signal_compatibility_id): "
+                    + "presenting the base layer only (dolbyVisionHandling=baseLayerOnly), plain av01, "
+                    + "dvcC stripped, no SUPPLEMENTAL-CODECS",
+                    category: .session
+                )
+            }
+            let dvRecord = (effectiveDvMode && !presentsBaseLayer) ? sourceRecord : nil
             let dvVariant = classifyDVVariant(dvRecord, codecID: AV_CODEC_ID_AV1)
 
             let av1ProfileRaw = Int(codecpar.pointee.profile)
@@ -372,9 +393,12 @@ extension HLSVideoEngine {
                     videoRange: videoRange,
                     primaryCodecs: primary,
                     supplementalCodecs: nil,
-                    doviConfig: dvVariant == .av1Profile102 ? .strip : .keep,
+                    doviConfig: (dvVariant == .av1Profile102 || presentsBaseLayer) ? .strip : .keep,
                     convertP7ToProfile81: false,
-                    dvVariant: dvVariant
+                    // The source is still what it is; the log should name it even when the record
+                    // was read for nothing else.
+                    dvVariant: presentsBaseLayer
+                        ? classifyDVVariant(sourceRecord, codecID: AV_CODEC_ID_AV1) : dvVariant
                 )
             // HEVC DV variants can't reach this switch (classifyDVVariant
             // is called with AV_CODEC_ID_AV1) but Swift's exhaustivity
@@ -410,6 +434,64 @@ extension HLSVideoEngine {
         let hevcLevelRaw = Int(codecpar.pointee.level)
         let hevcLevel = hevcLevelRaw > 0 ? hevcLevelRaw : 150
         let dvLevelStr = String(format: "%02d", dvLevel)
+
+        if let r = dvRecord {
+            let recordProfile = Int(r.dv_profile)
+            let recordCompat = Int(r.dv_bl_signal_compatibility_id)
+            let vuiNamesYCbCrBase = VideoRoutingPolicy.vuiDeclaresYCbCrHDRBase(
+                colorTransfer: codecpar.pointee.color_trc, colorMatrix: codecpar.pointee.color_space)
+            // A Profile 5 record over a VUI that names a YCbCr HDR base is a container contradicting
+            // its bitstream (the measured shape is a Profile 7 remux relabelled 5: NLQ and residual in
+            // the RPU, identity mapping, HDR10 static metadata on the base). Served as dvh1.05 the
+            // decoder reads YCbCr as IPT and the picture comes out green / violet. Said out loud on the
+            // default route, because the fix is a host option and the host has to know to offer it.
+            if dvVariant == .profile5, vuiNamesYCbCrBase, dolbyVisionHandling == .automatic {
+                EngineLog.emit(
+                    "[HLSVideoEngine] DV Profile 5 record over a BT.2020 YCbCr VUI "
+                    + "(trc=\(codecpar.pointee.color_trc.rawValue) matrix=\(codecpar.pointee.color_space.rawValue)); "
+                    + "a genuine Profile 5 leaves both unspecified. If the picture is green / violet the record "
+                    + "is wrong and the base layer is HDR10: LoadOptions.dolbyVisionHandling = .baseLayerOnly "
+                    + "presents it as such",
+                    category: .session
+                )
+            }
+            if VideoRoutingPolicy.presentsDolbyVisionBaseLayer(
+                handling: dolbyVisionHandling,
+                codecID: AV_CODEC_ID_HEVC,
+                dvProfile: recordProfile,
+                dvBlCompatID: recordCompat,
+                colorTransfer: codecpar.pointee.color_trc,
+                colorMatrix: codecpar.pointee.color_space
+            ) {
+                // The base layer on its own, on every display: plain hvc1, the record stripped so no
+                // dvcC reaches the sample entry, no SUPPLEMENTAL, and no P7 conversion (its RPU is
+                // dropped with the record). The RPU NAL units stay in the samples and are ignored, the
+                // route a Profile 7 already takes on a display without Dolby Vision. The range is the
+                // base layer's: PQ for 7 / 8.1 and a relabelled 5, HLG for 8.4, the VUI's for 8.2.
+                let baseRange: HLSVideoRange
+                switch dvVariant {
+                case .profile84: baseRange = .hlg
+                case .profile81, .profile7: baseRange = .pq
+                default: baseRange = manifestVideoRange(codecpar)
+                }
+                EngineLog.emit(
+                    "[HLSVideoEngine] DV Profile \(recordProfile) compat=\(recordCompat): presenting the "
+                    + "\(baseRange.rawValue) base layer only (dolbyVisionHandling=baseLayerOnly), plain hvc1, "
+                    + "dvcC stripped, no SUPPLEMENTAL-CODECS"
+                    + (dvVariant == .profile7 ? ", no P7 -> P8.1 conversion" : ""),
+                    category: .session
+                )
+                return CodecRoute(
+                    codecTagOverride: "hvc1",
+                    videoRange: baseRange,
+                    primaryCodecs: plainHEVCCodecs(codecpar: codecpar, fallbackLevel: hevcLevel),
+                    supplementalCodecs: nil,
+                    doviConfig: .strip,
+                    convertP7ToProfile81: false,
+                    dvVariant: dvVariant
+                )
+            }
+        }
 
         switch dvVariant {
         case .profile5:

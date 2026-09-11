@@ -466,21 +466,16 @@ extension AetherEngine {
         logLiveCushionIfDue(window: w)
     }
 
-    /// AE#524: the cushion between the playhead and the live edge, once a second, for the life of a
-    /// live session.
+    /// AE#524: one line when the client's own runway gets thin, which is what precedes a stall.
     ///
-    /// A live session's distance from the edge is set once at the join and then only erodes: the
-    /// playhead advances at exactly 1x while the edge advances at whatever rate the source publishes,
-    /// so any stretch of publishing below real time is spent out of the cushion and nothing gives it
-    /// back. Reported from a device, a session that rebuffered once 57 s in had come up with 15 s of
-    /// cushion and had about 4 s left when it stalled, and the batch arithmetic accounts for only 3.2
-    /// s of the 11 that went missing. Reconstructing the rest from segment timestamps and an
-    /// `AVKitLayer` sample every second is guesswork, and it produced two incompatible readings of
-    /// the same minute.
+    /// This was a per-second probe while the defect was open, and that is what it was for: the
+    /// reconstruction it replaced produced two incompatible readings of the same minute. What it
+    /// measured is now understood, so only the part worth a line in a shipped session survives.
     ///
-    /// So the three numbers that decide it are printed together, on one axis: where the playhead is,
-    /// where the edge is, and how much of the window the CLIENT has actually fetched, which is a
-    /// different quantity from either and is what runs out first.
+    /// The healthy shape, measured over 92 s on a 6 s-segment source with the fix in: the playhead
+    /// sits between 5 and 13 s behind the newest cut, sawtoothing by one delivery interval as each
+    /// batch lands, and what AVPlayer has FETCHED never drops under 3 s. So the fetched runway is the
+    /// number that says a stall is coming, and the two distances either side of it are context.
     @MainActor
     func logLiveCushionIfDue(window w: LiveWindow) {
         let now = Date()
@@ -488,21 +483,28 @@ extension AetherEngine {
         lastLiveCushionLogAt = now
         let playhead = currentTime
         let edge = w.edgeTime
-        let floor = w.seekableRange?.lowerBound
         Task { @MainActor [weak self] in
             guard let self else { return }
             let ahead = await self.avPlayerBufferAheadSeconds()
+            guard ahead < Self.liveThinRunwaySeconds else {
+                self.liveThinRunwayNoted = false
+                return
+            }
+            guard !self.liveThinRunwayNoted else { return }
+            self.liveThinRunwayNoted = true
             EngineLog.emit(
-                "[AetherEngine] #524 live cushion: playhead=\(String(format: "%.2f", playhead))s "
-                + "edge=\(String(format: "%.2f", edge))s "
-                + "cushion=\(String(format: "%.2f", edge - playhead))s "
-                + "fetched=\(String(format: "%.2f", ahead))s "
-                + "resident=\(floor.map { String(format: "%.2f", edge - $0) + "s" } ?? "none") "
-                + "atEdge=\(w.isAtEdge ? "y" : "n")",
+                "[AetherEngine] #524 the client is running thin: it holds "
+                + "\(String(format: "%.2f", ahead))s of fetched runway, playhead "
+                + "\(String(format: "%.2f", playhead))s against a seekable edge of "
+                + "\(String(format: "%.2f", edge))s (which already carries the holdback)",
                 category: .session
             )
         }
     }
+
+    /// AE#524: under this much fetched content a live client is one late delivery from a stall.
+    /// Measured on a healthy session: the sawtooth bottoms out around 3 s.
+    static let liveThinRunwaySeconds: Double = 2.0
 
     /// AE#446 round 4: who asked for a seek. The two differ in exactly two places, both about a live
     /// session that advertises no DVR window: whether the seek is refused outright, and whether its

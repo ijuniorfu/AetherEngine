@@ -1533,9 +1533,11 @@ public final class AetherEngine: ObservableObject {
     /// still say whether the viewer was parked in the DVR window or sitting at the edge.
     var liveBehindWhenLastAdvancing: Double = 0
     var lastPublishedLivePlayhead: Double? = nil
-    /// AE#524: when the live cushion was last reported, so the probe stays at 1 Hz whatever rate the
-    /// clock publishes at.
+    /// AE#524: when the live runway was last checked, so the check stays at 1 Hz whatever rate the
+    /// clock publishes at, and whether it has already been reported as thin (one line per episode,
+    /// not one per second).
     var lastLiveCushionLogAt: Date? = nil
+    var liveThinRunwayNoted = false
 
     /// Current session URL. Used by reloadAtCurrentPosition and AetherEngine+FrameExtractor.
     var loadedURL: URL?

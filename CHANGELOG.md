@@ -71,6 +71,29 @@ the public-API contract.
 
 ### Fixed
 
+- **A Dolby Vision Profile 5 record its own RPU contradicts is now served as what the
+  RPU says, so the class #529 could only fall back from plays as real Dolby Vision
+  (#532).** A remux carrying a Profile 7 or 8 bitstream under a container record
+  relabelled to Profile 5 was served as the record asked, `dvh1.05`, and AVPlayer read
+  its BT.2020 YCbCr base as IPT: the green / violet picture of #4 and #176. The
+  contradiction is in the file rather than in a guess about it, because IPT-PQ-c2 has no
+  VUI code point (a genuine Profile 5 leaves `matrix_coeffs` and
+  `transfer_characteristics` unspecified) and because a Profile 5 RPU cannot carry a
+  residual or an NLQ. The engine now reads the first RPU of exactly that pairing, a
+  Profile 5 record over a BT.2020 YCbCr PQ or HLG VUI, and believes it: an RPU that
+  reads 7 takes the Profile 7 branch (RPU conversion to 8.1 on a display with Dolby
+  Vision, the HDR10 base without one), an RPU that reads 8 takes the Profile 8.1 branch,
+  whose compatibility rewrite gives the served container the record it should have
+  carried. An RPU that agrees with the record, one that cannot be read, and every source
+  that is not that pairing read no packets and keep their route. The Profile 5 refusal on
+  the software path (#176) stands down for a corrected record, whose base layer is plain
+  HEVC. `LoadOptions.dolbyVisionHandling = .baseLayerOnly` keeps precedence, since a host
+  asking for the base layer is answering a question the engine did not ask. AV1 Profile
+  10.0 is not covered: its RPU rides in a T.35 metadata OBU rather than an `unspec62`
+  NAL, so #529's option stays the answer there. Reported as a follow-up by @skrew on #529.
+  Covered by `DolbyVisionRecordAuditTests`, whose real-media arms run against Dolby's own
+  Profile 5 signal and a Profile 8.1 signal relabelled to Profile 5 by two bytes.
+
 - **A seek on a VC-1 track could leave the parser without a picture size, and
   which seeks it hit came down to one bit of encoder rate control (#490,
   FFmpegBuild 3.2.1).** libavformat closes and reopens the parser on every

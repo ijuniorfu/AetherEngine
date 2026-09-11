@@ -15,7 +15,7 @@ import Dovi
 /// The RPU settles which half is lying, without a heuristic: a Profile 5 RPU cannot carry a residual or
 /// an NLQ, so an RPU that carries one was authored for a different profile. libdovi answers it in one
 /// field, and the engine already parses RPUs on this path for the Profile 7 conversion.
-enum DolbyVisionRecordAudit {
+public enum DolbyVisionRecordAudit {
 
     private static let nalTypeRPU: UInt8 = 62   // unspec62: Dolby Vision RPU
 
@@ -113,5 +113,40 @@ enum DolbyVisionRecordAudit {
             if let profile = rpuProfile(packet, framing: framing) { return profile }
         }
         return nil
+    }
+
+    /// The verdict for a source in one call, gate included: opens it, reads the record and the VUI, and
+    /// walks packets only when the record is contradicted. nil means the record stands.
+    ///
+    /// For a caller that has no probe of its own, which is the CLI harness. A session gates on the record
+    /// its own probe already read and calls `rpuProfileOfSource` directly, so it does not open the source
+    /// a second time for a source there is nothing to audit.
+    public static func rpuCorrection(url: URL, extraHeaders: [String: String] = [:]) -> Int? {
+        let demuxer = Demuxer()
+        do {
+            // The full profile, not the audit one: the gate reads the DOVI record and the colour
+            // description, and both arrive only with `find_stream_info`. Measured, not assumed: the same
+            // fixture comes back with no record at all under `skipStreamInfo`, while the extradata the
+            // packet walk needs for its framing survives it, which is why `rpuProfileOfSource` can stay
+            // on the cheap open and this cannot.
+            try demuxer.open(url: url, extraHeaders: extraHeaders, profile: .playback)
+        } catch {
+            demuxer.close()
+            return nil
+        }
+        let videoIdx = demuxer.videoStreamIndex
+        guard videoIdx >= 0, let stream = demuxer.stream(at: videoIdx),
+              let codecpar = stream.pointee.codecpar else {
+            demuxer.close()
+            return nil
+        }
+        let record = AetherEngine.dvConfig(stream: stream)
+        let contradicted = recordIsContradicted(
+            codecID: codecpar.pointee.codec_id, dvProfile: record?.profile,
+            colorTransfer: codecpar.pointee.color_trc, colorMatrix: codecpar.pointee.color_space)
+        demuxer.close()
+        guard contradicted else { return nil }
+        return correctedProfile(record: record?.profile,
+                                rpu: rpuProfileOfSource(url: url, extraHeaders: extraHeaders))
     }
 }

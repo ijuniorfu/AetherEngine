@@ -29,7 +29,10 @@ func runServe(url: URL, dvModeAvailable: Bool, forceDVWithoutDisplay: Bool = fal
         url: url,
         dvModeAvailable: dvModeAvailable,
         forceDolbyVisionOnNonDVDisplay: forceDVWithoutDisplay,
-        dolbyVisionHandling: dolbyVisionHandling
+        dolbyVisionHandling: dolbyVisionHandling,
+        // AE#532: a session gates this on its own probe; the harness has none, so it asks the audit
+        // for the whole verdict. A source with nothing to correct never gets past the gate inside.
+        dolbyVisionRPUProfile: DolbyVisionRecordAudit.rpuCorrection(url: url)
     )
     // Resume anchor exactly like AetherEngine.loadNative's load(startPosition:) (#99 repro).
     engine.initialStartSeconds = startPosition
@@ -101,7 +104,8 @@ func runValidate(url: URL, dvModeAvailable: Bool, forceDVWithoutDisplay: Bool = 
         url: url,
         dvModeAvailable: dvModeAvailable,
         forceDolbyVisionOnNonDVDisplay: forceDVWithoutDisplay,
-        dolbyVisionHandling: dolbyVisionHandling
+        dolbyVisionHandling: dolbyVisionHandling,
+        dolbyVisionRPUProfile: DolbyVisionRecordAudit.rpuCorrection(url: url)
     )
     let playbackURL: URL
     do {

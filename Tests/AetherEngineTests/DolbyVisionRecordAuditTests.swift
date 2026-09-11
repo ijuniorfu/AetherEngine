@@ -303,6 +303,18 @@ struct DolbyVisionRecordAuditTests {
         #expect(rpu == 5)
         #expect(DolbyVisionRecordAudit.correctedProfile(record: 5, rpu: rpu) == nil)
     }
+
+    @Test("the one-call verdict reads a contradicted source and says what the RPU says",
+          .enabled(if: relabelledFixtureExists(), "see relabelledFixtureURL for the two-byte recipe"))
+    func verdictForRelabelledSource() throws {
+        #expect(DolbyVisionRecordAudit.rpuCorrection(url: relabelledFixtureURL()) == 8)
+    }
+
+    @Test("the one-call verdict leaves an uncontradicted source alone",
+          .enabled(if: genuineProfile5FixtureExists(), "see genuineProfile5FixtureURL for the download"))
+    func verdictForGenuineSource() throws {
+        #expect(DolbyVisionRecordAudit.rpuCorrection(url: genuineProfile5FixtureURL()) == nil)
+    }
 }
 
 // MARK: - Fixtures

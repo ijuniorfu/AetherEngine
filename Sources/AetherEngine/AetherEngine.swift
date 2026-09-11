@@ -4427,7 +4427,24 @@ public final class AetherEngine: ObservableObject {
         if !resumesTornDownSession { setLoadedAutoplay(sessionRebuildResumesPlaying) }
         if isCustomSource {
             // Rebuild on retained reader (seekable only); no URL to reopen.
-            guard customSourceIsSeekable, let placeholderURL = loadedURL else { return }
+            //
+            // AE#526: a refusal, said out loud. This used to return silently, and a host cannot tell
+            // that from a reload that worked: measured on a device, a live session torn down by the
+            // paused-background window (#127) came back to a player that had called this, believed it
+            // had rebuilt, and sat on a spinner for twenty minutes. A forward-only origin cannot be
+            // reopened at a position, and the vocabulary for saying so already existed
+            // (`sessionReloadRefusal`); only this path did not use it.
+            guard customSourceIsSeekable, let placeholderURL = loadedURL else {
+                let refusal: SessionReloadRefusal =
+                    loadedURL == nil ? .noActiveSession : .customSourceNotSeekable
+                EngineLog.emit(
+                    "[AetherEngine] #526 reload at current position refused: \(refusal). A session "
+                    + "on a forward-only custom source has no position to reopen at; a live host's "
+                    + "answer to this is to tune again, not to wait for a rebuild that cannot come",
+                    category: .session
+                )
+                throw AetherEngineError.sessionNotReloadable(refusal)
+            }
             let failure = await reloadWithAudioOverride(
                 url: placeholderURL,
                 audioStreamIndex: selection.audioTrackIndex.map { Int32($0) },

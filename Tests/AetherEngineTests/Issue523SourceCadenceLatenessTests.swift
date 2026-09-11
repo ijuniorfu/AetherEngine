@@ -22,7 +22,7 @@ import Testing
 struct Issue523SourceCadenceLatenessTests {
 
     /// The device capture, as the meter sees it: one short interval inside each pair, one wide one
-    /// between pairs.
+    /// between pairs. The short ones are inside a single delivery and the meter drops them (AE#524).
     private var fieldIntervals: [Double] {
         [0.028, 6.85, 0.032, 6.52, 0.026, 6.59, 0.028, 6.50, 0.032, 6.85, 0.033, 6.53]
     }
@@ -37,10 +37,38 @@ struct Issue523SourceCadenceLatenessTests {
     func theMeterReadsTheDeliveryInterval() {
         let cadence = meter(fieldIntervals).cadenceSeconds
         #expect(cadence != nil)
-        // The second largest of the window: the source's rhythm, not its widest single excursion.
+        // The second largest of what is left once the intra-delivery intervals are dropped.
         #expect(abs((cadence ?? 0) - 6.85) < 0.001)
         // A mean would have read 2.9 s here, which is not an interval this source ever takes.
         #expect((cadence ?? 0) > 6.0)
+    }
+
+    /// AE#524: the same meter, on a device, read "it delivers every 0.04s" for a source delivering
+    /// every 6.5 s, and the window then closed on the first quiet stretch. A backlogged join fills the
+    /// whole sample window with intervals INSIDE one delivery: the origin hands over its window at I/O
+    /// speed, the cutter finalizes five segments in 55 ms, and every one of those is 30 ms from the
+    /// last. Dropping the single worst sample then threw away the only real interval there was.
+    @Test("a backlogged join is one delivery, not five")
+    func abacklogIsNotARhythm() {
+        // The device capture, verbatim: seg-0 to seg-4 of a fastZap join.
+        let backlog = meter([0.039, 0.016, 3.532, 0.036])
+        // Not "every 0.04s", which is what the close fired on. One real interval is not a rhythm
+        // either, so the honest answer here is that this meter has nothing to say yet.
+        #expect(backlog.cadenceSeconds == nil)
+        // Which leaves the client's own patience, and that is NOT enough on this source: 1.5 x
+        // TARGETDURATION is 6.0 s against a 6.45 s quiet stretch. The ingest's arrival meter is what
+        // covers the start, and the test below is the one that matters for a fastZap join.
+        #expect(LiveEdgePolicy.sourceLateSeconds(targetDuration: 4,
+                                                 cadenceSeconds: backlog.cadenceSeconds) == 6.0)
+    }
+
+    @Test("the ingest's own arrival meter is the better measurement, and it is there sooner")
+    func theIngestFloorCarriesTheStart() {
+        // The upstream's measured arrival cadence, which this session had before the provider had
+        // finalized its second segment: 6.000 s, so a 6.45 s quiet stretch is not late.
+        let late = LiveEdgePolicy.sourceLateSeconds(targetDuration: 4, cadenceSeconds: 6.0)
+        #expect(abs(late - 7.5) < 0.001)
+        #expect(6.45 < late)
     }
 
     @Test("none of the captured gaps is late any more, and every one of them used to be")

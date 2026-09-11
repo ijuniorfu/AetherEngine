@@ -178,7 +178,9 @@ enum VideoRoutingPolicy {
     ///
     /// For HEVC Profile 7 / 8.1 / 8.4 and AV1 Profile 10.1 / 10.4 the record says so (a compatibility
     /// id of 1 or 4, or the dual-layer profile whose base layer is HDR10 by definition); 8.2 and 10.2
-    /// carry an SDR base the engine already presents on its own. Profile 5 and AV1 Profile 10.0 say the
+    /// declare an SDR base and are admitted with them, though there the option moves nothing but the
+    /// display criteria, the engine already serving that base layer as plain `hvc1` / `av01` (the
+    /// predicate table in `DolbyVisionBaseLayerTests` pins that). Profile 5 and AV1 Profile 10.0 say the
     /// opposite: compatibility 0 is IPT-PQ-c2, a signal no YCbCr pipeline can show, which is why the
     /// software path refuses them (#176). The VUI is the tie-breaker for that class. A genuine Profile 5
     /// leaves `matrix_coeffs` and `transfer_characteristics` unspecified because IPT has no VUI code

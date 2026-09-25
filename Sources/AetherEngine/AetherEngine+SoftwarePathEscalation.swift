@@ -39,8 +39,11 @@ extension AetherEngine {
         let supersededGeneration = loadGeneration
         let duringStartup = waitingLoadGenerations.contains(supersededGeneration)
 
+        let verdict = request.domain == SoftwarePathEscalation.liveJoinErrorDomain
+            ? "the native route cannot open this live bitstream"
+            : "AVPlayer refused the media (\(request.domain)/\(request.code))"
         EngineLog.emit(
-            "[AetherEngine] #561 AVPlayer refused the media (\(request.domain)/\(request.code)) at "
+            "[AetherEngine] #561 \(verdict) at "
             + "\(String(format: "%.2f", request.positionSeconds))s; rebuilding this session on the "
             + "software path, which decodes it with libavcodec instead"
             + (duringStartup ? " (the waiting load follows it)" : "") + ": \(request.message)",

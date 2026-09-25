@@ -871,6 +871,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
         defer { packetCounterLock.unlock() }
         return _lastPregateDroppedKeyframePts
     }
+    /// AE#627: video packets the gate dropped before a keyframe starvation ended the pump. Non-zero
+    /// means the source delivered video for the whole wait and none of it could open a segment.
+    private var _starvedVideoDrops = 0
+    var starvedVideoDrops: Int {
+        packetCounterLock.lock()
+        defer { packetCounterLock.unlock() }
+        return _starvedVideoDrops
+    }
     var hasRestartTarget: Bool { restartTargetVideoPts != Int64.min }
     private func markVideoGateOpened() {
         packetCounterLock.lock()
@@ -3527,6 +3535,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                     + "exiting pump for reopen",
                                     category: .session
                                 )
+                                packetCounterLock.lock()
+                                _starvedVideoDrops = pregateVideoDropCount
+                                packetCounterLock.unlock()
                                 exitReason = .keyframeStarvation
                                 break readLoop
                             }

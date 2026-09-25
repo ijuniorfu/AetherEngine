@@ -10,7 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A live H.264 join opens on an intra recovery point, not only on an IDR.** Feeds whose encoder
+  never sends an IDR (entry points are I-pictures behind a recovery point SEI with
+  `recovery_frame_cnt` 0) never started on the native route; the join gate refused every entry
+  point and gave up after three 15 s reopen cycles (AE#627).
+- **A live join that finds no entry point at all goes to the software path after one wait**, instead
+  of three reopen cycles into the same bitstream, or to `liveSourceReset` when the host declined
+  that rung (AE#627).
+- **The keyframe wait log counts the keyframes it dropped** (`keyframes=N`), so a gate refusing
+  every entry point no longer reads as a feed without keyframes (AE#627).
 
 ## [7.17.0] - 2026-09-25
 

@@ -155,6 +155,27 @@ extension HLSVideoEngine {
         }
     }
 
+    /// AE#627: a keyframe starvation on the session's FIRST join (no segment ever produced) while video
+    /// kept arriving says the bitstream has no entry point this route accepts, not that the link
+    /// hiccupped. The same starvation after segments were produced is a mid-session loss and keeps its
+    /// reopens, and a wait that saw no video at all is a source problem a reopen can fix.
+    static func liveJoinFoundNoEntryPoint(
+        reason: HLSSegmentProducer.PumpExitReason,
+        segmentsProduced: Int,
+        starvedVideoDrops: Int
+    ) -> Bool {
+        guard case .keyframeStarvation = reason else { return false }
+        return segmentsProduced == 0 && starvedVideoDrops > 0
+    }
+
+    /// AE#627: the engine's answer to `onLiveJoinWithoutEntryPoint` when the software path is not on
+    /// offer. The reopens this skipped would have ended here too, a minute later.
+    func giveUpLiveJoinWithoutEntryPoint() {
+        escalateLiveReopenExhaustion(transport: Self.liveReopenTransport(
+            sourceReopenableByURL: sourceReopenableByURL,
+            hasCustomSourceReopenFactory: customSourceReopenFactory != nil))
+    }
+
     /// The whole escalation, so the two exhaustion sites (barren-cycle cap, reopen attempt cap)
     /// cannot drift apart: the decision plus BOTH of its effects. The halt is the half that is easy
     /// to lose, and losing it is what the -15410 zombie is made of; onLiveSourceReset alone (what
@@ -359,8 +380,19 @@ extension HLSVideoEngine {
                 return
             }
         }
-        restartLock.lock()
         let segmentsNow = provider?.liveContinuationPoint().nextIndex ?? 0
+        if let onLiveJoinWithoutEntryPoint,
+           Self.liveJoinFoundNoEntryPoint(
+               reason: reason, segmentsProduced: segmentsNow, starvedVideoDrops: prod.starvedVideoDrops) {
+            EngineLog.emit(
+                "[HLSVideoEngine] AE#627 live join read \(prod.starvedVideoDrops) video packets without an "
+                + "entry point the native route can open; a reopen joins the same bitstream, so not reopening",
+                category: .session
+            )
+            onLiveJoinWithoutEntryPoint()
+            return
+        }
+        restartLock.lock()
         let reopenDecision = Self.liveRecoveryBudgetDecision(
             progressIndex: segmentsNow,
             lastProgressIndex: lastReopenSegmentCount,

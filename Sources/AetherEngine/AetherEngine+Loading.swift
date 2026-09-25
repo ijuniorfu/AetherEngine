@@ -1003,6 +1003,37 @@ extension AetherEngine {
                 self.liveSourceReset.send()
             }
         }
+        // AE#627: the first join found no entry point the native route can open. Reopening joins the
+        // same bitstream, so the session goes to the software path, or straight to the host when
+        // that rung is not on offer, instead of spending three 15 s reopen cycles first.
+        session.onLiveJoinWithoutEntryPoint = { [weak self, weak session] in
+            Task { @MainActor in
+                guard let self, let session, self.nativeVideoSession === session else { return }
+                let request = SoftwarePathEscalation.Request(
+                    domain: SoftwarePathEscalation.liveJoinErrorDomain,
+                    code: 0,
+                    message: "live join found no entry point the native route can open",
+                    positionSeconds: 0
+                )
+                let offered = SoftwarePathEscalation.shouldEscalate(
+                    errorDomain: request.domain,
+                    availability: SoftwarePathEscalation.Availability(
+                        alreadyEscalated: self.softwarePathEscalationBudget.isSpent,
+                        preferredDecodePath: self.loadedOptions.preferredDecodePath,
+                        nativeRemoteHLS: self.loadedOptions.nativeRemoteHLS,
+                        hostAllowsEscalation: self.loadedOptions.escalatesToSoftwarePath))
+                guard offered else {
+                    EngineLog.emit(
+                        "[AetherEngine] AE#627 software path not on offer for this session; "
+                        + "handing the join failure to the host",
+                        category: .session
+                    )
+                    session.giveUpLiveJoinWithoutEntryPoint()
+                    return
+                }
+                await self.escalateToSoftwarePath(request)
+            }
+        }
         // #126: zero-progress VOD pump death (readError before any packet/segment), and #169:
         // mid-session readError after the revive cap. Without this the host sees
         // isPlayable=true / a stalled item and waits until its own timeout.

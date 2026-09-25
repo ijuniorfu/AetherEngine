@@ -630,6 +630,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var onPlaylistShiftRebased: (@Sendable (Double, Double) -> Void)?
     /// Fires on `PumpExitReason.sourceReplay`; host must re-negotiate a fresh session.
     var onLiveSourceReset: (@Sendable () -> Void)?
+    /// AE#627: the first join read video for the whole keyframe wait and found no point the native
+    /// route can open a segment on. Reopening joins the same bitstream, so the engine decides between
+    /// the software path and telling the host (`escalateLiveReopenExhaustion`) instead. Unset, the
+    /// session falls back to the ordinary reopen budget.
+    var onLiveJoinWithoutEntryPoint: (@Sendable () -> Void)?
     /// #126: fires when a VOD pump dies on a read error having produced nothing (zero packets
     /// written, empty cache). The playlist exists but no segment will ever land, so AVPlayer
     /// would sit in waitingToPlay forever; the engine surfaces a fatal error instead.

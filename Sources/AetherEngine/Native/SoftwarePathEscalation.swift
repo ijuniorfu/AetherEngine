@@ -96,6 +96,12 @@ enum SoftwarePathEscalation {
     /// The domain of a media failure, i.e. AVFoundation could not make sense of what it was served.
     static let mediaErrorDomain = "CoreMediaErrorDomain"
 
+    /// AE#627: a live join that read video for the whole keyframe wait and found no picture the native
+    /// route can open a segment on (a feed without IDRs or recovery points, or with gradual refresh
+    /// only). Like a CoreMedia failure it is a verdict on the media, and libavcodec starts on such a
+    /// stream by decoding through it.
+    static let liveJoinErrorDomain = "AetherEngine.LiveJoin"
+
     /// Whether a failed native item is worth handing to the engine's own decoder.
     ///
     /// The domain is the discriminator. A CoreMedia failure is a verdict on the MEDIA, which is the
@@ -111,6 +117,6 @@ enum SoftwarePathEscalation {
         guard availability.preferredDecodePath == .automatic else { return false }
         // The bypass has no local muxer and decodes nothing here, so #461 ignores the option anyway.
         guard !availability.nativeRemoteHLS else { return false }
-        return errorDomain == mediaErrorDomain
+        return errorDomain == mediaErrorDomain || errorDomain == liveJoinErrorDomain
     }
 }

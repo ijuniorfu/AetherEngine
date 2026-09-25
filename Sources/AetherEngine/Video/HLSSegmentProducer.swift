@@ -534,6 +534,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Pre-gate drop counters; surface the "lädt unendlich" failure mode when the gate never opens.
     private var pregateVideoDropCount: Int = 0
+    /// AE#627: dropped packets that did carry the key flag. The wait line describes only the packet it
+    /// is printed on, so without this a join gate refusing every keyframe read as a feed with none.
+    private var pregateKeyDropCount: Int = 0
     private var pregateWaitStart: Date?
     private static let liveKeyframeGateTimeoutSeconds: TimeInterval = 15
 
@@ -868,6 +871,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
         defer { packetCounterLock.unlock() }
         return _lastPregateDroppedKeyframePts
     }
+    /// AE#627: video packets the gate dropped before a keyframe starvation ended the pump. Non-zero
+    /// means the source delivered video for the whole wait and none of it could open a segment.
+    private var _starvedVideoDrops = 0
+    var starvedVideoDrops: Int {
+        packetCounterLock.lock()
+        defer { packetCounterLock.unlock() }
+        return _starvedVideoDrops
+    }
     var hasRestartTarget: Bool { restartTargetVideoPts != Int64.min }
     private func markVideoGateOpened() {
         packetCounterLock.lock()
@@ -1110,6 +1121,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         pregateAudioReplaySorted = false
         pregateAudioOverflowLogged = false
         pregateVideoDropCount = 0
+        pregateKeyDropCount = 0
         pregateAudioDropCount = 0
         lastPregateVideoLog = 0
         lastPregateAudioLog = 0
@@ -1271,8 +1283,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private let a53CodecKind: A53SEIParser.CodecKind?
     private let a53NALFraming: A53SEIParser.NALFraming
 
-    /// #133: latched at init. When true, the video gate withholds until a decodable IDR access unit
-    /// (in-band SPS+PPS+IDR) arrives, rather than opening on any AV_PKT_FLAG_KEY packet.
+    /// #133: latched at init. When true, the video gate withholds until a decodable access unit
+    /// (in-band SPS+PPS and an IDR or immediate intra recovery point, AE#627) arrives, rather than
+    /// opening on any AV_PKT_FLAG_KEY packet.
     private let liveH264AnnexBJoin: Bool
 
     /// Sodalite#32: text-subtitle tap, generalizing the #77 CC tap. Streams in this set are kept by the
@@ -1733,14 +1746,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return active != incoming
     }
 
-    /// #133 join gate: a decodable H.264 access unit at a mid-stream join needs in-band SPS + PPS and a true
-    /// IDR slice (not an open-GOP recovery point). Returns the reconstructed (width, height, Annex-B extradata)
-    /// so a zero-dimension probe codecpar can be backfilled into the first muxer. nil until such an AU arrives.
+    /// #133 join gate: a decodable H.264 access unit at a mid-stream join needs in-band SPS + PPS and an
+    /// entry point, an IDR or an immediate intra recovery point (AE#627, see `isRandomAccessEntry`). Returns
+    /// the reconstructed (width, height, Annex-B extradata) so a zero-dimension probe codecpar can be
+    /// backfilled into the first muxer. nil until such an AU arrives.
     private func extractJoinVideoConfig(_ packet: UnsafeMutablePointer<AVPacket>) -> (width: Int32, height: Int32, extradata: [UInt8])? {
         guard let data = packet.pointee.data, packet.pointee.size > 0 else { return nil }
         let buf = UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
         guard let (sps, pps) = H264SPS.extractSPSandPPS(fromAnnexB: buf),
-              H264SPS.containsIDR(fromAnnexB: buf),
+              H264SPS.isRandomAccessEntry(fromAnnexB: buf),
               let dim = H264SPS.dimensions(fromNAL: sps) else { return nil }
         return (Int32(dim.width), Int32(dim.height),
                 H264SPS.annexBExtradata(sps: sps, pps: pps))
@@ -3459,9 +3473,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             pts: packet.pointee.pts, dts: packet.pointee.dts,
                             targetPts: effectiveGateTargetPts)
                         // #133: on a live H.264 Annex-B mid-stream join, opening on a bare keyframe flag is not
-                        // enough. A join packet must carry a decodable IDR access unit (in-band SPS+PPS+IDR);
-                        // otherwise the decoder renders references it never received (green frames) or, when the
-                        // probe joined before any SPS and left codecpar at 0x0, the first muxer alloc gets 0x0
+                        // enough. A join packet must carry a decodable access unit (in-band SPS+PPS and an
+                        // IDR or immediate intra recovery point, AE#627); otherwise the decoder renders references
+                        // it never received (green frames) or, when the probe joined before any SPS and left codecpar at 0x0, the first muxer alloc gets 0x0
                         // dimensions and avformat_write_header fails -22, dead-ending the channel. The bounded
                         // live timeout below covers the miss (keyframeStarvation -> reopen), unlike muxerFailed.
                         let joinConfig = (liveH264AnnexBJoin && isKey && targetSatisfied)
@@ -3472,6 +3486,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 let ts = packet.pointee.pts != Int64.min
                                     ? packet.pointee.pts : packet.pointee.dts
                                 if ts != Int64.min { notePregateDroppedKeyframe(pts: ts) }
+                                pregateKeyDropCount += 1
                             }
                             // AE#408: the scan has reached ground already known to carry no sync
                             // sample (the boundary itself on the first pass, the abandoned aim after
@@ -3497,10 +3512,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             if pregateVideoDropCount - lastPregateVideoLog >= Self.pregateLogInterval {
                                 lastPregateVideoLog = pregateVideoDropCount
                                 let awaiting = (isKey && targetSatisfied && liveH264AnnexBJoin)
-                                    ? "SPS/PPS/IDR access unit" : "video keyframe"
+                                    ? "SPS/PPS + entry-point access unit" : "video keyframe"
                                 EngineLog.emit(
                                     "[HLSSegmentProducer] still waiting for \(awaiting): "
-                                    + "dropped=\(pregateVideoDropCount) "
+                                    + "dropped=\(pregateVideoDropCount) (keyframes=\(pregateKeyDropCount)) "
                                     + "lastDts=\(packet.pointee.dts) lastPts=\(packet.pointee.pts) "
                                     + "isKey=\(isKey) "
                                     + "target=\(effectiveGateTargetPts)"
@@ -3516,9 +3531,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 EngineLog.emit(
                                     "[HLSSegmentProducer] live keyframe gate timed out after "
                                     + "\(Int(Self.liveKeyframeGateTimeoutSeconds))s "
-                                    + "(dropped=\(pregateVideoDropCount)); exiting pump for reopen",
+                                    + "(dropped=\(pregateVideoDropCount), keyframes=\(pregateKeyDropCount)); "
+                                    + "exiting pump for reopen",
                                     category: .session
                                 )
+                                packetCounterLock.lock()
+                                _starvedVideoDrops = pregateVideoDropCount
+                                packetCounterLock.unlock()
                                 exitReason = .keyframeStarvation
                                 break readLoop
                             }

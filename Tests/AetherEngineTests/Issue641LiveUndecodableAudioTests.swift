@@ -107,4 +107,56 @@ struct Issue641LiveUndecodableAudioTests {
         #expect(AetherEngine.undecodableAudioStreamIndexAcrossLoad(1, sessionPreservingReload: false) == nil)
         #expect(AetherEngine.undecodableAudioStreamIndexAcrossLoad(nil, sessionPreservingReload: true) == nil)
     }
+
+    // MARK: - Where the verdict goes
+
+    private final class Surfaced: @unchecked Sendable {
+        private let lock = NSLock()
+        private var kinds: [PlaybackErrorKind] = []
+        private var live: [Int32] = []
+        func surface(_ kind: PlaybackErrorKind) { lock.withLock { kinds.append(kind) } }
+        func forward(_ index: Int32) { lock.withLock { live.append(index) } }
+        var surfacedKinds: [PlaybackErrorKind] { lock.withLock { kinds } }
+        var forwarded: [Int32] { lock.withLock { live } }
+    }
+
+    private func makeSession(live: Bool) -> (HLSVideoEngine, Surfaced) {
+        let session = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/ae641.mkv"),
+                                     dvModeAvailable: false, isLiveSession: live)
+        let surfaced = Surfaced()
+        session.onVODSourceFailed = { _, _, kind in surfaced.surface(kind) }
+        session.onLiveAudioDecodesNothing = { index, _ in surfaced.forward(index) }
+        return (session, surfaced)
+    }
+
+    @Test("a VOD bridge that decodes nothing surfaces the same verdict as the E-AC-3 route")
+    func vodSurfacesTheTypedFailure() {
+        let (session, surfaced) = makeSession(live: false)
+        session.handleBridgeDecodedNothing(streamIndex: 1, summary: "fed=64 decoded=0")
+        #expect(surfaced.surfacedKinds == [.audioBridgeProducedNoOutput],
+                "a FLAC bridge has no failed cut to report it, so it played silently as .bridged")
+        #expect(surfaced.forwarded.isEmpty)
+    }
+
+    @Test("a live bridge that decodes nothing goes to the engine's video-only rebuild, not to an error")
+    func liveForwardsInsteadOfFailing() {
+        let (session, surfaced) = makeSession(live: true)
+        session.handleBridgeDecodedNothing(streamIndex: 2, summary: "fed=64 decoded=0")
+        #expect(surfaced.forwarded == [2])
+        #expect(surfaced.surfacedKinds.isEmpty)
+    }
+
+    @Test("the silent-bridge verdict reaches the host once, every other failure as often as it happens")
+    func silentBridgeVerdictIsSurfacedOnce() {
+        let (session, surfaced) = makeSession(live: false)
+        // The detector, then the E-AC-3 route's failed cut, then its exhausted revive.
+        session.handleBridgeDecodedNothing(streamIndex: 1, summary: "fed=64 decoded=0")
+        session.surfaceVODSourceFailure(FFmpegErr.einval, "Audio track could not be decoded",
+                                        kind: .audioBridgeProducedNoOutput)
+        session.surfaceVODSourceFailure(FFmpegErr.einval, "Audio could not be transcoded for playback",
+                                        kind: .audioBridgeProducedNoOutput)
+        session.surfaceVODSourceFailure(FFmpegErr.einval, "Source audio cannot be muxed")
+        session.surfaceVODSourceFailure(FFmpegErr.einval, "Source audio cannot be muxed")
+        #expect(surfaced.surfacedKinds == [.audioBridgeProducedNoOutput, .vodSourceFailed, .vodSourceFailed])
+    }
 }

@@ -284,16 +284,17 @@ typed fact rather than as something to reconstruct (AE#462).
 | Value | Meaning |
 | --- | --- |
 | `.none` | no session |
-| `.noAudioInSource` | the source carries no audio track, or none was selected |
+| `.noAudioInSource` | the source carries no audio track |
 | `.streamCopy` | the source bitstream is muxed into fMP4 unchanged (Atmos, DTS-HD and everything else reach the renderer as authored) |
 | `.bridged` | decoded and re-encoded to FLAC or E-AC-3 for the fMP4 pipeline; lossless for the bed channels, object metadata does not survive the PCM intermediate |
 | `.decoded` | libavcodec decodes and the engine renders it (the software path, the FFmpeg audio-only host) |
-| `.droppedNoPipeline` | the source HAS audio and none of it could be delivered: no decoder for it in this build, the bridge could not be built or could not write its header, or (live only) the bridge was built and its decoder produced nothing, after which the engine rebuilds the session without the track (AE#641). The session plays video-only and silently |
+| `.droppedNoPipeline` | the source HAS audio and none of it could be delivered: no decoder for it in this build, the bridge could not be built or could not write its header, the probe left its parameters empty so no stream could be picked, or (live only) the bridge was built and its decoder produced nothing, after which the engine rebuilds the session without the track (AE#641). The session plays video-only and silently |
 | `.playerManaged` | AVFoundation owns the audio (the remote-HLS bypass, the native audio-only host). The engine has no pipeline of its own to classify and does not answer on AVFoundation's behalf |
 
 **`.droppedNoPipeline` is the one a fallback ladder acts on**, the same way it demotes on
 `PlaybackErrorKind.audioBridgeProducedNoOutput`. The two are the same user outcome from opposite
-ends of the cascade: that kind fails loudly when a VOD bridge WAS built and then decoded nothing,
+ends of the cascade: that kind fails loudly when a VOD bridge WAS built and then decoded nothing
+(on the FLAC route as well since AE#641, which used to play silently while reporting `.bridged`),
 this value reports a bridge that could never be built at all. A live session whose bridge decodes
 nothing arrives here as well rather than at the error: its video is playable and a live source has
 no position to hand to a second player, so the engine rebuilds it video-only by itself and the

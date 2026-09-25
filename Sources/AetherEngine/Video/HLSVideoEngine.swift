@@ -664,9 +664,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Pairing the release with the surface makes that structural instead of a call site to remember.
     func surfaceVODSourceFailure(_ code: Int32, _ reason: String,
                                  kind: PlaybackErrorKind = .vodSourceFailed) {
+        // AE#641: a silent bridge is reported the moment it is structural and again by the muxer arms
+        // that follow it on the E-AC-3 route; the session learns it once.
+        if kind == .audioBridgeProducedNoOutput {
+            silentBridgeSurfaceLock.lock()
+            let first = !silentBridgeFailureSurfaced
+            silentBridgeFailureSurfaced = true
+            silentBridgeSurfaceLock.unlock()
+            guard first else { return }
+        }
         provider?.abortSequentialStartupWait()
         onVODSourceFailed?(code, reason, kind)
     }
+    private let silentBridgeSurfaceLock = NSLock()
+    private var silentBridgeFailureSurfaced = false
     /// Session-long FLAC bridge for codecs illegal in fMP4. Engine-owned (not producer-owned) so
     /// encoder state survives producer restarts; `startSegment()` rebases PTS on each restart.
     var audioBridge: AudioBridge?
@@ -1844,6 +1855,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             streamCopyAudio: streamCopyAudio,
             sourceAudioStreamIndex: audioStreamIndex,
             sourceAudioStream: audioStreamIndex >= 0 ? audioDem.stream(at: audioStreamIndex) : nil,
+            sourceCarriesAudio: audioDem.firstAudioStreamIndexByType >= 0,
             audioHLSCodecs: &audioHLSCodecs,
             audioLanguage: audioLanguage
         )

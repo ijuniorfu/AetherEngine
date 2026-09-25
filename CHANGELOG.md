@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.17.0] - 2026-09-25
+
 ### Added
 
 - **`LoadOptions.escalatesToSoftwarePath` (default `true`) lets a host decline the AE#561 rebuild**

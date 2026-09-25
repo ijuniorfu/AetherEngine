@@ -288,13 +288,16 @@ typed fact rather than as something to reconstruct (AE#462).
 | `.streamCopy` | the source bitstream is muxed into fMP4 unchanged (Atmos, DTS-HD and everything else reach the renderer as authored) |
 | `.bridged` | decoded and re-encoded to FLAC or E-AC-3 for the fMP4 pipeline; lossless for the bed channels, object metadata does not survive the PCM intermediate |
 | `.decoded` | libavcodec decodes and the engine renders it (the software path, the FFmpeg audio-only host) |
-| `.droppedNoPipeline` | the source HAS audio and none of it could be delivered: no decoder for it in this build, or the bridge could not be built or could not write its header. The session plays video-only and silently |
+| `.droppedNoPipeline` | the source HAS audio and none of it could be delivered: no decoder for it in this build, the bridge could not be built or could not write its header, or (live only) the bridge was built and its decoder produced nothing, after which the engine rebuilds the session without the track (AE#641). The session plays video-only and silently |
 | `.playerManaged` | AVFoundation owns the audio (the remote-HLS bypass, the native audio-only host). The engine has no pipeline of its own to classify and does not answer on AVFoundation's behalf |
 
 **`.droppedNoPipeline` is the one a fallback ladder acts on**, the same way it demotes on
 `PlaybackErrorKind.audioBridgeProducedNoOutput`. The two are the same user outcome from opposite
-ends of the cascade: that kind fails loudly when a bridge WAS built and then decoded nothing, this
-value reports a bridge that could never be built at all. Neither ends a ladder: re-serving the
+ends of the cascade: that kind fails loudly when a VOD bridge WAS built and then decoded nothing,
+this value reports a bridge that could never be built at all. A live session whose bridge decodes
+nothing arrives here as well rather than at the error: its video is playable and a live source has
+no position to hand to a second player, so the engine rebuilds it video-only by itself and the
+value changes from `.bridged` to `.droppedNoPipeline` (AE#641). Neither ends a ladder: re-serving the
 source with audio the pipeline can carry (a server-side transcode, a second player that decodes it
 itself) plays it.
 
@@ -590,7 +593,7 @@ suppressing `AVPlayerItemLegibleOutput` to keep the measurement running.
 | `$startupProgress` | `StartupProgress?` for a determinate loading bar. |
 | `softwarePathEscalations`, `SoftwarePathEscalationEvent` | A native session AVPlayer refused, rebuilt on the software path, with the failure it absorbed. See [The engine moves a refused session onto the software path](#the-engine-moves-a-refused-session-onto-the-software-path). |
 | `$videoRoute` | `VideoRoute`: which pipeline is actually serving, one of `.none`, `.remoteBypass`, `.loopback`, `.software`, `.audio`. `LoadOptions.nativeRemoteHLS` is only the request; the carriage watchdog, the remembered verdict and the HLS reroutes move a session between routes, mid-session too. Branch on this, above all for who draws subtitles. |
-| `$audioDelivery` | `AudioDelivery`: how the audio reaches the renderer, one of `.none`, `.noAudioInSource`, `.streamCopy`, `.bridged`, `.decoded`, `.droppedNoPipeline`, `.playerManaged`. `.droppedNoPipeline` is a source that HAS audio playing video-only because no pipeline could be built for it: the value a fallback ladder demotes on. See [Reading whether the audio was delivered](#reading-whether-the-audio-was-delivered). |
+| `$audioDelivery` | `AudioDelivery`: how the audio reaches the renderer, one of `.none`, `.noAudioInSource`, `.streamCopy`, `.bridged`, `.decoded`, `.droppedNoPipeline`, `.playerManaged`. `.droppedNoPipeline` is a source that HAS audio playing video-only because no pipeline could be built for it, or because a live bridge decoded nothing (AE#641): the value a fallback ladder demotes on. See [Reading whether the audio was delivered](#reading-whether-the-audio-was-delivered). |
 | `$videoFormat` | The format being presented: `.sdr`, `.hdr10`, `.hdr10Plus`, `.dolbyVision`, `.hlg`. On a platform with no per-mode capability table (macOS), a Dolby Vision session the clamp sent to `.hdr10` is upgraded back to `.dolbyVision` once the item AVFoundation is playing turns out to carry a `dvh1` / `dvhe` sample entry (AE#515). On tvOS the panel term behind it no longer comes from the headroom alone: a session serving an HDR master that AVFoundation has not refused publishes the presented format half a second in, because a display that takes an HDR master is presenting HDR while one that is not refuses in 54 to 61 ms, and `currentEDRHeadroom` has been measured reading 1.00 through exactly that acceptance (AE#459). |
 | `$sourceVideoFormat` | The format the **source** carries, before any panel-driven mapping. The pair is what an honest badge needs: HDR content on an SDR panel differs between the two. |
 | `$sourceDVProfile`, `$sourceVideoFrameRate`, `$sourceVideoBitrate` | Source detail for an info panel. |

@@ -19,6 +19,16 @@ the public-API contract.
 - **A live join that finds no entry point at all goes to the software path after one wait**, instead
   of three reopen cycles into the same bitstream, or to `liveSourceReset` when the host declined
   that rung (AE#627).
+- **A live channel whose audio the bridge cannot decode plays video-only instead of stalling.** A
+  FLAC bridge builds its sample entry from the encoder's extradata, so a bridge that decoded nothing
+  left segments with an audio track that never carried a sample, and AVPlayer showed the first
+  picture and waited on it for the rest of the session. The engine now rebuilds the session without
+  that track and `audioDelivery` reads `.droppedNoPipeline` (AE#641).
+- **FFmpegBuild 3.6.0: an MPEG-TS audio PID is identified by its payload.** The raw `dts`, `truehd`
+  and `loas` demuxers were missing, so the mpegts content probe could never confirm DTS, TrueHD or
+  LATM and the lenient mp3 probe named the track; a PID labelled 0x03 (MPEG-1 audio) was not probed
+  at all. A DTS-HD IPTV channel opened as mp3, and every packet failed with "Header missing"
+  (AE#641).
 - **The keyframe wait log counts the keyframes it dropped** (`keyframes=N`), so a gate refusing
   every entry point no longer reads as a feed without keyframes (AE#627).
 

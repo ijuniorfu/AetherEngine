@@ -160,13 +160,25 @@ extension HLSVideoEngine {
         // AE#462 harness (TEST-ONLY): both attempts are skipped so the video-only tail is reachable
         // without a source this build has no decoder for. Loud, because a run that read as a real
         // classification would be worse than no harness at all.
-        let forcedDrop = AetherEngine.forceAudioPipelineFailureForTesting
-        if forcedDrop {
+        let forcedForTesting = AetherEngine.forceAudioPipelineFailureForTesting
+        if forcedForTesting {
             EngineLog.emit(
                 "[HLSVideoEngine] TEST-ONLY: audio pipeline forced to fail, skipping stream-copy and bridge",
                 category: .session
             )
         }
+        // AE#641: this session's bridge already decoded nothing from this stream, and a second
+        // bridge would be handed the same bytes.
+        let knownUndecodable = sourceAudioStreamIndex >= 0
+            && undecodableAudioStreamIndex == sourceAudioStreamIndex
+        if knownUndecodable {
+            EngineLog.emit(
+                "[HLSVideoEngine] AE#641 audio stream \(sourceAudioStreamIndex) decoded nothing earlier "
+                + "in this session; skipping stream-copy and bridge",
+                category: .session
+            )
+        }
+        let forcedDrop = forcedForTesting || knownUndecodable
 
         let sourceCodecLabel: String = {  // falls back to "audio" for codecs with no libavcodec name entry
             if let stream = sourceAudioStream,
@@ -301,6 +313,12 @@ extension HLSVideoEngine {
                 )
                 self.savedAudioConfig = cfg
                 self.audioBridge = bridge
+                if isLiveSession, sideAudioDemuxer == nil {
+                    let streamIndex = sourceAudioStreamIndex
+                    bridge.onDecoderProducedNothing = { [weak self] stats in
+                        self?.onLiveAudioDecodesNothing?(streamIndex, stats.summary)
+                    }
+                }
                 do {
                     let prod = try makeProducer(baseIndex: initialProducerBaseIndex)
                     // The label and the CODECS attribute come from the encoder the bridge ACTUALLY opened,

@@ -116,9 +116,11 @@ public enum AudioDelivery: String, Sendable, Equatable, CaseIterable {
     /// libavcodec decodes the audio and the engine renders it itself (the software path and the
     /// software audio-only host).
     case decoded
-    /// The source HAS audio and none of it could be delivered: no libavcodec decoder for it, or the
-    /// bridge could not be built or could not write its header. The session plays video-only and
-    /// silently. This is the one value a fallback ladder acts on.
+    /// The source HAS audio and none of it could be delivered: no libavcodec decoder for it, the
+    /// bridge could not be built or could not write its header, or a live bridge was built and its
+    /// decoder produced nothing, after which the engine rebuilt the session without the track
+    /// (AE#641). The session plays video-only and silently. This is the one value a fallback ladder
+    /// acts on.
     case droppedNoPipeline
     /// AVFoundation owns the audio: the remote-HLS bypass and the native audio-only host both hand
     /// the source to AVPlayer, which does its own media selection. The engine has no pipeline of its

@@ -2349,13 +2349,16 @@ public final class AetherEngine: ObservableObject {
     /// the next session's.
     var softwarePathEscalationBudget = SoftwarePathEscalation.Budget()
 
-    /// AE#629: the escalation rebuild in flight or finished, kept so a `load()` whose startup it
+    /// AE#629: the engine's own rebuild in flight or finished, kept so a `load()` whose startup it
     /// superseded can wait for it instead of throwing. Matched by generation, so a stale one is inert.
     var softwarePathTakeover: SoftwarePathEscalation.Takeover?
-    /// The escalation rebuild most recently started, and the generation it is armed to take over
+    /// The engine's own rebuild most recently started, and the generation it is armed to take over
     /// until its teardown claims it (see `claimSoftwarePathTakeover`).
     var softwarePathRebuild: Task<Void, Error>?
     var softwarePathTakeoverArm: UInt64?
+    /// AE#641: the live audio stream whose bridge decoded nothing in this session. It outlives the
+    /// session's own rebuilds, which is what keeps them video-only, and a host load clears it.
+    var undecodableLiveAudioStreamIndex: Int32?
     /// #65 final rung, storm shape: on a frozen live playlist each stage-2 reload replays the tail,
     /// re-stalls within seconds, and the fresh stall SUPERSEDES the ladder task before its
     /// post-reload rung can run, so the reload cycle alone would loop forever. This gate persists
@@ -3695,14 +3698,14 @@ public final class AetherEngine: ObservableObject {
                 audioSourceStreamIndex: audioSourceStreamIndex, discTitleID: discTitleID,
                 attempt: attempt)
         } catch is CancellationError {
-            // AE#629: the engine took this startup over itself (the AE#561 rebuild), so the caller is
+            // AE#629: the engine took this startup over itself (the AE#561 / AE#641 rebuild), so the caller is
             // still waiting for the same thing and gets it, the way a #361 reroute keeps its wait. A
             // load the HOST superseded matches no takeover and unwinds as before.
             guard let generation = attempt.generation,
                   let takeover = softwarePathTakeover,
                   takeover.supersededGeneration == generation else { throw CancellationError() }
             EngineLog.emit(
-                "[AetherEngine] #629 load (gen \(generation)) follows the software-path rebuild "
+                "[AetherEngine] #629 load (gen \(generation)) follows the engine's own rebuild "
                 + "instead of unwinding", category: .engine)
             try await takeover.rebuild.value
             return attempt.probe
@@ -3876,6 +3879,8 @@ public final class AetherEngine: ObservableObject {
         itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
         stallReloadReviveGate = ItemDeathReviveGate(maxAttempts: 2)
         softwarePathEscalationBudget = SoftwarePathEscalation.Budget()
+        undecodableLiveAudioStreamIndex = Self.undecodableAudioStreamIndexAcrossLoad(
+            undecodableLiveAudioStreamIndex, sessionPreservingReload: sessionPreservingReloadInFlight)
         masterFallbackUsed = false
         nativeSubtitleReanchorTask?.cancel()
         nativeSubtitleReanchorTask = nil

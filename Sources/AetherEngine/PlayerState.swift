@@ -103,8 +103,9 @@ public enum VideoRoute: String, Sendable, Equatable {
 public enum AudioDelivery: String, Sendable, Equatable, CaseIterable {
     /// No session: pre-load, or torn down.
     case none
-    /// The source carries no audio stream (or none was selected). Silence is the source's, not the
-    /// engine's, and no ladder rung can change it.
+    /// The source carries no audio stream. Silence is the source's, not the engine's, and no ladder
+    /// rung can change it. A source whose audio stream the pick passed over (its parameters left
+    /// empty by the probe) is `.droppedNoPipeline`, not this (AE#641).
     case noAudioInSource
     /// The source's audio bitstream is muxed into fMP4 unchanged: Atmos, DTS-HD and every other
     /// bitstream reach the renderer exactly as authored.
@@ -117,10 +118,10 @@ public enum AudioDelivery: String, Sendable, Equatable, CaseIterable {
     /// software audio-only host).
     case decoded
     /// The source HAS audio and none of it could be delivered: no libavcodec decoder for it, the
-    /// bridge could not be built or could not write its header, or a live bridge was built and its
-    /// decoder produced nothing, after which the engine rebuilt the session without the track
-    /// (AE#641). The session plays video-only and silently. This is the one value a fallback ladder
-    /// acts on.
+    /// bridge could not be built or could not write its header, no stream could be picked because the
+    /// probe left its parameters empty, or a live bridge was built and its decoder produced nothing,
+    /// after which the engine rebuilt the session without the track (AE#641). The session plays
+    /// video-only and silently. This is the one value a fallback ladder acts on.
     case droppedNoPipeline
     /// AVFoundation owns the audio: the remote-HLS bypass and the native audio-only host both hand
     /// the source to AVPlayer, which does its own media selection. The engine has no pipeline of its

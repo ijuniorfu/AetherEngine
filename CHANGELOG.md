@@ -24,6 +24,15 @@ the public-API contract.
   left segments with an audio track that never carried a sample, and AVPlayer showed the first
   picture and waited on it for the rest of the session. The engine now rebuilds the session without
   that track and `audioDelivery` reads `.droppedNoPipeline` (AE#641).
+- **A VOD audio track the bridge cannot decode surfaces `.audioBridgeProducedNoOutput` on the FLAC
+  route too.** Only the E-AC-3 route reached that verdict, through its failed first cut; a FLAC
+  bridge builds its sample entry from the encoder's extradata, so the session played silently while
+  `audioDelivery` read `.bridged`, and a host ladder never heard of it. The verdict reaches the host
+  once, whichever arm finds it first (AE#641).
+- **`audioDelivery` reads `.droppedNoPipeline` for a source whose audio stream could not be picked**,
+  not `.noAudioInSource`. `av_find_best_stream` passes over a stream whose parameters the probe left
+  empty and only live fell back to it, so on VOD (and on the software path) a source with an
+  undecodable track read as one without audio (AE#641).
 - **FFmpegBuild 3.6.0: an MPEG-TS audio PID is identified by its payload.** The raw `dts`, `truehd`
   and `loas` demuxers were missing, so the mpegts content probe could never confirm DTS, TrueHD or
   LATM and the lenient mp3 probe named the track; a PID labelled 0x03 (MPEG-1 audio) was not probed

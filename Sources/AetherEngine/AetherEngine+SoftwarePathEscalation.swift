@@ -33,11 +33,7 @@ extension AetherEngine {
         guard softwarePathEscalationBudget.take() else { return }
 
         let absorbed = Self.absorbedFailure(request)
-        // AE#629: a load() still waiting on this session's startup is about to be superseded by the
-        // rebuild's own. It follows the rebuild instead of unwinding, and the rebuild continues its
-        // #361 startup sequence rather than dropping the host's bar back to zero.
-        let supersededGeneration = loadGeneration
-        let duringStartup = waitingLoadGenerations.contains(supersededGeneration)
+        let duringStartup = waitingLoadGenerations.contains(loadGeneration)
 
         let verdict = request.domain == SoftwarePathEscalation.liveJoinErrorDomain
             ? "the native route cannot open this live bitstream"
@@ -54,23 +50,7 @@ extension AetherEngine {
             positionSeconds: request.positionSeconds,
             duringStartup: duringStartup))
 
-        let rebuild = Task { @MainActor in
-            // Both are armed where nothing can run before the rebuild's teardown consumes them, and
-            // withdrawn after, for the paths that never reach one (a correction refused up front).
-            // The takeover is only CLAIMED by that teardown, and only if the session it ends is still
-            // the one that failed: a rebuild refused before it tore anything down, or a host stop()
-            // that got in first, must leave the waiting load to unwind as the host's own.
-            // The failure's session is already gone: rebuilding now would tear down its successor.
-            guard self.loadGeneration == supersededGeneration else { throw CancellationError() }
-            if duringStartup { self.continueStartupAcrossReroute() }
-            self.softwarePathTakeoverArm = supersededGeneration
-            defer {
-                self.abandonStartupContinuation()
-                self.softwarePathTakeoverArm = nil
-            }
-            _ = try await self.reloadAtCurrentPosition { $0.preferredDecodePath = .software }
-        }
-        softwarePathRebuild = rebuild
+        let rebuild = startTakeoverRebuild { $0.preferredDecodePath = .software }
 
         do {
             try await rebuild.value
@@ -94,7 +74,37 @@ extension AetherEngine {
         }
     }
 
-    /// Called by a teardown about to end `loadGeneration`: when that teardown is the escalation's own
+    /// Start a rebuild of this session that the engine decided on itself (AE#561 software path, AE#641
+    /// video-only), in a shape a `load()` still waiting on the session's startup can follow.
+    ///
+    /// AE#629: that load is about to be superseded by the rebuild's own. It follows the rebuild instead
+    /// of unwinding, and the rebuild continues its #361 startup sequence rather than dropping the
+    /// host's bar back to zero.
+    @MainActor
+    func startTakeoverRebuild(applying change: @escaping @Sendable (inout LoadOptions) -> Void) -> Task<Void, Error> {
+        let supersededGeneration = loadGeneration
+        let duringStartup = waitingLoadGenerations.contains(supersededGeneration)
+        let rebuild = Task { @MainActor in
+            // Both are armed where nothing can run before the rebuild's teardown consumes them, and
+            // withdrawn after, for the paths that never reach one (a correction refused up front).
+            // The takeover is only CLAIMED by that teardown, and only if the session it ends is still
+            // the one that failed: a rebuild refused before it tore anything down, or a host stop()
+            // that got in first, must leave the waiting load to unwind as the host's own.
+            // The failure's session is already gone: rebuilding now would tear down its successor.
+            guard self.loadGeneration == supersededGeneration else { throw CancellationError() }
+            if duringStartup { self.continueStartupAcrossReroute() }
+            self.softwarePathTakeoverArm = supersededGeneration
+            defer {
+                self.abandonStartupContinuation()
+                self.softwarePathTakeoverArm = nil
+            }
+            _ = try await self.reloadAtCurrentPosition(applying: change)
+        }
+        softwarePathRebuild = rebuild
+        return rebuild
+    }
+
+    /// Called by a teardown about to end `loadGeneration`: when that teardown is the engine's own
     /// rebuild, a `load()` still waiting on the ended generation follows the rebuild (AE#629).
     @MainActor
     func claimSoftwarePathTakeover() {

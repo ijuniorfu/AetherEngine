@@ -77,6 +77,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Caller-chosen audio stream index; nil falls back to `av_find_best_stream`. Enables
     /// host-driven track switching via `AetherEngine.selectAudioTrack(index:)` reload.
     private let audioSourceStreamIndexOverride: Int32?
+    /// AE#641: a source audio stream this session already found undecodable (its bridge decoded
+    /// nothing). When the pick lands on it again, the cascade goes straight to its video-only tail.
+    let undecodableAudioStreamIndex: Int32?
 
     /// AE#443: whoever REPLACES one of these two mid-session owes the session the totals the outgoing
     /// instance held (`retireDemuxer` / `retireProducer` below). They carry the session's byte and
@@ -635,6 +638,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// the software path and telling the host (`escalateLiveReopenExhaustion`) instead. Unset, the
     /// session falls back to the ordinary reopen budget.
     var onLiveJoinWithoutEntryPoint: (@Sendable () -> Void)?
+    /// AE#641: the live audio bridge decoded not one frame of the selected stream (index, bridge
+    /// summary). Nothing inside the session can recover it: a producer rebuild hands the same decoder
+    /// the same bytes, and the served media keeps an audio track that will never be filled.
+    var onLiveAudioDecodesNothing: (@Sendable (Int32, String) -> Void)?
     /// #126: fires when a VOD pump dies on a read error having produced nothing (zero packets
     /// written, empty cache). The playlist exists but no segment will ever land, so AVPlayer
     /// would sit in waitingToPlay forever; the engine surfaces a fatal error instead.
@@ -866,6 +873,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
         audioSourceStreamIndexOverride: Int32? = nil,
+        undecodableAudioStreamIndex: Int32? = nil,
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         isLiveSession: Bool = false,
         dvrWindowSeconds: Double? = nil,
@@ -910,6 +918,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode
         self.audioSourceStreamIndexOverride = audioSourceStreamIndexOverride
+        self.undecodableAudioStreamIndex = undecodableAudioStreamIndex
         self.audioBridgeMode = audioBridgeMode
         self.isLiveSession = isLiveSession
         self.dvrWindowSeconds = dvrWindowSeconds

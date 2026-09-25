@@ -797,6 +797,7 @@ extension AetherEngine {
             matchContentEnabled: matchContentEnabled,
             panelIsInHDRMode: panelIsInHDRMode,
             audioSourceStreamIndexOverride: audioSourceStreamIndex,
+            undecodableAudioStreamIndex: undecodableLiveAudioStreamIndex,
             audioBridgeMode: audioBridgeMode,
             isLiveSession: isLive,
             dvrWindowSeconds: dvrWindowSeconds,
@@ -1032,6 +1033,14 @@ extension AetherEngine {
                     return
                 }
                 await self.escalateToSoftwarePath(request)
+            }
+        }
+        // AE#641: the live bridge decoded nothing, so the served media carries an audio track that
+        // will never be filled and AVPlayer waits on it forever. The session is rebuilt video-only.
+        session.onLiveAudioDecodesNothing = { [weak self, weak session] streamIndex, summary in
+            Task { @MainActor in
+                guard let self, let session, self.nativeVideoSession === session else { return }
+                await self.dropUndecodableLiveAudio(streamIndex: streamIndex, bridgeSummary: summary)
             }
         }
         // #126: zero-progress VOD pump death (readError before any packet/segment), and #169:

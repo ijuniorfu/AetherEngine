@@ -577,6 +577,13 @@ final class AudioBridge: @unchecked Sendable {
     /// One-shot: a bridge that stays silent for an hour costs one line, not one per packet.
     private(set) var silentFeedReported = false
 
+    /// AE#641: called once, on the pump thread, when the silence is structural AND the decoder is the
+    /// arm that failed (`decodedNothing`). A live session has no muxer death to learn it from: a FLAC
+    /// sample entry is built from the encoder's extradata, so segments keep being cut with an audio
+    /// track that never carries a sample, and AVPlayer shows the first picture and waits on the audio
+    /// forever. Set before the producer starts feeding.
+    var onDecoderProducedNothing: (@Sendable (FeedStats) -> Void)?
+
     /// AE#474: the DECODER arm's unit, and only its unit. Source went in and the FIFO got nothing
     /// back, so there is no sample count to bound anything with and packets are all there is.
     private static let silentFeedPacketThreshold = 64
@@ -966,6 +973,7 @@ final class AudioBridge: @unchecked Sendable {
             + "written, so this session will fail its first segment cut unless output starts.",
             category: .session
         )
+        if stats.decodedNothing { onDecoderProducedNothing?(stats) }
     }
 
     /// Align swr's INPUT side to the frame the decoder actually produced. libswresample reads `extended_data`

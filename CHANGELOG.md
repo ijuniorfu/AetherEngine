@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.18.0] - 2026-09-26
+
 ### Changed
 
 - **A remote disc image adopts a warm (#647).** `AetherEngine.prewarm` on an `.iso` / `.img` /

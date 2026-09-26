@@ -541,17 +541,21 @@ public final class Demuxer: @unchecked Sendable {
         // straight to libavformat fails to probe; it is a filesystem, not a media container, #64).
         // Gated on the disc-image extension so normal media URLs skip the range-probe entirely; if
         // the source is not a recognizable disc, fall through to the streaming reader.
-        if !isLive, Self.isDiscImageURL(url),
-           let discReader = HTTPDiscIOReader(url: url, extraHeaders: extraHeaders) {
-            if let discInfo = try DiscReader.wrap(discReader, selectTitleID: selectTitleID, cacheKey: url.absoluteString) {
-                adoptDiscInfo(discInfo)
-                auditSource = nil
-                let bridge = CustomIOReaderBridge(reader: discInfo.reader)
-                let inputFormat = av_find_input_format(discInfo.formatHint)
-                try openWithProvider(bridge, inputFormat: inputFormat, isLive: false)
-                return
+        if !isLive, Self.isDiscImageURL(url) {
+            let warm = HTTPDiscIOReader.takePrewarm(for: url, extraHeaders: extraHeaders)
+            if let discReader = HTTPDiscIOReader(url: url, extraHeaders: extraHeaders, prewarmed: warm) {
+                if let discInfo = try DiscReader.wrap(discReader, selectTitleID: selectTitleID, cacheKey: url.absoluteString) {
+                    adoptDiscInfo(discInfo)
+                    auditSource = nil
+                    let bridge = CustomIOReaderBridge(reader: discInfo.reader)
+                    let inputFormat = av_find_input_format(discInfo.formatHint)
+                    try openWithProvider(bridge, inputFormat: inputFormat, isLive: false)
+                    return
+                }
+                discReader.close()
             }
-            discReader.close()
+            // Not a disc: hand the warm back so the streaming reader below adopts it (#647).
+            if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
         }
         let reader = AVIOReader(
             url: url,

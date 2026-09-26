@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **A remote disc image adopts a warm (#647).** `AetherEngine.prewarm` on an `.iso` / `.img` /
+  `.udf` URL was fetched and then never used: the disc reader kept its own buffer, probed the size
+  with `bytes=0-0` and fetched the head again, and the warm stayed in the store. The disc reader now
+  takes the size from the warm, serves the disc structure and the title's opening extents out of it,
+  and starts its first request at the warm frontier; its forks share the same bytes without a copy
+  and no longer re-probe the size. A disc-image URL that turns out not to be a disc hands the warm
+  on to the streaming reader. Measured on an authored DVD over a 20 Mbit/s, 100 ms origin: 10
+  requests after the warm instead of 19, first frame 5.7 s sooner.
 
 ## [7.17.1] - 2026-09-26
 

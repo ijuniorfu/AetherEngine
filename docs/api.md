@@ -521,6 +521,8 @@ What it fetches: one ranged GET from byte zero for the budget, plus a second one
 
 A warm also hands the load **where the bytes live**. A resolver URL that answers 302 with a temporary edge target is resolved once, by the warm, and the session starts at that target instead of resolving the chain again; a lease that has since run out falls back to the source URL through the same ladder a mid-session expiry uses. Credential headers (`Authorization`, `Cookie`, `X-Emby-Token` and the rest of the #126 set) never travel to a cross-origin target, whether it was reached through a redirect or pinned from a warm.
 
+Remote disc images (`.iso` / `.img` / `.udf` over HTTP) adopt a warm too (#647). The disc reader takes the size from the warm instead of probing for it, answers the disc layer's structure reads and the title's opening extents out of the head, and starts its first request at the warm frontier; its forks (the subtitle side reader, the forward prefetcher) share the same bytes without a copy. It does not pin the warm's redirect target, because that reader follows redirects per request. A disc-image URL that turns out not to be a disc hands the warm on to the streaming reader.
+
 Three limits are part of the contract rather than implementation detail:
 
 - **It never queues for the origin.** A warm takes a request slot only if one is free right now, and declines when the origin is metered down to one request at a time or is pacing the engine (`maxConcurrentSourceRequests`, #377). A prewarm that would have to wait for the playing session's uplink has stopped helping.

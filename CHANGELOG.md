@@ -21,6 +21,18 @@ the public-API contract.
   on to the streaming reader. Measured on an authored DVD over a 20 Mbit/s, 100 ms origin: 10
   requests after the warm instead of 19, first frame 5.7 s sooner.
 
+### Fixed
+
+- **A DVD title opens without reading 50 MB first, and lists every subtitle it has (#651).**
+  MPEG-PS never lets `find_stream_info` finish early, so every DVD open read the whole playback
+  probe budget (50 MB / 60 s) and still missed any subtitle stream whose first packet came later.
+  The subpicture streams the title's VTS IFO declares are now created before the probe, their
+  fragments are joined in the engine the way libavformat's `dvdsub` parser joins them for streams
+  it creates itself, and a title with a readable IFO probes 8 MB / 5 s. Measured on an authored
+  DVD over a 20 Mbit/s, 100 ms origin: first frame at 6.5 s instead of 29.6 s, 0.5 s after a
+  prewarm. A subtitle whose first packet sits at 100 s is a track from the first frame and
+  decodes. Discs without a readable VTS IFO, and plain `.mpg` / `.vob` URLs, keep the old budget.
+
 ## [7.17.1] - 2026-09-26
 
 ### Fixed

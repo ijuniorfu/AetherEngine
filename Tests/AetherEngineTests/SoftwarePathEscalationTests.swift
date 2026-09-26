@@ -166,6 +166,27 @@ struct SoftwarePathEscalationTests {
             duringStartup: false)])
     }
 
+    /// Reported as a code reading on AE#629: a rebuild whose load failed after its teardown had
+    /// already published that failure, and the rung then published the absorbed one on top, so the
+    /// host saw two `.error`s for one failure and the second contradicted what `load()` threw.
+    @Test("A rebuild that fails after its teardown surfaces one failure, its own", .timeLimit(.minutes(2)))
+    @MainActor
+    func failedRebuildSurfacesOnce() async throws {
+        let engine = try AetherEngine()
+        // A port nothing listens on: the rebuild tears the session down and its open is refused.
+        engine.loadedURL = try #require(URL(string: "http://127.0.0.1:9/source.mkv"))
+        var errors: [PlaybackErrorInfo?] = []
+        let sub = engine.$state.sink { state in
+            if case .error = state { errors.append(engine.errorInfo) }
+        }
+        defer { sub.cancel() }
+
+        await engine.escalateToSoftwarePath(Self.mediaFailure)
+
+        #expect(errors.count == 1)
+        #expect(errors.first??.kind != .nativeItemFailed)
+    }
+
     /// A custom source whose first read parks until the engine cancels it: a load that cannot finish
     /// and cannot time out, so the takeover is decided against a startup that is really in flight.
     final class ParkedReader: IOReader, @unchecked Sendable {

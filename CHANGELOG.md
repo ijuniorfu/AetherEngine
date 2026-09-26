@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Fixed
 
+- **A session revived by the #93 item swap keeps its playhead until the fresh item lands there.**
+  Until then AVPlayer reports the start of the segment it decodes up from, so the playhead stepped
+  back by up to a segment, and a software-path rebuild raised in that window resumed there and
+  replayed the gap (3.97 s on a 15.97 s revive) (AE#629).
+- **A software-path rebuild that fails after its teardown surfaces one `.error`, its own.** The
+  rung then published the failure it had absorbed on top, a second `.error` that contradicted what
+  a `load()` following the rebuild threw. The absorbed failure stays on `softwarePathEscalations`
+  (AE#629).
 - **A live H.264 join opens on an intra recovery point, not only on an IDR.** Feeds whose encoder
   never sends an IDR (entry points are I-pictures behind a recovery point SEI with
   `recovery_frame_cnt` 0) never started on the native route; the join gate refused every entry

@@ -63,6 +63,17 @@ extension AetherEngine {
                 "[AetherEngine] #561 software rebuild superseded; nothing to surface",
                 category: .engine)
         } catch {
+            // AE#629: a rebuild that failed after its teardown has already surfaced its own failure,
+            // and a load() that followed it threw that same error. Publishing the absorbed one on top
+            // would hand the host two `.error`s for one failure, the second contradicting the throw.
+            // The absorbed failure is not lost: `softwarePathEscalations` carried it.
+            if case .error = state {
+                EngineLog.emit(
+                    "[AetherEngine] #561 the software rebuild failed after its teardown (\(error)); "
+                    + "its own failure is the one surfaced",
+                    category: .engine)
+                return
+            }
             // The rung is gone and the failure was never surfaced, so it has to be surfaced here or
             // the session would sit on a picture that stopped with nothing said.
             EngineLog.emit(

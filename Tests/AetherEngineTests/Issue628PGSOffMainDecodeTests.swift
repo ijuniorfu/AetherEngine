@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import CoreGraphics
 import Testing
@@ -168,14 +169,32 @@ struct Issue628PGSOffMainDecodeTests {
         #expect(engine.subtitleDrainCursors[.primary] != nil)
     }
 
+    /// Every publish of `subtitleCues`, stamped with the drain tick that was current when it happened.
+    @MainActor
+    private final class CuePublications {
+        var stamps: [(serial: UInt64, starts: [Double])] = []
+    }
+
     @MainActor
     @Test("a batch whose channel was re-selected while it decoded is dropped, and the tick runs again")
     func reselectionDropsTheStaleBatch() async throws {
         let (engine, _, demuxer) = try engineWithHarvestedSubRip()
         defer { demuxer.close() }
+        // Observed per publish rather than sampled after the await: the queued tick starts inside the
+        // stale batch's landing and its own decode can land before this test resumes, so "still in
+        // flight" and "nothing published yet" are scheduler outcomes, not the engine's (a CI run took
+        // 65 s and caught the rerun already finished).
+        let publications = CuePublications()
+        let observation = engine.$subtitleCues.dropFirst().sink { cues in
+            MainActor.assumeIsolated {
+                publications.stamps.append((engine.subtitleDrainTickSerial, cues.map(\.startTime)))
+            }
+        }
+        defer { observation.cancel() }
 
         engine.requestSubtitleDrainTick()
         let stale = try #require(engine.subtitleDrainTickInFlight)
+        let staleSerial = engine.subtitleDrainTickSerial
         // What a selection does to the channel (selectSubtitleTrack): a fresh decoder and cursor.
         engine.subtitleDrainDecoders[.primary] = nil
         engine.subtitleDrainCursors[.primary] = nil
@@ -183,10 +202,13 @@ struct Issue628PGSOffMainDecodeTests {
         #expect(engine.subtitleDrainTickRequested)
 
         await stale.value
-        // The stale batch published nothing; the queued tick is now the one in flight.
-        let rerun = try #require(engine.subtitleDrainTickInFlight)
-        #expect(engine.subtitleCues.isEmpty)
-        await rerun.value
+        // The landing dropped its batch and started the queued tick, whether or not that one has
+        // landed by now.
+        #expect(engine.subtitleDrainTickSerial == staleSerial &+ 1)
+        #expect(!engine.subtitleDrainTickRequested)
+        if let rerun = engine.subtitleDrainTickInFlight { await rerun.value }
+        #expect(!publications.stamps.contains { $0.serial == staleSerial },
+                "the stale batch published nothing")
         #expect(engine.subtitleCues.map(\.startTime) == [1, 3])
     }
 

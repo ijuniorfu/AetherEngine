@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.17.1] - 2026-09-26
+
 ### Fixed
 
 - **A session revived by the #93 item swap keeps its playhead until the fresh item lands there.**
